@@ -1,0 +1,62 @@
+/* doto-minimal.css - Minimal epub theme for doto Sphinx extension */
+/* Extremely lightweight for e-readers with limited CSS support */
+
+.doto {
+  border: 1px solid #ccc;
+  margin: 1em 0;
+  padding: 0.5em;
+  page-break-inside: avoid;
+}
+
+.doto-header {
+  font-weight: bold;
+  margin-bottom: 0.5em;
+}
+
+.doto-id {
+  font-family: monospace;
+}
+
+.doto-meta {
+  font-size: 0.9em;
+  color: #666;
+}
+
+.doto-body {
+  margin-top: 0.5em;
+}
+
+.doto-list {
+  margin: 1em 0;
+}
+
+.doto-task-list {
+  list-style: none;
+  padding: 0;
+}
+
+.doto-list-item {
+  padding: 0.25em 0;
+  border-bottom: 1px solid #eee;
+}
+
+.doto-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doto-table th,
+.doto-table td {
+  padding: 0.5em;
+  border-bottom: 1px solid #ddd;
+}
+
+.doto-summary {
+  margin: 1em 0;
+  padding: 0.5em;
+  background-color: #f8f8f8;
+}
+
+.doto-ref {
+  font-family: monospace;
+}

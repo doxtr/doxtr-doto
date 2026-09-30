@@ -1,0 +1,351 @@
+"""The main doto directive for creating tasks with structured metadata."""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING, ClassVar
+
+from docutils import nodes
+from docutils.parsers.rst import directives
+from sphinx.util.docutils import SphinxDirective
+
+from doxtr_doto.nodes import doto_node
+from doxtr_doto.constants import DONE_STATUS
+from doxtr_doto.date_utils import DotoDate
+from doxtr_doto.utils import parse_list
+
+if TYPE_CHECKING:
+    from sphinx.application import Sphinx
+
+
+def validate_id(value: str) -> str:
+    """Validate task ID format.
+    
+    Args:
+        value: Task ID to validate.
+        
+    Returns:
+        Validated ID string.
+        
+    Raises:
+        ValueError: If ID format is invalid.
+    """
+    value = value.strip()
+    if not value:
+        raise ValueError("Task ID cannot be empty")
+    # Allow alphanumeric, hyphens, underscores, and dots
+    if not re.match(r'^[\w\-\.]+$', value):
+        raise ValueError(
+            f"Invalid task ID '{value}'. "
+            "IDs may only contain letters, numbers, hyphens, underscores, and dots."
+        )
+    return value
+
+
+class DotoDirective(SphinxDirective):
+    """Directive for creating a task with structured metadata.
+    
+    Usage::
+    
+        .. doto:: Task title goes here
+           :id: TASK-001
+           :assignee: alice
+           :priority: high
+           :status: open
+           :due: 2026-08-15
+           :tags: security, backend
+           :depends-on: TASK-000
+           
+           Detailed description of the task.
+           Can include any reST content.
+    """
+    
+    has_content: ClassVar[bool] = True
+    required_arguments: ClassVar[int] = 1
+    optional_arguments: ClassVar[int] = 0
+    final_argument_whitespace: ClassVar[bool] = True
+    
+    option_spec: ClassVar[dict[str, object]] = {
+        "id": directives.unchanged,
+        "assignee": directives.unchanged,
+        "priority": directives.unchanged,
+        "status": directives.unchanged,
+        "due": directives.unchanged,
+        "tags": directives.unchanged,
+        "depends-on": directives.unchanged,
+        "progress": directives.unchanged,
+        "created": directives.unchanged,
+        "updated": directives.unchanged,
+    }
+    
+    def run(self) -> list[nodes.Node]:
+        """Process the directive and return document nodes.
+        
+        Returns:
+            List containing the doto_node with task data.
+        """
+        # Get title from argument
+        title = self.arguments[0].strip()
+        
+        # Generate or validate task ID
+        task_id = self._get_task_id()
+        
+        # Check required fields before processing
+        self._check_required_fields()
+        
+        # Parse and validate options
+        assignee = self.options.get("assignee", "").strip() or None
+        priority = self._get_priority()
+        status = self._get_status()
+        due = self._get_due_date()
+        tags = parse_list(self.options.get("tags", ""))
+        depends_on = parse_list(self.options.get("depends-on", ""))
+        progress = self._get_progress()
+        created = self._get_date_option("created")
+        updated = self._get_date_option("updated")
+        
+        # Check for overdue status using DotoDate
+        is_overdue = False
+        if due and status != DONE_STATUS:
+            is_overdue = due.is_overdue()
+        
+        # Get raw body content for storage
+        body_text = "\n".join(self.content) if self.content else ""
+        
+        # Create the node with all attributes
+        node = doto_node(
+            "",
+            task_id=task_id,
+            title=title,
+            assignee=assignee,
+            priority=priority,
+            status=status,
+            due=due.isoformat() if due else None,
+            tags=tags,
+            depends_on=depends_on,
+            progress=progress,
+            created=created.isoformat() if created else None,
+            updated=updated.isoformat() if updated else None,
+            is_overdue=is_overdue,
+            docname=self.env.docname,
+            lineno=self.lineno,
+            body=body_text,
+        )
+        
+        # Set source info for better error messages
+        node.source = self.get_source_info()[0]
+        node.line = self.lineno
+        
+        # Parse body content as reST and add as children
+        if self.content:
+            self.state.nested_parse(
+                self.content,
+                self.content_offset,
+                node,
+            )
+        
+        # Register task in the environment for collection
+        self._register_task(node)
+        
+        return [node]
+    
+    def _get_task_id(self) -> str:
+        """Get or generate the task ID.
+        
+        Returns:
+            Task ID string, either from options or auto-generated.
+        """
+        if "id" in self.options:
+            try:
+                return validate_id(self.options["id"])
+            except ValueError as e:
+                raise self.error(str(e)) from e
+        
+        # Auto-generate ID using {docname}-L{lineno} format
+        docname = self.env.docname
+        # Replace path separators with hyphens for cleaner IDs
+        docname_normalized = docname.replace("/", "-").replace("\\", "-")
+        prefix = getattr(self.config, "doto_id_prefix", "")
+        if prefix:
+            return f"{prefix}{docname_normalized}-L{self.lineno}"
+        return f"{docname_normalized}-L{self.lineno}"
+    
+    def _check_required_fields(self) -> None:
+        """Enforce doto_required_fields config.
+        
+        Raises:
+            self.error: If any required fields are missing.
+        """
+        from doxtr_doto.config import get_config
+        
+        required = get_config(self.env.app, "required_fields")
+        if not required:
+            return
+        
+        # Map config field names to the option/attribute names used in the directive
+        field_map = {
+            "assignee": self.options.get("assignee", "").strip(),
+            "priority": self.options.get("priority", "").strip(),
+            "status": self.options.get("status", "").strip(),
+            "due": self.options.get("due", "").strip(),
+            "tags": self.options.get("tags", "").strip(),
+            "depends-on": self.options.get("depends-on", "").strip(),
+            "id": self.options.get("id", "").strip(),
+        }
+        
+        missing = [f for f in required if not field_map.get(f)]
+        if missing:
+            raise self.error(
+                f"Task is missing required field(s): {', '.join(missing)}. "
+                f"Set via doto_required_fields in conf.py."
+            )
+    
+    def _get_priority(self) -> str:
+        """Get and validate priority option against config.
+        
+        Returns:
+            Validated priority string.
+        """
+        from doxtr_doto.config import get_config
+        
+        raw = self.options.get("priority", "").strip()
+        if not raw:
+            return get_config(self.env.app, "default_priority")
+        
+        valid = set(get_config(self.env.app, "priorities"))
+        if raw.lower() not in valid:
+            raise self.error(
+                f"Invalid priority '{raw}'. Must be one of: {', '.join(sorted(valid))}"
+            )
+        return raw.lower()
+    
+    def _get_status(self) -> str:
+        """Get and validate status option against config.
+        
+        Returns:
+            Validated status string.
+        """
+        from doxtr_doto.config import get_config
+        
+        raw = self.options.get("status", "").strip()
+        if not raw:
+            return get_config(self.env.app, "default_status")
+        
+        valid = set(get_config(self.env.app, "statuses"))
+        if raw.lower() not in valid:
+            raise self.error(
+                f"Invalid status '{raw}'. Must be one of: {', '.join(sorted(valid))}"
+            )
+        return raw.lower()
+    
+    def _get_due_date(self) -> DotoDate | None:
+        """Get and validate due date option.
+        
+        Returns:
+            Parsed DotoDate or None.
+        """
+        value = self.options.get("due", "").strip()
+        if not value:
+            return None
+        
+        try:
+            result = DotoDate.parse(value)
+            if result is None:
+                return None
+            return result
+        except (ValueError, TypeError) as e:
+            raise self.error(f"Invalid date format '{value}'. Expected YYYY-MM-DD.") from e
+    
+    def _get_date_option(self, name: str) -> DotoDate | None:
+        """Get and validate a date option by name.
+        
+        Args:
+            name: Option name (created or updated).
+            
+        Returns:
+            Parsed DotoDate or None.
+        """
+        value = self.options.get(name, "").strip()
+        if not value:
+            return None
+        
+        try:
+            result = DotoDate.parse(value)
+            if result is None:
+                return None
+            return result
+        except (ValueError, TypeError) as e:
+            raise self.error(f"Invalid {name} date: {e}") from e
+    
+    def _get_progress(self) -> int | None:
+        """Parse and validate progress option (0-100).
+        
+        Returns:
+            Integer progress value 0-100, or None if not set.
+            
+        Raises:
+            self.error: If progress is not a valid integer or out of range.
+        """
+        raw = self.options.get("progress", "").strip()
+        if not raw:
+            return None
+        try:
+            val = int(raw)
+        except ValueError:
+            raise self.error(f"Invalid progress '{raw}': must be an integer.")
+        if not 0 <= val <= 100:
+            raise self.error(f"Progress must be between 0 and 100, got {val}.")
+        return val
+    
+    def _register_task(self, node: doto_node) -> None:
+        """Register the task in the build environment and domain.
+        
+        This method checks for duplicate task IDs against the authoritative
+        DotoEnvironment store managed by DotoCollector. The actual task
+        registration is deferred to DotoCollector.process_doc(), which
+        creates DotoTask objects from the doto_node instances in the doctree.
+        
+        Also registers the task with the doto domain for cross-reference
+        resolution.
+        
+        Args:
+            node: The doto_node containing task data.
+        """
+        from doxtr_doto.collectors import get_doto_env
+        
+        task_id = node["task_id"]
+        title = node["title"]
+        doto_env = get_doto_env(self.env)
+        
+        # Duplicate-ID check against the authoritative collector store
+        if task_id in doto_env.all_tasks:
+            existing = doto_env.all_tasks[task_id]
+            existing_loc = f"{existing.docname}:{existing.lineno}"
+            raise self.error(
+                f"Duplicate task ID '{task_id}'. "
+                f"Already defined at {existing_loc}."
+            )
+        
+        # Register with domain for cross-reference resolution
+        domain = self.env.get_domain("doto")
+        domain.note_task(task_id, self.env.docname, self.lineno, title)
+        # Directive registration is intentionally deferred to DotoCollector.
+        # The node carries all data; the collector ingests it in process_doc().
+
+
+def setup(app: Sphinx) -> dict[str, object]:
+    """Set up the doto directive.
+    
+    Args:
+        app: Sphinx application instance.
+        
+    Returns:
+        Extension metadata.
+    """
+    app.add_directive("doto", DotoDirective)
+    
+    return {
+        "version": "0.1.0",
+        "parallel_read_safe": True,
+        "parallel_write_safe": True,
+    }

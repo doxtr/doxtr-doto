@@ -1,0 +1,99 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doxtr-doto"
+version = "0.1.0"
+description = "Documentation task management for Sphinx"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "doto contributors" }
+]
+keywords = ["sphinx", "documentation", "tasks", "todo", "project-management"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Plugins",
+    "Framework :: Sphinx :: Extension",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Documentation :: Sphinx",
+    "Topic :: Software Development :: Documentation",
+]
+dependencies = [
+    "sphinx>=7.0",
+]
+
+[project.optional-dependencies]
+cli = [
+    "click>=8.0",
+    "rich>=13.0",
+    "tomli>=2.0;python_version<'3.11'",
+    "tomli-w>=1.0",
+]
+templates = [
+    "jinja2>=3.0",
+]
+charts = [
+    "plotly>=5",
+    "kaleido",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "jinja2>=3.0",
+]
+all = [
+    "doxtr-doto[cli,templates,charts,dev]",
+]
+
+[project.scripts]
+doto = "doxtr_doto.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/doxtr/doxtr-doto"
+Documentation = "https://doxtr-doto.readthedocs.io"
+Repository = "https://github.com/doxtr/doxtr-doto"
+Issues = "https://github.com/doxtr/doxtr-doto/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doxtr_doto"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "DTZ", "T10", "ISC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --cov=doxtr_doto --cov-report=term-missing --cov-fail-under=80"

@@ -1,0 +1,59 @@
+{# doto-list-table.html - Template for doto task list as table #}
+{#
+  Context variables:
+    - tasks: List of DotoTask objects
+    - columns: List of column names to display
+    - column_labels: Dict mapping column names to display labels
+    - cell_data: Dict mapping (loop.index0, column) -> structured cell data
+                 (Feature 5, icon-mode aware). Each entry is a dict with:
+                   * value:      plain display value (autoescaped here)
+                   * icon_class: Font Awesome CSS class or None
+                   * show_icon:  emit the <i> icon element
+                   * show_text:  emit the visible text
+                   * sr_only:    render the text as an sr-only label (icon mode)
+                   * title:      value for the cell title="" attribute or None
+                   * href:       link target for id/title columns or None
+                 The template composes each cell from this data (no raw HTML is
+                 injected from Python), so a child theme can fully re-author the
+                 per-cell markup, matching the cards/simple templates.
+    - icon_mode: Effective icon mode ("icon" | "icon-text" | "text").
+
+  Available filters:
+    - row_classes: Get CSS classes for a task row
+    - column_value(col): Get the plain display value for a column (fallback)
+#}
+{%- macro render_cell(data) -%}
+{%- set inner %}
+{%- if data.show_icon and data.icon_class %}<i class="doto-list-icon {{ data.icon_class }}" aria-hidden="true"></i>{% endif -%}
+{%- if data.show_text and data.value %}{% if data.sr_only %}<span class="doto-sr-only">{{ data.value }}</span>{% else %}{% if data.show_icon and data.icon_class %} {% endif %}{{ data.value }}{% endif %}{% endif -%}
+{%- endset -%}
+{%- if data.href %}<a class="doto-list-link" href="{{ data.href }}"{% if data.title %} title="{{ data.title }}"{% endif %}>{{ inner | safe }}</a>
+{%- elif data.title %}<span title="{{ data.title }}">{{ inner | safe }}</span>
+{%- else %}{{ inner | safe }}{% endif -%}
+{%- endmacro -%}
+<table class="doto-table doto-list-icon-mode-{{ icon_mode | default('icon-text') }}">
+  <thead>
+    <tr>
+      {%- for col in columns %}
+      <th>{{ column_labels.get(col, col | title) }}</th>
+      {%- endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {%- for task in tasks %}
+    {%- set task_index = loop.index0 %}
+    <tr class="{{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}">
+      {%- for col in columns %}
+      <td class="doto-col-{{ col }}">
+        {%- if cell_data is defined and (task_index, col) in cell_data -%}
+        {{ render_cell(cell_data[(task_index, col)]) }}
+        {%- else -%}
+        {{ task | column_value(col) }}
+        {%- endif -%}
+      </td>
+      {%- endfor %}
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+</content>

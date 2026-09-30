@@ -1,0 +1,716 @@
+/* doto.css - Default theme for doto Sphinx extension */
+
+/* CSS Variables for theming */
+:root {
+  --doto-border-radius: 4px;
+  --doto-box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --doto-font-family: inherit;
+  
+  /* Priority colors */
+  --doto-priority-low: #6c757d;
+  --doto-priority-medium: #0d6efd;
+  --doto-priority-high: #fd7e14;
+  --doto-priority-critical: #dc3545;
+  
+  /* Status colors */
+  --doto-status-open: #198754;
+  --doto-status-in-progress: #0dcaf0;
+  --doto-status-blocked: #dc3545;
+  --doto-status-done: #6c757d;
+  
+  /* Overdue */
+  --doto-overdue-color: #dc3545;
+  --doto-overdue-bg: #fff5f5;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --doto-priority-low: #adb5bd;
+    --doto-priority-medium: #6ea8fe;
+    --doto-priority-high: #ffb86c;
+    --doto-priority-critical: #ff6b6b;
+    
+    --doto-status-open: #6dd094;
+    --doto-status-in-progress: #6edff6;
+    --doto-status-blocked: #ff6b6b;
+    --doto-status-done: #adb5bd;
+    
+    --doto-overdue-bg: #2d1f1f;
+  }
+}
+
+/* Base task container */
+.doto {
+  border: 1px solid #e9ecef;
+  border-radius: var(--doto-border-radius);
+  margin: 1rem 0;
+  padding: 0;
+  box-shadow: var(--doto-box-shadow);
+  font-family: var(--doto-font-family);
+  overflow: hidden;
+}
+
+/* Priority border styling */
+.doto.doto-priority-low {
+  border-left: 4px solid var(--doto-priority-low);
+}
+
+.doto.doto-priority-medium {
+  border-left: 4px solid var(--doto-priority-medium);
+}
+
+.doto.doto-priority-high {
+  border-left: 4px solid var(--doto-priority-high);
+}
+
+.doto.doto-priority-critical {
+  border-left: 4px solid var(--doto-priority-critical);
+}
+
+/* Overdue styling */
+.doto.doto-overdue {
+  background-color: var(--doto-overdue-bg);
+}
+
+/* Task header */
+.doto-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #e9ecef;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-header {
+    background-color: #2d3748;
+    border-bottom-color: #4a5568;
+  }
+}
+
+.doto-id {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #6c757d;
+  background-color: #e9ecef;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-id {
+    background-color: #4a5568;
+    color: #a0aec0;
+  }
+}
+
+.doto-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.doto-priority {
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  padding: 0.125rem 0.5rem;
+  border-radius: 3px;
+}
+
+.doto-priority-low .doto-priority {
+  background-color: var(--doto-priority-low);
+  color: white;
+}
+
+.doto-priority-medium .doto-priority {
+  background-color: var(--doto-priority-medium);
+  color: white;
+}
+
+.doto-priority-high .doto-priority {
+  background-color: var(--doto-priority-high);
+  color: white;
+}
+
+.doto-priority-critical .doto-priority {
+  background-color: var(--doto-priority-critical);
+  color: white;
+}
+
+/* Task metadata */
+.doto-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  color: #6c757d;
+  background-color: #fafafa;
+  border-bottom: 1px solid #e9ecef;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-meta {
+    background-color: #1a202c;
+    border-bottom-color: #4a5568;
+    color: #a0aec0;
+  }
+}
+
+.doto-assignee::before {
+  content: "👤 ";
+}
+
+.doto-due::before {
+  content: "📅 ";
+}
+
+.doto-due.doto-overdue {
+  color: var(--doto-overdue-color);
+  font-weight: 600;
+}
+
+.doto-due.doto-overdue::after {
+  content: " (OVERDUE)";
+  font-size: 0.75rem;
+}
+
+.doto-tags {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.doto-tag {
+  background-color: #e9ecef;
+  color: #495057;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  font-size: 0.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-tag {
+    background-color: #4a5568;
+    color: #e2e8f0;
+  }
+}
+
+/* Progress bar */
+.doto-progress {
+  height: 6px;
+  background: var(--doto-progress-track, #e9ecef);
+  border-radius: 3px;
+  margin-top: 4px;
+  min-width: 100px;
+  flex-basis: 100%;
+}
+
+.doto-progress-bar {
+  height: 100%;
+  background: var(--doto-progress-fill, #0d6efd);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-progress {
+    background: var(--doto-progress-track, #4a5568);
+  }
+  
+  .doto-progress-bar {
+    background: var(--doto-progress-fill, #6ea8fe);
+  }
+}
+
+/* Task body */
+.doto-body {
+  padding: 1rem;
+}
+
+.doto-body:empty {
+  display: none;
+}
+
+.doto-body > *:first-child {
+  margin-top: 0;
+}
+
+.doto-body > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Status badges */
+.doto-status-open .doto-header::after {
+  content: "OPEN";
+  font-size: 0.7rem;
+  font-weight: 600;
+  background-color: var(--doto-status-open);
+  color: white;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.doto-status-in-progress .doto-header::after {
+  content: "IN PROGRESS";
+  font-size: 0.7rem;
+  font-weight: 600;
+  background-color: var(--doto-status-in-progress);
+  color: #000;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.doto-status-blocked .doto-header::after {
+  content: "BLOCKED";
+  font-size: 0.7rem;
+  font-weight: 600;
+  background-color: var(--doto-status-blocked);
+  color: white;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.doto-status-done .doto-header::after {
+  content: "DONE";
+  font-size: 0.7rem;
+  font-weight: 600;
+  background-color: var(--doto-status-done);
+  color: white;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+/* Task list container */
+.doto-list {
+  margin: 1rem 0;
+}
+
+.doto-list-table {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.doto-list-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.doto-list-table th,
+.doto-list-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.doto-list-table th {
+  background-color: #f8f9fa;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-list-table th {
+    background-color: #2d3748;
+  }
+  .doto-list-table th,
+  .doto-list-table td {
+    border-bottom-color: #4a5568;
+  }
+}
+
+/* Cards layout */
+.doto-list-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+/* Cross-reference links */
+.doto-ref {
+  position: relative;
+  cursor: help;
+  color: var(--doto-priority-medium);
+  text-decoration: none;
+  font-family: monospace;
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+  background-color: #f0f4ff;
+  border-radius: 3px;
+}
+
+.doto-ref:hover {
+  text-decoration: underline;
+  background-color: #e0e8ff;
+}
+
+.doto-ref[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  background: #333;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 1000;
+  margin-bottom: 4px;
+}
+
+.doto-broken-ref {
+  color: var(--doto-priority-critical);
+  background-color: #fff0f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-ref {
+    background-color: #2d3748;
+  }
+  .doto-ref:hover {
+    background-color: #3d4a5c;
+  }
+  .doto-broken-ref {
+    background-color: #3d2020;
+  }
+}
+
+/* Summary statistics */
+.doto-summary {
+  margin: 1rem 0;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: var(--doto-border-radius);
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-summary {
+    background-color: #2d3748;
+  }
+}
+
+.doto-summary-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.doto-summary-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.doto-summary-stat {
+  text-align: center;
+  min-width: 80px;
+}
+
+.doto-summary-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.doto-summary-stat-label {
+  font-size: 0.85rem;
+  color: #6c757d;
+}
+
+/* Chart container */
+.doto-charts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-top: 1rem;
+  padding: 1rem 0;
+}
+
+/* SVG Chart styling */
+.doto-chart {
+  background-color: #ffffff;
+  border: 1px solid #e9ecef;
+  border-radius: var(--doto-border-radius);
+  padding: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-chart {
+    background-color: #1a202c;
+    border-color: #4a5568;
+  }
+}
+
+.doto-chart-title {
+  fill: #212529;
+}
+
+.doto-chart-value {
+  fill: #495057;
+  font-weight: 600;
+}
+
+.doto-chart-label {
+  fill: #6c757d;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-chart-title {
+    fill: #f8f9fa;
+  }
+  
+  .doto-chart-value {
+    fill: #e2e8f0;
+  }
+  
+  .doto-chart-label {
+    fill: #a0aec0;
+  }
+}
+
+.doto-chart-bar {
+  transition: opacity 0.2s ease;
+}
+
+.doto-chart-bar:hover {
+  opacity: 0.8;
+}
+
+/* Task list styles */
+.doto-task-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.doto-list-item {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #e9ecef;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.doto-list-item:last-child {
+  border-bottom: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-list-item {
+    border-bottom-color: #4a5568;
+  }
+}
+
+.doto-list-id {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #6c757d;
+  background-color: #e9ecef;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-list-id {
+    background-color: #4a5568;
+    color: #a0aec0;
+  }
+}
+
+.doto-list-title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.doto-list-priority {
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.doto-list-status {
+  font-size: 0.8rem;
+  color: #6c757d;
+}
+
+.doto-list-assignee {
+  font-size: 0.85rem;
+  color: #0d6efd;
+}
+
+.doto-list-empty,
+.doto-summary-empty {
+  color: #6c757d;
+  font-style: italic;
+  padding: 1rem;
+  text-align: center;
+}
+
+/* Table format */
+.doto-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.doto-table th,
+.doto-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.doto-table th {
+  background-color: #f8f9fa;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-table th {
+    background-color: #2d3748;
+  }
+  .doto-table th,
+  .doto-table td {
+    border-bottom-color: #4a5568;
+  }
+}
+
+.doto-col-id {
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+
+.doto-col-priority {
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+/* Card styles */
+.doto-card {
+  border: 1px solid #e9ecef;
+  border-radius: var(--doto-border-radius);
+  padding: 0.75rem;
+  background-color: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  .doto-card {
+    background-color: #2d3748;
+    border-color: #4a5568;
+  }
+}
+
+.doto-card.doto-priority-low {
+  border-left: 4px solid var(--doto-priority-low);
+}
+
+.doto-card.doto-priority-medium {
+  border-left: 4px solid var(--doto-priority-medium);
+}
+
+.doto-card.doto-priority-high {
+  border-left: 4px solid var(--doto-priority-high);
+}
+
+.doto-card.doto-priority-critical {
+  border-left: 4px solid var(--doto-priority-critical);
+}
+
+.doto-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.doto-card-id {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #6c757d;
+}
+
+.doto-card-priority {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  background-color: #e9ecef;
+}
+
+.doto-card-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.doto-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #6c757d;
+}
+
+.doto-card-assignee::before {
+  content: "👤 ";
+}
+
+.doto-card-due::before {
+  content: "📅 ";
+}
+
+.doto-card-status {
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+/* --- Feature 5: task-list icons + clickable links ---------------------- */
+
+/* Visually hidden text used to keep meaning accessible in "icon" mode when
+   Font Awesome is unavailable or for screen readers. */
+.doto-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Spacing for list-cell Font Awesome icons. */
+.doto-list-icon {
+  margin-right: 0.35em;
+}
+
+.doto-list-icon-mode-icon .doto-list-icon {
+  margin-right: 0;
+}
+
+/* Clickable task id/title links in list output. */
+.doto-list-link {
+  text-decoration: none;
+  color: inherit;
+  border-bottom: 1px dotted currentColor;
+}
+
+.doto-list-link:hover,
+.doto-list-link:focus {
+  text-decoration: underline;
+}
+
+/* Plotly static chart image sizing. */
+.doto-chart-image {
+  max-width: 100%;
+  height: auto;
+}

@@ -1,0 +1,14 @@
+{# task.tex.jinja - LaTeX template for doto tasks in doxtr-pdf-theme-core #}
+\begin{dotobox}[{{ title | default('Task') }}]
+\textbf{ID:} {{ task_id }}{% if priority %} \hfill \textbf{Priority:} \textcolor{{ '{' }}{{ priority_color | default('black') }}{{ '}' }}{{ '{' }}{{ priority }}{{ '}' }}{% endif %}
+
+{% if assignee or due %}
+{% if assignee %}\textbf{Assigned:} {{ assignee }}{% endif %}
+{% if assignee and due %} \hfill {% endif %}
+{% if due %}\textbf{Due:} {{ due }}{% endif %}
+
+{% endif %}
+{% if content %}
+{{ content }}
+{% endif %}
+\end{dotobox}

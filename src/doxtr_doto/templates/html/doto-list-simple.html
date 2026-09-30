@@ -1,0 +1,24 @@
+{# doto-list-simple.html - Template for doto task list as simple list #}
+{#
+  Context variables:
+    - tasks: List of DotoTask objects
+    - task_links: Dict mapping task.id -> href of the task box (Feature 5)
+    - icon_mode: Effective icon mode ("icon" | "icon-text" | "text")
+
+  Available filters:
+    - row_classes: Get CSS classes for a task
+#}
+<ul class="doto-task-list doto-list-icon-mode-{{ icon_mode | default('icon-text') }}">
+  {%- for task in tasks %}
+  <li class="doto-list-item {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}">
+    {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+    <a class="doto-list-link doto-list-id" href="{{ href }}">{{ task.id }}</a>
+    <a class="doto-list-link doto-list-title" href="{{ href }}">{{ task.title }}</a>
+    <span class="doto-list-priority">[{{ task.priority }}]</span>
+    <span class="doto-list-status">({{ task.status }})</span>
+    {%- if task.assignee %}
+    <span class="doto-list-assignee">@{{ task.assignee }}</span>
+    {%- endif %}
+  </li>
+  {%- endfor %}
+</ul>

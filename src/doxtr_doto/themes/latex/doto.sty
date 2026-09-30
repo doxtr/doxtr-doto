@@ -1,0 +1,351 @@
+% doto.sty - LaTeX styling for doto Sphinx extension
+% Default theme with tcolorbox
+%
+% All visual specifics (colors, box geometry, icon layout) live here as macros
+% so a child theme can override the look by shipping its own doto.sty (or
+% _doto/latex/*.sty). The Python LaTeX writer in nodes.py calls these macros and
+% avoids inlining visual constants where practical.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{doto}[2024/01/01 Doto task styling for Sphinx]
+
+% Required packages
+\RequirePackage{tcolorbox}
+\RequirePackage{xcolor}
+% NOTE: We intentionally do NOT load any Font Awesome package here.
+% Sphinx >= 9.0 selects and loads an icon package (fontawesome7/6/5) on its own,
+% and the different major versions are mutually incompatible (loading two of them
+% raises "Incompatible version of Font Awesome already loaded"). Loading a fixed
+% version here would clash with the host project / Sphinx choice. Instead we rely
+% on whichever Font Awesome the project provides and degrade gracefully when the
+% icon macros are absent (see \AtBeginDocument block below).
+\RequirePackage{hyperref}
+\RequirePackage{longtable}
+
+% Initialize tcolorbox libraries
+\tcbuselibrary{skins,breakable}
+
+% Define colors.
+%
+% SINGLE SOURCE OF TRUTH is src/doxtr_doto/constants.py (PRIORITY_COLORS /
+% STATUS_COLORS). These \definecolor values are the standalone-build mirror of
+% that palette and MUST be kept in sync with it by hand. When integrated with
+% doxtr-pdf-theme-core these are overridden by the semantic palette (see
+% integration/doxtr.py). Change constants.py first, then update the hex here.
+\definecolor{doto@low}{HTML}{6c757d}
+\definecolor{doto@medium}{HTML}{0d6efd}
+\definecolor{doto@high}{HTML}{fd7e14}
+\definecolor{doto@critical}{HTML}{dc3545}
+\definecolor{doto@open}{HTML}{198754}
+\definecolor{doto@inprogress}{HTML}{0dcaf0}
+\definecolor{doto@blocked}{HTML}{dc3545}
+\definecolor{doto@done}{HTML}{6c757d}
+\definecolor{doto@overdue}{HTML}{dc3545}
+\definecolor{doto@bg}{HTML}{f8f9fa}
+\definecolor{doto@border}{HTML}{dee2e6}
+% Title bar: dark slate with light text for strong contrast (fixes the old
+% white-on-white "empty box" bug where colback/colframe were both white).
+\definecolor{doto@titlebg}{HTML}{343a40}
+\definecolor{doto@titlefg}{HTML}{ffffff}
+% Body text color (visible on the light doto@bg background).
+\definecolor{doto@text}{HTML}{212529}
+\definecolor{doto@label}{HTML}{495057}
+
+% Base doto box style.
+%
+% The task title renders as a filled, readable title bar (dark background, light
+% bold text) attached to the top of the box. The metadata rows and reST body are
+% emitted by nodes.py into the box body and render as dark text on the light
+% background, so nothing is white-on-white.
+\newtcolorbox{dotobox}[1][]{
+  enhanced,
+  breakable,
+  colback=doto@bg,
+  colframe=doto@border,
+  coltext=doto@text,
+  boxrule=0.5pt,
+  arc=2pt,
+  left=8pt,
+  right=8pt,
+  top=6pt,
+  bottom=6pt,
+  fonttitle=\bfseries,
+  colbacktitle=doto@titlebg,
+  coltitle=doto@titlefg,
+  title={#1},
+}
+
+% Priority-colored doto boxes. These keep the same readable title bar but recolor
+% the frame / a thick left rule per priority.
+\newtcolorbox{dotoboxlow}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@low, coltext=doto@text,
+  boxrule=0.5pt, leftrule=3pt, arc=2pt,
+  left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries,
+  colbacktitle=doto@titlebg, coltitle=doto@titlefg,
+  title={#1},
+}
+
+\newtcolorbox{dotoboxmedium}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@medium, coltext=doto@text,
+  boxrule=0.5pt, leftrule=3pt, arc=2pt,
+  left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries,
+  colbacktitle=doto@titlebg, coltitle=doto@titlefg,
+  title={#1},
+}
+
+\newtcolorbox{dotoboxhigh}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@high, coltext=doto@text,
+  boxrule=0.5pt, leftrule=3pt, arc=2pt,
+  left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries,
+  colbacktitle=doto@titlebg, coltitle=doto@titlefg,
+  title={#1},
+}
+
+\newtcolorbox{dotoboxcritical}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@critical, coltext=doto@text,
+  boxrule=0.5pt, leftrule=3pt, arc=2pt,
+  left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries,
+  colbacktitle=doto@titlebg, coltitle=doto@titlefg,
+  title={#1},
+}
+
+% Doto list environment
+\newenvironment{dotolist}{%
+  \begin{itemize}
+}{%
+  \end{itemize}
+}
+
+% Doto summary environment
+\newenvironment{dotosummary}{%
+  \begin{center}
+  \begin{tabular}{lccc}
+  \hline
+  \textbf{Status} & \textbf{Count} & \textbf{Priority} & \textbf{Count} \\
+  \hline
+}{%
+  \hline
+  \end{tabular}
+  \end{center}
+}
+
+% Task metadata formatting
+\newcommand{\dotoid}[1]{\texttt{\small #1}}
+\newcommand{\dotopriority}[1]{\textsc{\footnotesize #1}}
+\newcommand{\dotostatus}[1]{\textit{\footnotesize #1}}
+
+% --- Font Awesome graceful degradation -----------------------------------
+% Emit the Font Awesome glyph if the macro is available (whatever FA version
+% Sphinx/the project loaded), otherwise emit nothing. This block runs at
+% begin-document because Sphinx loads its chosen icon package after the
+% preamble is processed. Every FA macro referenced anywhere in this file MUST
+% have a \providecommand here so the build still works with no FA package.
+\AtBeginDocument{%
+  \providecommand{\faUser}{}%
+  \providecommand{\faCalendar}{}%
+  \providecommand{\faCalendarDay}{\faCalendar}%
+  \providecommand{\faCalendarPlus}{\faCalendar}%
+  \providecommand{\faCalendarCheck}{\faCalendar}%
+  \providecommand{\faTag}{}%
+  \providecommand{\faTags}{\faTag}%
+  \providecommand{\faFlag}{}%
+  \providecommand{\faExclamation}{}%
+  \providecommand{\faCircleDot}{}%
+}
+
+% Stacked icon: a Font Awesome icon on top with a small text label underneath.
+% #1 = FA icon macro (e.g. \faCalendarDay), #2 = label text.
+% Degrades to just the label when no FA package is loaded (the icon macros
+% expand to empty via the \providecommand block above).
+\newcommand{\dotostackedicon}[2]{%
+  \begingroup
+  \setlength{\fboxsep}{0pt}%
+  \begin{tabular}[t]{@{}c@{}}%
+    {\normalsize #1}\\[-1pt]%
+    {\scriptsize\color{doto@label}#2}%
+  \end{tabular}%
+  \endgroup
+}
+
+% Per-field stacked-icon macros. #1 = value shown next to the stacked icon.
+% These pick the semantically appropriate FA icon for each field.
+\newcommand{\dotometaassignee}[1]{\dotostackedicon{\faUser}{Assignee}~{\color{doto@text}#1}}
+\newcommand{\dotometadue}[1]{\dotostackedicon{\faCalendarDay}{Due}~{\color{doto@text}#1}}
+\newcommand{\dotometacreated}[1]{\dotostackedicon{\faCalendarPlus}{Created}~{\color{doto@text}#1}}
+\newcommand{\dotometaupdated}[1]{\dotostackedicon{\faCalendarCheck}{Updated}~{\color{doto@text}#1}}
+\newcommand{\dotometatags}[1]{\dotostackedicon{\faTags}{Tags}~{\color{doto@text}#1}}
+\newcommand{\dotometapriority}[1]{\dotostackedicon{\faFlag}{Priority}~#1}
+\newcommand{\dotometastatus}[1]{\dotostackedicon{\faCircleDot}{Status}~{\color{doto@text}#1}}
+\newcommand{\dotometaid}[1]{\dotostackedicon{\faExclamation}{ID}~{\color{doto@text}\texttt{\small #1}}}
+
+% Inline metadata label (dark, readable on the light body background).
+\newcommand{\dotometalabel}[1]{{\color{doto@label}\textbf{#1}}}
+
+% Priority value colored by severity. #1 = priority key (low/medium/high/critical),
+% #2 = display text.
+\newcommand{\dotopriorityvalue}[2]{\textcolor{doto@#1}{\textbf{#2}}}
+
+% Legacy simple helpers (kept for backwards compatibility with child themes).
+\newcommand{\dotoassignee}[1]{\faUser\ #1}
+\newcommand{\dotodue}[1]{\faCalendarDay\ #1}
+\newcommand{\dototag}[1]{\faTag\ \texttt{\small #1}}
+
+% Overdue styling
+\newcommand{\dotooverdue}[1]{\textcolor{doto@overdue}{\textbf{#1} (OVERDUE)}}
+
+% Task reference command. The matching target label is emitted by the task box
+% (see \dotolabel below and visit_doto_node_latex).
+\newcommand{\dotoref}[1]{\hyperref[#1]{\texttt{#1}}}
+
+% --- Feature 5: task-list icons + clickable links -------------------------
+% Additional Font Awesome fallbacks used by the icon-mode task-list renderers.
+% Each degrades to empty (or a sensible base icon) when no FA package is loaded,
+% so "icon"/"icon-text" list modes never break a build lacking Font Awesome.
+\AtBeginDocument{%
+  \providecommand{\faHashtag}{}%
+  \providecommand{\faLink}{}%
+  \providecommand{\faSpinner}{\faCircleDot}%
+  \providecommand{\faBan}{}%
+  \providecommand{\faCircleCheck}{\faCircleDot}%
+  \providecommand{\faRegularCircle}{\faCircleDot}%
+  \providecommand{\faAngleDown}{}%
+  \providecommand{\faAngleUp}{}%
+  \providecommand{\faAnglesUp}{\faAngleUp}%
+  \providecommand{\faEquals}{}%
+}
+
+% Clickable task-list link. #1 = the fully-qualified label expression (already a
+% \detokenize{...} produced by the Python writer, matching the \dotolabel target
+% emitted by the task box), #2 = display text. Reuses the same hyperref anchor
+% mechanism as \dotoref rather than duplicating link logic.
+\newcommand{\dotolistlink}[2]{\hyperref[#1]{#2}}
+
+% Emit a hyperlink anchor for a task box so that :doto:`ID` cross-references
+% resolve. #1 must be the fully-qualified detokenized label the resolver targets
+% (i.e. \detokenize{<docname>:<task_id>}); nodes.py builds that string.
+\newcommand{\dotolabel}[1]{\phantomsection\label{#1}}
+
+% --- F1: native-LaTeX summary charts --------------------------------------
+% The PDF doto-summary charts are drawn natively here (no browser/kaleido) so a
+% real chart always renders. charts.py::generate_summary_charts_latex emits
+% \begin{dotochart}{title} ... \end{dotochart} containing bar rows, a pie, a
+% progress bar, or a burndown line. A child theme can \renewcommand these to
+% restyle the charts without touching Python.
+%
+% tikz is required for the pie and burndown line. Loading tikz twice is safe
+% (\usepackage/\RequirePackage are idempotent), and doxtr-pdf-theme-core also
+% loads it; guard so we only require it when it is not already present.
+\@ifpackageloaded{tikz}{}{\RequirePackage{tikz}}
+
+% Chart palette colors reused by the drawing macros (kept in sync with the
+% Python chart palette in charts.py: CHART_* constants and constants.py).
+\definecolor{doto@chartaxis}{HTML}{CCCCCC}
+\definecolor{doto@chartaccent}{HTML}{0D6EFD}
+\definecolor{doto@charttrack}{HTML}{E9ECEF}
+\definecolor{doto@chartfill}{HTML}{198754}
+
+% Chart container: a centered, titled block. #1 = chart title.
+\newenvironment{dotochart}[1]{%
+  \par\smallskip
+  \begin{center}%
+  \ifx\relax#1\relax\else{\bfseries #1}\par\smallskip\fi
+}{%
+  \end{center}%
+  \par\smallskip
+}
+
+% One horizontal bar row. #1 = label, #2 = value, #3 = max value, #4 = HTML hex
+% color (no leading #). Drawn with tikz so the width scales as value/max.
+\newcommand{\dotochartbar}[4]{%
+  \begingroup
+  \definecolor{doto@thisbar}{HTML}{#4}%
+  \pgfmathsetmacro{\dotobarwidth}{6.0*#2/#3}%
+  \noindent
+  \begin{tikzpicture}[baseline]
+    \node[anchor=east, font=\small] at (0,0.16) {#1};
+    \fill[doto@thisbar] (0.1,0) rectangle (\dotobarwidth+0.1,0.32);
+    \node[anchor=west, font=\small] at (\dotobarwidth+0.25,0.16) {#2};
+  \end{tikzpicture}\par\vspace{2pt}%
+  \endgroup
+}
+
+% Pie chart environment. Contains a sequence of \dotochartslice calls. Uses a
+% running percent accumulator so each wedge starts where the previous ended,
+% plus a slice index so legend entries stack downward.
+\newcounter{doto@pieacc}
+\newcounter{doto@pieidx}
+\newenvironment{dotochartpie}{%
+  \setcounter{doto@pieacc}{0}%
+  \setcounter{doto@pieidx}{0}%
+  \begin{tikzpicture}[scale=1.0]%
+}{%
+  \end{tikzpicture}%
+}
+
+% One pie wedge. #1 = HTML hex color, #2 = value, #3 = integer percent,
+% #4 = label. Draws the wedge from the accumulated angle and advances it, then
+% prints a legend entry stacked below previous ones to the right of the pie.
+\newcommand{\dotochartslice}[4]{%
+  \definecolor{doto@thisslice}{HTML}{#1}%
+  \pgfmathsetmacro{\dotostartangle}{\value{doto@pieacc}*3.6}%
+  \addtocounter{doto@pieacc}{#3}%
+  \pgfmathsetmacro{\dotoendangle}{\value{doto@pieacc}*3.6}%
+  \ifnum#3>0
+    \fill[doto@thisslice] (0,0) -- (\dotostartangle:1.4cm)
+      arc[start angle=\dotostartangle, end angle=\dotoendangle, radius=1.4cm]
+      -- cycle;%
+  \fi
+  % Legend: color swatch + label stacked downward.
+  \pgfmathsetmacro{\dotolegendy}{1.2 - 0.42*\value{doto@pieidx}}%
+  \fill[doto@thisslice] (2.0cm, \dotolegendy cm) rectangle
+    +(0.28cm, 0.28cm);%
+  \node[anchor=west, font=\scriptsize] at (2.4cm, {\dotolegendy cm + 0.14cm})
+    {#4 (#2, #3\%)};%
+  \stepcounter{doto@pieidx}%
+}
+
+% Progress bar. #1 = integer percent, #2 = done count, #3 = total count.
+\newcommand{\dotochartprogress}[3]{%
+  \begingroup
+  \pgfmathsetmacro{\dotoprogw}{7.0*#1/100}%
+  \noindent
+  \begin{tikzpicture}
+    \fill[doto@charttrack, rounded corners=3pt] (0,0) rectangle (7,0.55);
+    \ifnum#1>0
+      \fill[doto@chartfill, rounded corners=3pt] (0,0) rectangle (\dotoprogw,0.55);
+    \fi
+    \node[anchor=center] at (3.5,0.9) {\small #1\% complete (#2/#3)};
+  \end{tikzpicture}%
+  \endgroup
+}
+
+% Burndown line. #1 = space-separated x/y pairs normalized to [0,1] (x/y),
+% #2 = max count (for the y-axis top label), #3 = start date label,
+% #4 = end date label.
+\newcommand{\dotochartline}[4]{%
+  \begingroup
+  \begin{tikzpicture}[x=6cm, y=2.4cm]
+    % Axes.
+    \draw[doto@chartaxis] (0,0) -- (0,1);
+    \draw[doto@chartaxis] (0,0) -- (1,0);
+    % Y-axis labels.
+    \node[anchor=east, font=\scriptsize] at (0,0) {0};
+    \node[anchor=east, font=\scriptsize] at (0,1) {#2};
+    % X-axis labels.
+    \node[anchor=north, font=\scriptsize] at (0,-0.02) {#3};
+    \node[anchor=north, font=\scriptsize] at (1,-0.02) {#4};
+    % Data line.
+    \draw[doto@chartaccent, thick] plot coordinates {#1};
+  \end{tikzpicture}%
+  \endgroup
+}
+
+\endinput

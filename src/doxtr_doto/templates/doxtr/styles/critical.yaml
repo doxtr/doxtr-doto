@@ -1,0 +1,9 @@
+# Critical priority style overrides for doto tasks
+doto:
+  box:
+    border: "#dc3545"
+    border-left-color: "#dc3545"
+    background: "#dc354505"
+  priority:
+    color: "#dc3545"
+    background: "#dc354520"

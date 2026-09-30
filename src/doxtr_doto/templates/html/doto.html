@@ -1,0 +1,46 @@
+{# doto.html - Template for single doto task card #}
+{# 
+  Context variables:
+    - task_id: Task identifier string
+    - title: Task title
+    - priority: Priority level (low, medium, high, critical)
+    - status: Task status (open, in-progress, blocked, done)
+    - assignee: Assigned person (optional)
+    - due: Due date string (optional)
+    - tags: List of tag strings (optional)
+    - progress: Progress percentage 0-100 (optional)
+    - is_overdue: Boolean indicating if task is past due
+    - classes: Pre-computed CSS classes string
+#}
+<div class="{{ classes }}" id="{{ task_id | escape_id }}">
+  <div class="doto-header">
+    <span class="doto-id">{{ task_id }}</span>
+    <span class="doto-title">{{ title }}</span>
+    <span class="doto-priority">{{ priority }}</span>
+    {%- if status %}
+    <span class="doto-status">{{ status }}</span>
+    {%- endif %}
+  </div>
+  <div class="doto-meta">
+    {%- if assignee %}
+    <span class="doto-assignee">{{ assignee }}</span>
+    {%- endif %}
+    {%- if due %}
+    <span class="doto-due{% if is_overdue %} doto-overdue{% endif %}">{{ due }}</span>
+    {%- endif %}
+    {%- if tags %}
+    <span class="doto-tags">
+      {%- for tag in tags %}
+      <span class="doto-tag">{{ tag }}</span>
+      {%- endfor %}
+    </span>
+    {%- endif %}
+    {%- if progress is not none %}
+    <div class="doto-progress" title="{{ progress | int }}% complete">
+      <div class="doto-progress-bar" style="width:{{ progress | int }}%"></div>
+    </div>
+    {%- endif %}
+  </div>
+  <div class="doto-body">
+  </div>
+</div>

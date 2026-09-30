@@ -1,0 +1,51 @@
+% doto-minimal.sty - Minimal LaTeX theme for doto Sphinx extension
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{doto-minimal}[2024/01/01 Doto minimal styling for Sphinx]
+
+\RequirePackage{xcolor}
+\RequirePackage{hyperref}
+
+% Minimal colors
+\definecolor{doto@accent}{HTML}{0d6efd}
+\definecolor{doto@muted}{HTML}{6c757d}
+
+% Simple task environment using quote
+\newenvironment{dotobox}[1][]{%
+  \begin{quote}
+  \textbf{#1}\\
+}{%
+  \end{quote}
+}
+
+% Priority variants (all same in minimal)
+\newenvironment{dotoboxlow}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
+\newenvironment{dotoboxmedium}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
+\newenvironment{dotoboxhigh}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
+\newenvironment{dotoboxcritical}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
+
+% List environment
+\newenvironment{dotolist}{%
+  \begin{itemize}
+}{%
+  \end{itemize}
+}
+
+% Summary environment
+\newenvironment{dotosummary}{%
+  \begin{description}
+}{%
+  \end{description}
+}
+
+% Minimal formatting commands
+\newcommand{\dotoid}[1]{\texttt{#1}}
+\newcommand{\dotopriority}[1]{[#1]}
+\newcommand{\dotostatus}[1]{(#1)}
+\newcommand{\dotoassignee}[1]{@#1}
+\newcommand{\dotodue}[1]{Due: #1}
+\newcommand{\dototag}[1]{\##1}
+\newcommand{\dotooverdue}[1]{\textbf{#1 -- OVERDUE}}
+\newcommand{\dotoref}[1]{\hyperref[#1]{\texttt{#1}}}
+
+\endinput

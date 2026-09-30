@@ -1,0 +1,8 @@
+# Low priority style overrides for doto tasks
+doto:
+  box:
+    border: "#6c757d"
+    border-left-color: "#6c757d"
+  priority:
+    color: "#6c757d"
+    background: "#6c757d10"

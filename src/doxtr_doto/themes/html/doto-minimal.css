@@ -1,0 +1,112 @@
+/* doto-minimal.css - Minimal theme for doto Sphinx extension */
+
+/* CSS Variables */
+:root {
+  --doto-text-color: #333;
+  --doto-border-color: #ddd;
+  --doto-muted-color: #666;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --doto-text-color: #e0e0e0;
+    --doto-border-color: #444;
+    --doto-muted-color: #999;
+  }
+}
+
+/* Base task */
+.doto {
+  border-left: 3px solid var(--doto-border-color);
+  padding: 0.5rem 0 0.5rem 1rem;
+  margin: 1rem 0;
+}
+
+.doto.doto-priority-high,
+.doto.doto-priority-critical {
+  border-left-color: #dc3545;
+}
+
+.doto.doto-status-done {
+  opacity: 0.6;
+}
+
+/* Header */
+.doto-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.doto-id {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: var(--doto-muted-color);
+}
+
+.doto-title {
+  font-weight: 500;
+}
+
+.doto-priority {
+  font-size: 0.75rem;
+  color: var(--doto-muted-color);
+  text-transform: uppercase;
+}
+
+/* Meta */
+.doto-meta {
+  font-size: 0.85rem;
+  color: var(--doto-muted-color);
+  margin-bottom: 0.5rem;
+}
+
+.doto-meta > span {
+  margin-right: 1rem;
+}
+
+.doto-due.doto-overdue {
+  color: #dc3545;
+}
+
+.doto-tags {
+  display: inline;
+}
+
+.doto-tag {
+  margin-right: 0.25rem;
+}
+
+.doto-tag::before {
+  content: "#";
+}
+
+/* Body */
+.doto-body {
+  color: var(--doto-text-color);
+}
+
+.doto-body:empty {
+  display: none;
+}
+
+/* Lists */
+.doto-list {
+  margin: 1rem 0;
+}
+
+/* References */
+.doto-ref {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.doto-broken-ref {
+  color: #dc3545;
+}
+
+/* Summary */
+.doto-summary {
+  margin: 1rem 0;
+}

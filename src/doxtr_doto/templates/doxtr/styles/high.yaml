@@ -1,0 +1,8 @@
+# High priority style overrides for doto tasks
+doto:
+  box:
+    border: "#fd7e14"
+    border-left-color: "#fd7e14"
+  priority:
+    color: "#fd7e14"
+    background: "#fd7e1410"

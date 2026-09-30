@@ -1,0 +1,16 @@
+# Minimal style for doto tasks in doxtr-pdf-theme-core
+doto:
+  box:
+    background: "white"
+    border: "#cccccc"
+    border-width: "0.5pt"
+    radius: "0pt"
+    padding: "6pt"
+  header:
+    font-size: "10pt"
+    font-weight: "bold"
+  meta:
+    font-size: "8pt"
+    color: "#888888"
+  body:
+    font-size: "10pt"

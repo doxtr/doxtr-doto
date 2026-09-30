@@ -1,0 +1,36 @@
+{# doto-list-cards.html - Template for doto task list as cards #}
+{#
+  Context variables:
+    - tasks: List of DotoTask objects
+    - task_links: Dict mapping task.id -> href of the task box (Feature 5)
+    - icon_mode: Effective icon mode ("icon" | "icon-text" | "text")
+
+  Available filters:
+    - row_classes: Get CSS classes for a task
+#}
+{%- for task in tasks %}
+{%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+<div class="doto-card {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %} doto-list-icon-mode-{{ icon_mode | default('icon-text') }}">
+  <div class="doto-card-header">
+    <a class="doto-list-link doto-card-id" href="{{ href }}">{{ task.id }}</a>
+    <span class="doto-card-priority">{{ task.priority }}</span>
+  </div>
+  <a class="doto-list-link doto-card-title" href="{{ href }}">{{ task.title }}</a>
+  <div class="doto-card-meta">
+    {%- if task.assignee %}
+    <span class="doto-card-assignee">{{ task.assignee }}</span>
+    {%- endif %}
+    {%- if task.due %}
+    <span class="doto-card-due{% if task.is_overdue() %} doto-overdue{% endif %}">{{ task.due }}</span>
+    {%- endif %}
+    <span class="doto-card-status">{{ task.status }}</span>
+  </div>
+  {%- if task.tags %}
+  <div class="doto-card-tags">
+    {%- for tag in task.tags %}
+    <span class="doto-tag">{{ tag }}</span>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+</div>
+{%- endfor %}

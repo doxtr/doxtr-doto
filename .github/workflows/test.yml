@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build "doxtr-pdf-theme-core>=1.1.9"
+    - name: Build package
+      run: python -m build
+    - name: Install package with all extras
+      # The circular-import check imports the click-based CLI, so cli extras
+      # must be present. `all` pulls in cli, templates, and dev.
+      run: pip install -e ".[all]" || pip install -e ".[dev]" || pip install -e .
+    - name: Install test dependencies
+      run: pip install pytest pytest-cov sphinxcontrib-plantuml "doxtr-pdf-theme-core>=1.1.9"
+    - name: Check for circular imports
+      run: python scripts/check_imports.py
+    - name: Run unit tests with coverage
+      # No plantuml binary required — all subprocess calls are monkeypatched.
+      # Coverage flags (--cov, --cov-report, --cov-fail-under) come from
+      # pyproject.toml [tool.pytest.ini_options] addopts (single source of truth).
+      run: python -m pytest tests/
+    - name: Verify import
+      run: python -c "import doxtr_doto; print(doxtr_doto.__version__)"

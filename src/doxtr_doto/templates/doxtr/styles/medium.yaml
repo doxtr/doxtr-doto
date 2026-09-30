@@ -1,0 +1,8 @@
+# Medium priority style overrides for doto tasks
+doto:
+  box:
+    border: "#0d6efd"
+    border-left-color: "#0d6efd"
+  priority:
+    color: "#0d6efd"
+    background: "#0d6efd10"

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-import os
-from datetime import date
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import click
 
-from doxtr_doto.cli.commands.add import parse_relative_date, open_editor
+from doxtr_doto.cli.commands.add import open_editor, parse_relative_date
 from doxtr_doto.cli.completion import (
-    complete_task_id,
     complete_assignee,
     complete_date,
-    complete_tag,
-    complete_status,
     complete_priority,
+    complete_status,
+    complete_tag,
+    complete_task_id,
 )
 from doxtr_doto.cli.validators import validate_priority, validate_status
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
+    from doxtr_doto.sync.json_store import JsonTaskStore
 
 
 def _is_task_overdue(task: dict[str, Any]) -> bool:
@@ -38,15 +39,15 @@ def _is_task_overdue(task: dict[str, Any]) -> bool:
     status = task.get("status", "open")
     if status == "done":
         return False
-    try:
-        due_date = date.fromisoformat(due)
-        return due_date < date.today()
-    except (ValueError, TypeError):
-        return False
+    # Route through date_utils so a time-bearing due (``YYYY-MM-DDTHH:MM``)
+    # parses and compares correctly instead of crashing date.fromisoformat.
+    from doxtr_doto.date_utils import is_overdue as _is_overdue
+
+    return _is_overdue(due)
 
 
 def _build_updates(
-    task: dict[str, Any],
+    task: Mapping[str, Any],
     title: str | None,
     assignee: str | None,
     priority: str | None,
@@ -60,6 +61,7 @@ def _build_updates(
     remove_depends: str | None,
     body: str | None,
     edit: bool,
+    raci: str | None = None,
 ) -> dict[str, Any]:
     """Build the updates dictionary for a task.
 
@@ -78,6 +80,7 @@ def _build_updates(
         remove_depends: Dependencies to remove (comma-separated) or None.
         body: New body or None.
         edit: Whether to open editor for body (only for single task).
+        raci: RACI string to merge into existing RACI, or None.
 
     Returns:
         Dictionary of updates to apply.
@@ -139,6 +142,15 @@ def _build_updates(
     elif body is not None:
         updates["body"] = body
 
+    # Handle RACI (merge with existing)
+    if raci is not None:
+        from doxtr_doto.raci import merge_raci, parse_raci
+
+        new_raci = parse_raci(raci)
+        if new_raci:
+            existing_raci = task.get("raci")
+            updates["raci"] = merge_raci(existing_raci, new_raci)
+
     return updates
 
 
@@ -160,15 +172,36 @@ def _build_updates(
     shell_complete=complete_status,
     help="New status.",
 )
-@click.option("--due", "-d", shell_complete=complete_date, help="New due date (YYYY-MM-DD or relative: +7d, friday).")
+@click.option(
+    "--due",
+    "-d",
+    shell_complete=complete_date,
+    help="New due date (YYYY-MM-DD or relative: +7d, friday), optional time: 'friday 16:00'.",
+)
 @click.option("--clear-due", is_flag=True, help="Clear the due date.")
 @click.option("--add-tags", shell_complete=complete_tag, help="Tags to add (comma-separated).")
-@click.option("--remove-tags", shell_complete=complete_tag, help="Tags to remove (comma-separated).")
-@click.option("--depends-on", "-D", shell_complete=complete_task_id, help="Set dependency task IDs (comma-separated).")
-@click.option("--add-depends", shell_complete=complete_task_id, help="Add dependency task IDs (comma-separated).")
-@click.option("--remove-depends", shell_complete=complete_task_id, help="Remove dependency task IDs (comma-separated).")
+@click.option(
+    "--remove-tags", shell_complete=complete_tag, help="Tags to remove (comma-separated)."
+)
+@click.option(
+    "--depends-on",
+    "-D",
+    shell_complete=complete_task_id,
+    help="Set dependency task IDs (comma-separated).",
+)
+@click.option(
+    "--add-depends",
+    shell_complete=complete_task_id,
+    help="Add dependency task IDs (comma-separated).",
+)
+@click.option(
+    "--remove-depends",
+    shell_complete=complete_task_id,
+    help="Remove dependency task IDs (comma-separated).",
+)
 @click.option("--body", "-b", help="New task description/body.")
 @click.option("--edit", "-e", is_flag=True, help="Open $EDITOR for body.")
+@click.option("--raci", help='Merge RACI roles (e.g. "consulted charlie, informed diana").')
 # Filter options for bulk updates
 @click.option(
     "--filter-status",
@@ -231,6 +264,7 @@ def update(
     remove_depends: str | None,
     body: str | None,
     edit: bool,
+    raci: str | None,
     filter_status: str | None,
     filter_priority: str | None,
     filter_assignee: str | None,
@@ -270,20 +304,20 @@ def update(
     store = ctx.store
 
     # Determine if this is a single-task or bulk update
-    has_filters = any([
-        filter_status,
-        filter_priority,
-        filter_assignee,
-        filter_tags,
-        filter_overdue,
-    ])
+    has_filters = any(
+        [
+            filter_status,
+            filter_priority,
+            filter_assignee,
+            filter_tags,
+            filter_overdue,
+        ]
+    )
 
     # Single task update mode
     if task_id:
         if has_filters or all_tasks:
-            raise click.UsageError(
-                "Cannot use filter options or --all when TASK_ID is provided."
-            )
+            raise click.UsageError("Cannot use filter options or --all when TASK_ID is provided.")
         _update_single_task(
             ctx=ctx,
             store=store,
@@ -303,14 +337,13 @@ def update(
             body=body,
             edit=edit,
             json_output=json_output,
+            raci=raci,
         )
         return
 
     # Bulk update mode
     if not has_filters and not all_tasks:
-        raise click.UsageError(
-            "Either TASK_ID or filter options (with --all) must be provided."
-        )
+        raise click.UsageError("Either TASK_ID or filter options (with --all) must be provided.")
 
     if not all_tasks:
         raise click.UsageError(
@@ -319,9 +352,7 @@ def update(
         )
 
     if edit:
-        raise click.UsageError(
-            "The --edit flag cannot be used with bulk updates."
-        )
+        raise click.UsageError("The --edit flag cannot be used with bulk updates.")
 
     # Parse filter values
     status_list = [s.strip() for s in filter_status.split(",")] if filter_status else None
@@ -384,6 +415,7 @@ def update(
         remove_depends=remove_depends,
         body=body,
         edit=False,
+        raci=raci,
     )
 
     if not sample_updates:
@@ -407,7 +439,9 @@ def update(
             formatter.print(f"  - {tid}")
         if len(task_ids) > 10:
             formatter.print(f"  ... and {len(task_ids) - 10} more")
-        formatter.print(f"\nUpdates to apply: {', '.join(f'{k}={v}' for k, v in sample_updates.items())}")
+        formatter.print(
+            f"\nUpdates to apply: {', '.join(f'{k}={v}' for k, v in sample_updates.items())}"
+        )
         if not click.confirm("\nProceed with bulk update?"):
             formatter.print("Aborted.")
             return
@@ -435,6 +469,7 @@ def update(
             remove_depends=remove_depends,
             body=body,
             edit=False,
+            raci=raci,
         )
         if updates:
             store.update_task(tid, updates)
@@ -443,13 +478,23 @@ def update(
     # Save changes
     if updated_ids:
         store.save()
+        from doxtr_doto.cli import known_names
+        from doxtr_doto.raci import raci_names
+
+        known_names.remember_task_names(
+            sample_updates.get("assignee"), sample_updates.get("tags", [])
+        )
+        for rn in raci_names(sample_updates.get("raci")):
+            known_names.remember_task_names(rn, [])
 
     # Output results
     if json_output:
-        formatter.print_json({
-            "updated": updated_ids,
-            "count": len(updated_ids),
-        })
+        formatter.print_json(
+            {
+                "updated": updated_ids,
+                "count": len(updated_ids),
+            }
+        )
     else:
         formatter.print_success(f"Updated {len(updated_ids)} task(s).")
         for tid in updated_ids:
@@ -457,9 +502,9 @@ def update(
 
 
 def _update_single_task(
-    ctx: "DotoContext",
-    store,
-    formatter,
+    ctx: DotoContext,
+    store: JsonTaskStore,
+    formatter: OutputFormatter,
     task_id: str,
     title: str | None,
     assignee: str | None,
@@ -475,10 +520,19 @@ def _update_single_task(
     body: str | None,
     edit: bool,
     json_output: bool,
+    raci: str | None = None,
 ) -> None:
     """Update a single task by ID (original behavior)."""
+    from doxtr_doto.cli.id_resolver import resolve_task_ref
+
+    resolved = resolve_task_ref(ctx, task_id)
+    if resolved is None:
+        raise click.ClickException(f"Task '{task_id}' not found.")
+    store = resolved.store
+    local_id = resolved.task_id
+
     # Get task
-    task = store.get_task(task_id)
+    task = store.get_task(local_id)
     if task is None:
         raise click.ClickException(f"Task '{task_id}' not found.")
 
@@ -498,6 +552,7 @@ def _update_single_task(
         remove_depends=remove_depends,
         body=body,
         edit=edit,
+        raci=raci,
     )
 
     # Check if any updates
@@ -505,18 +560,25 @@ def _update_single_task(
         raise click.UsageError("No updates specified.")
 
     # Apply updates
-    store.update_task(task_id, updates)
+    store.update_task(local_id, updates)
     store.save()
+    from doxtr_doto.cli import known_names
+    from doxtr_doto.raci import raci_names
+
+    known_names.remember_task_names(updates.get("assignee"), updates.get("tags", []))
+    for rn in raci_names(updates.get("raci")):
+        known_names.remember_task_names(rn, [])
 
     # Display result
     formatter.print_success(f"Updated task {task_id}")
     if not formatter.quiet:
-        updated_task = store.get_task(task_id)
-        formatter.format_task_detail({"id": task_id, **updated_task})
+        updated_task = store.get_task(local_id)
+        if updated_task is not None:
+            formatter.format_task_detail({"id": task_id, **updated_task})
 
 
 def _handle_dry_run(
-    formatter,
+    formatter: OutputFormatter,
     tasks: list[dict[str, Any]],
     sample_updates: dict[str, Any],
     json_output: bool,
@@ -525,12 +587,14 @@ def _handle_dry_run(
     task_ids = [t["id"] for t in tasks]
 
     if json_output:
-        formatter.print_json({
-            "dry_run": True,
-            "would_update": task_ids,
-            "count": len(task_ids),
-            "updates": sample_updates,
-        })
+        formatter.print_json(
+            {
+                "dry_run": True,
+                "would_update": task_ids,
+                "count": len(task_ids),
+                "updates": sample_updates,
+            }
+        )
     else:
         formatter.print(f"\nDry run: Would update {len(tasks)} task(s):")
         for task in tasks:
@@ -538,6 +602,6 @@ def _handle_dry_run(
             task_title = task.get("title", "")[:50]
             task_status = task.get("status", "")
             formatter.print(f"  - {tid}: [{task_status}] {task_title}")
-        formatter.print(f"\nUpdates that would be applied:")
+        formatter.print("\nUpdates that would be applied:")
         for key, value in sample_updates.items():
             formatter.print(f"  {key}: {value}")

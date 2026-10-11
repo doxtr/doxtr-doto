@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -22,8 +22,8 @@ from doxtr_doto.cli.completion import (
 from doxtr_doto.cli.validators import validate_priority, validate_status
 
 if TYPE_CHECKING:
+    from doxtr_doto.cli.config import DotoConfig
     from doxtr_doto.cli.main import DotoContext
-    from doxtr_doto.config import DotoConfig
 
 
 # Maximum number of recurring task occurrences allowed in a single series.
@@ -38,14 +38,26 @@ def _add_months(d: date, months: int) -> date:
     year = d.year + (month - 1) // 12
     month = (month - 1) % 12 + 1
     # Handle edge cases like Jan 31 + 1 month
-    days_in_month = [31, 28 + (1 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 0),
-                     31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    days_in_month = [
+        31,
+        28 + (1 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 0),
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ]
     day = min(d.day, days_in_month[month - 1])
     return date(year, month, day)
 
 
 def parse_relative_date(date_str: str) -> str:
-    """Parse a relative date string into YYYY-MM-DD format.
+    """Parse a relative date (optionally with a time) into storage format.
 
     Supports:
     - YYYY-MM-DD (passed through)
@@ -56,6 +68,61 @@ def parse_relative_date(date_str: str) -> str:
     - monday, tuesday, etc. (next occurrence, could be today)
     - next-monday, next-tuesday, etc. (always in the future)
     - next-week, end-of-week, end-of-month
+
+    An optional clock time may be appended to any of the above, space- or
+    ``T``-separated (``friday 16:00``, ``+2d 16h``, ``2026-08-15T16:00:31``).
+    The time is parsed/validated via :mod:`doxtr_doto.date_utils` and the result
+    is returned in canonical storage format (``YYYY-MM-DD`` or
+    ``YYYY-MM-DDTHH:MM[:SS]``), so date-only inputs are 100% unchanged.
+
+    Args:
+        date_str: Date string to parse (optionally with a time suffix).
+
+    Returns:
+        Date in ``YYYY-MM-DD`` format, or ``YYYY-MM-DDTHH:MM[:SS]`` when a time
+        was supplied.
+    """
+    from doxtr_doto.date_utils import normalize_date, parse_time_token
+
+    raw = date_str.strip()
+    # Split off an optional time suffix (space- or ``T``-separated) so the
+    # relative-date resolution below only ever sees the date portion. A ``T``
+    # takes precedence; otherwise a trailing space-separated token that parses
+    # as a time is treated as the time (so multi-word relatives like
+    # ``next-week`` are unaffected -- they contain no space).
+    date_part = raw
+    time_suffix = ""
+    if "T" in raw:
+        date_part, _, time_token = raw.partition("T")
+        time_token = time_token.strip()
+        if time_token:
+            time_suffix = parse_time_token(time_token).strftime("%H:%M:%S")
+    elif " " in raw:
+        head, _, tail = raw.rpartition(" ")
+        tail = tail.strip()
+        try:
+            parsed_time = parse_time_token(tail)
+        except ValueError:
+            parsed_time = None
+        if parsed_time is not None:
+            date_part = head.strip()
+            time_suffix = parsed_time.strftime("%H:%M:%S")
+
+    resolved_date = _parse_relative_date_only(date_part.strip())
+
+    if not time_suffix:
+        return resolved_date
+    # Re-join through date_utils so the stored form is canonical (seconds are
+    # dropped when zero: ``16:00`` not ``16:00:00``).
+    combined = normalize_date(f"{resolved_date}T{time_suffix}")
+    return combined if combined is not None else resolved_date
+
+
+def _parse_relative_date_only(date_str: str) -> str:
+    """Parse a relative date string (no time) into YYYY-MM-DD format.
+
+    This is the date-only core of :func:`parse_relative_date`; the public
+    wrapper peels off any time suffix before delegating here.
 
     Args:
         date_str: Date string to parse.
@@ -155,11 +222,11 @@ def parse_relative_date(date_str: str) -> str:
         # Try to parse as ISO format date
         parsed = date.fromisoformat(date_str)
         return parsed.isoformat()
-    except ValueError:
+    except ValueError as err:
         raise ValueError(
             f"Invalid date: '{date_str}'. Use YYYY-MM-DD or relative format "
             "(+7d, +2w, +1m, today, tomorrow, monday, next-monday, etc.)"
-        )
+        ) from err
 
 
 def _find_editor() -> str | None:
@@ -224,7 +291,7 @@ def open_editor(initial_content: str = "") -> str:
 
 
 def _prompt_missing_fields(
-    config: "DotoConfig",
+    config: DotoConfig,
     title: str | None,
     assignee: str | None,
     priority: str | None,
@@ -290,7 +357,7 @@ def _resolve_title_from_editor(body: str | None) -> tuple[str, str | None]:
 
 
 def _build_task_data(
-    config: "DotoConfig",
+    config: DotoConfig,
     title: str,
     assignee: str | None,
     priority: str | None,
@@ -300,11 +367,18 @@ def _build_task_data(
     depends_on: str | None,
     body: str | None,
     rst_file: str | None,
+    raci: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the task data dict from parsed inputs.
 
     Applies config defaults for unset priority/status/assignee.
     Parses comma-separated tags and depends_on into lists.
+
+    RACI defaults: when no explicit ``raci`` is given, the configured current
+    user (``config.user``, resolved against the environment with a ``$USER``
+    fallback) is auto-assigned as both Responsible and Accountable so a task
+    added by a user records them without any interactive prompting. An
+    explicit ``raci`` string overrides this entirely.
 
     Args:
         config: DotoConfig instance with defaults.
@@ -317,12 +391,26 @@ def _build_task_data(
         depends_on: Comma-separated dependency IDs or None.
         body: Task body/description or None.
         rst_file: Target RST file for Sphinx mode or None.
+        raci: Explicit RACI string (``"responsible alice, ..."``) or None.
 
     Returns:
         Task data dict ready for storage.
     """
+    from doxtr_doto.cli.config import resolve_user
+    from doxtr_doto.raci import parse_raci
+
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     dep_list = [d.strip() for d in depends_on.split(",") if d.strip()] if depends_on else []
+
+    raci_data: dict[str, list[str]] | None
+    if raci is not None:
+        raci_data = parse_raci(raci) or None
+    else:
+        current_user = resolve_user(config.user)
+        if current_user:
+            raci_data = {"responsible": [current_user], "accountable": [current_user]}
+        else:
+            raci_data = None
 
     task_data: dict[str, Any] = {
         "title": title,
@@ -333,6 +421,7 @@ def _build_task_data(
         "tags": tag_list,
         "depends_on": dep_list,
         "body": body,
+        "raci": raci_data,
     }
 
     if rst_file:
@@ -364,19 +453,40 @@ def _build_task_data(
     shell_complete=complete_status,
     help="Task status.",
 )
-@click.option("--due", "-d", shell_complete=complete_date, help="Due date (YYYY-MM-DD or relative: +7d, friday).")
+@click.option(
+    "--due",
+    "-d",
+    shell_complete=complete_date,
+    help="Due date (YYYY-MM-DD or relative: +7d, friday), optional time: 'friday 16:00'.",
+)
 @click.option("--tags", "-t", shell_complete=complete_tag, help="Comma-separated tags.")
-@click.option("--depends-on", "-D", shell_complete=complete_task_id, help="Comma-separated dependency task IDs.")
+@click.option(
+    "--depends-on",
+    "-D",
+    shell_complete=complete_task_id,
+    help="Comma-separated dependency task IDs.",
+)
 @click.option("--file", "-f", "rst_file", help="Target RST file (Sphinx mode only).")
 @click.option("--body", "-b", help="Task description/body.")
 @click.option("--edit", "-e", is_flag=True, help="Open $EDITOR for body.")
 @click.option("--interactive", "-i", is_flag=True, help="Interactive prompt mode.")
-@click.option("--repeat", "-r", "repeat_pattern", shell_complete=complete_recurrence,
-              help="Recurrence pattern (e.g., 'every friday', 'every 2 weeks on monday').")
-@click.option("--until", "-u", "until_date", shell_complete=complete_date,
-              help="End date for recurring tasks (required with --repeat).")
+@click.option(
+    "--repeat",
+    "-r",
+    "repeat_pattern",
+    shell_complete=complete_recurrence,
+    help="Recurrence pattern (e.g., 'every friday', 'every 2 weeks on monday').",
+)
+@click.option(
+    "--until",
+    "-u",
+    "until_date",
+    shell_complete=complete_date,
+    help="End date for recurring tasks (required with --repeat).",
+)
 @click.option("--dry-run", "-n", is_flag=True, help="Show output without writing.")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
+@click.option("--raci", help='RACI roles (e.g. "responsible alice, accountable bob").')
 @click.pass_obj
 def add(
     ctx: DotoContext,
@@ -396,6 +506,7 @@ def add(
     until_date: str | None,
     dry_run: bool,
     json_output: bool,
+    raci: str | None,
 ) -> None:
     """Add a new task.
 
@@ -438,9 +549,17 @@ def add(
 
     if repeat_pattern:
         _add_recurring_tasks(
-            ctx=ctx, title_template=title_str, repeat_pattern=repeat_pattern,
-            until_date=until_date, assignee=assignee, priority=priority,
-            status=status, tags=tags, body=body, rst_file=rst_file, dry_run=dry_run,
+            ctx=ctx,
+            title_template=title_str,
+            repeat_pattern=repeat_pattern,
+            until_date=until_date,
+            assignee=assignee,
+            priority=priority,
+            status=status,
+            tags=tags,
+            body=body,
+            rst_file=rst_file,
+            dry_run=dry_run,
         )
         return
 
@@ -448,7 +567,9 @@ def add(
         raise click.UsageError("--until requires --repeat for recurring tasks.")
 
     if not task_id:
-        task_id = ctx.store.generate_id(prefix=ctx.config.id_prefix, sequential=ctx.config.id_sequential)
+        task_id = ctx.store.generate_id(
+            prefix=ctx.config.id_prefix, sequential=ctx.config.id_sequential
+        )
 
     if ctx.store.get_task(task_id):
         raise click.ClickException(f"Task with ID '{task_id}' already exists.")
@@ -460,7 +581,17 @@ def add(
         body = open_editor()
 
     task_data = _build_task_data(
-        ctx.config, title_str, assignee, priority, status, due, tags, depends_on, body, rst_file
+        ctx.config,
+        title_str,
+        assignee,
+        priority,
+        status,
+        due,
+        tags,
+        depends_on,
+        body,
+        rst_file,
+        raci=raci,
     )
 
     if dry_run:
@@ -470,13 +601,19 @@ def add(
 
     ctx.store.add_task(task_id, task_data)
     ctx.store.save()
+    from doxtr_doto.cli import known_names
+    from doxtr_doto.raci import raci_names
+
+    known_names.remember_task_names(task_data.get("assignee"), task_data.get("tags", []))
+    for rn in raci_names(task_data.get("raci")):
+        known_names.remember_task_names(rn, [])
     formatter.print_success(f"Added task {task_id}")
     if not formatter.quiet:
         formatter.format_task_detail({"id": task_id, **task_data})
 
 
 def _add_recurring_tasks(
-    ctx: "DotoContext",
+    ctx: DotoContext,
     title_template: str,
     repeat_pattern: str,
     until_date: str | None,
@@ -490,9 +627,9 @@ def _add_recurring_tasks(
 ) -> None:
     """Create a recurring task series."""
     from doxtr_doto.cli.recurrence import (
-        parse_recurrence,
-        generate_occurrences,
         format_date_for_title,
+        generate_occurrences,
+        parse_recurrence,
     )
 
     formatter = ctx.formatter
@@ -507,7 +644,7 @@ def _add_recurring_tasks(
     try:
         pattern = parse_recurrence(repeat_pattern)
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
 
     # Parse dates
     start = date.today()
@@ -515,7 +652,9 @@ def _add_recurring_tasks(
     end = date.fromisoformat(end_str)
 
     if end <= start:
-        raise click.ClickException(f"End date ({end_str}) must be after today ({start.isoformat()}).")
+        raise click.ClickException(
+            f"End date ({end_str}) must be after today ({start.isoformat()})."
+        )
 
     # Generate occurrences
     occurrences = list(generate_occurrences(pattern, start, end))
@@ -525,7 +664,7 @@ def _add_recurring_tasks(
 
     # Check occurrence limit to prevent accidental mass task creation
     # Get configurable limit from config, falling back to module default
-    max_occurrences = getattr(config, 'max_occurrences', MAX_OCCURRENCES)
+    max_occurrences = getattr(config, "max_occurrences", MAX_OCCURRENCES)
     if len(occurrences) > max_occurrences:
         raise click.ClickException(
             f"Recurring task would create {len(occurrences)} tasks "
@@ -540,7 +679,7 @@ def _add_recurring_tasks(
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
 
     # Build task defaults (shared by all tasks in series)
-    task_defaults = {
+    task_defaults: dict[str, Any] = {
         "assignee": assignee or config.default_assignee or None,
         "priority": priority or config.default_priority,
         "status": status or config.default_status,
@@ -566,7 +705,7 @@ def _add_recurring_tasks(
         formatter.print(f"  Title:   {title_template}")
         formatter.print("")
         formatter.print("Occurrences:")
-        for i, occ in enumerate(occurrences[:10]):
+        for occ in occurrences[:10]:
             if "{date}" in title_template:
                 title = title_template.replace("{date}", format_date_for_title(occ))
             else:
@@ -616,6 +755,10 @@ def _add_recurring_tasks(
 
     store.save()
 
+    from doxtr_doto.cli import known_names
+
+    known_names.remember_task_names(task_defaults.get("assignee"), task_defaults.get("tags", []))
+
     formatter.print_success(f"Created series {series_id} with {len(task_ids)} tasks")
     formatter.print(f"  Pattern: {pattern.describe()}")
     formatter.print(f"  Until:   {end_str}")
@@ -625,6 +768,8 @@ def _add_recurring_tasks(
         for task_id in task_ids[:5]:
             task = store.get_task(task_id)
             if task:
-                formatter.print(f"  {task_id}: {task.get('title', '')} (due: {task.get('due', '')})")
+                formatter.print(
+                    f"  {task_id}: {task.get('title', '')} (due: {task.get('due', '')})"
+                )
         if len(task_ids) > 5:
             formatter.print(f"  ... and {len(task_ids) - 5} more")

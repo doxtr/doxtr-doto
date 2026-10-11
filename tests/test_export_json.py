@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 
 class TestExportJsonDisabled:
     """Tests for JSON export when disabled."""
@@ -174,7 +172,7 @@ class TestExportJsonArchivedTasks:
 
         # Create an RST file that references a task (to ensure build processes tasks)
         tasks_rst = doto_srcdir / "tasks.rst"
-        tasks_rst.write_text('''
+        tasks_rst.write_text("""
 Tasks
 =====
 
@@ -184,13 +182,11 @@ Tasks
    :priority: medium
 
    An active task.
-''')
+""")
 
         # Update index.rst to include tasks
         index_rst = doto_srcdir / "index.rst"
-        index_rst.write_text(
-            index_rst.read_text() + "\n   tasks\n"
-        )
+        index_rst.write_text(index_rst.read_text() + "\n   tasks\n")
 
         app = make_app(
             srcdir=doto_srcdir,

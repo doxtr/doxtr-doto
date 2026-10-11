@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+
 import pytest
-from pathlib import Path
 from click.testing import CliRunner
 
 
@@ -20,69 +20,73 @@ def delete_project(tmp_path):
     # Create project structure
     doto_dir = tmp_path / ".doto"
     doto_dir.mkdir()
-    
+
     # Create config
     config_file = tmp_path / ".doto.toml"
-    config_file.write_text('''
+    config_file.write_text("""
 [doto]
 json_file = ".doto/tasks.json"
 id_prefix = "TEST"
-''')
-    
+""")
+
     # Create tasks.json with test data
     json_file = doto_dir / "tasks.json"
-    json_file.write_text(json.dumps({
-        "version": 3,
-        "updated": "2026-07-26T10:00:00",
-        "tasks": {
-            "TASK-001": {
-                "title": "Active task",
-                "status": "open",
-                "priority": "high",
-                "assignee": "alice",
-                "tags": ["feature"],
-                "archived": False,
-            },
-            "TASK-002": {
-                "title": "Done task",
-                "status": "done",
-                "priority": "medium",
-                "assignee": "bob",
-                "tags": ["bug"],
-                "archived": False,
-            },
-            "TASK-003": {
-                "title": "Archived task",
-                "status": "done",
-                "priority": "low",
-                "assignee": "alice",
-                "tags": [],
-                "archived": True,
-                "archived_on": "2026-07-01T00:00:00",
-            },
-            "TASK-004": {
-                "title": "Series task",
-                "status": "open",
-                "priority": "medium",
-                "assignee": None,
-                "tags": [],
-                "archived": False,
-            },
-        },
-        "series": {
-            "SER-001": {
-                "title_template": "Weekly review",
-                "pattern": {},
-                "start_date": "2026-01-01",
-                "end_date": "2026-12-31",
-                "task_ids": ["TASK-004"],
-                "task_defaults": {},
-                "created": "2026-01-01T00:00:00",
-                "updated": "2026-01-01T00:00:00",
+    json_file.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    "TASK-001": {
+                        "title": "Active task",
+                        "status": "open",
+                        "priority": "high",
+                        "assignee": "alice",
+                        "tags": ["feature"],
+                        "archived": False,
+                    },
+                    "TASK-002": {
+                        "title": "Done task",
+                        "status": "done",
+                        "priority": "medium",
+                        "assignee": "bob",
+                        "tags": ["bug"],
+                        "archived": False,
+                    },
+                    "TASK-003": {
+                        "title": "Archived task",
+                        "status": "done",
+                        "priority": "low",
+                        "assignee": "alice",
+                        "tags": [],
+                        "archived": True,
+                        "archived_on": "2026-07-01T00:00:00",
+                    },
+                    "TASK-004": {
+                        "title": "Series task",
+                        "status": "open",
+                        "priority": "medium",
+                        "assignee": None,
+                        "tags": [],
+                        "archived": False,
+                    },
+                },
+                "series": {
+                    "SER-001": {
+                        "title_template": "Weekly review",
+                        "pattern": {},
+                        "start_date": "2026-01-01",
+                        "end_date": "2026-12-31",
+                        "task_ids": ["TASK-004"],
+                        "task_defaults": {},
+                        "created": "2026-01-01T00:00:00",
+                        "updated": "2026-01-01T00:00:00",
+                    }
+                },
             }
-        }
-    }))
-    
+        )
+    )
+
     return tmp_path
 
 
@@ -93,10 +97,9 @@ class TestDotoDelete:
         """Test deleting a single task with --force flag."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001", "--force"]
+        )
 
         assert result.exit_code == 0
         assert "Deleted task TASK-001" in result.output
@@ -111,10 +114,9 @@ class TestDotoDelete:
         """Test deleting multiple tasks at once."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001", "TASK-002", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001", "TASK-002", "--force"]
+        )
 
         assert result.exit_code == 0
         assert "Deleted task TASK-001" in result.output
@@ -130,10 +132,9 @@ class TestDotoDelete:
         """Test deleting a task that doesn't exist."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "NONEXISTENT", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "NONEXISTENT", "--force"]
+        )
 
         assert result.exit_code == 0
         assert "not found" in result.output
@@ -143,10 +144,9 @@ class TestDotoDelete:
         from doxtr_doto.cli.main import cli
 
         # Decline confirmation
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001"
-        ], input="n\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001"], input="n\n"
+        )
 
         assert result.exit_code == 0
         assert "Aborted" in result.output
@@ -160,10 +160,9 @@ class TestDotoDelete:
         """Test delete with user confirmation."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001"
-        ], input="y\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001"], input="y\n"
+        )
 
         assert result.exit_code == 0
 
@@ -175,10 +174,9 @@ class TestDotoDelete:
         """Test delete with --dry-run flag."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001", "--dry-run"]
+        )
 
         assert result.exit_code == 0
         assert "Dry run" in result.output
@@ -194,10 +192,9 @@ class TestDotoDelete:
         """Test delete with JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001", "--force", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001", "--force", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -208,10 +205,9 @@ class TestDotoDelete:
         """Test delete with JSON output and dry run."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-001", "--dry-run", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-001", "--dry-run", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -222,10 +218,7 @@ class TestDotoDelete:
         """Test delete without specifying any tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(delete_project), "delete"])
 
         assert result.exit_code == 1
         assert "No tasks specified" in result.output
@@ -234,10 +227,9 @@ class TestDotoDelete:
         """Test delete shows warning for tasks in a series."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-004", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-004", "--dry-run"]
+        )
 
         assert result.exit_code == 0
         assert "Warning" in result.output
@@ -248,10 +240,9 @@ class TestDotoDelete:
         """Test delete shows series warning in JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "TASK-004", "--dry-run", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "TASK-004", "--dry-run", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -268,10 +259,18 @@ class TestDotoDeleteFilters:
         """Test delete with --filter-status."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-status", "done", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-status",
+                "done",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "TASK-002" in result.output
@@ -282,10 +281,18 @@ class TestDotoDeleteFilters:
         """Test delete with --filter-priority."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-priority", "high", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-priority",
+                "high",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -295,10 +302,18 @@ class TestDotoDeleteFilters:
         """Test delete with --filter-assignee."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-assignee", "alice", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-assignee",
+                "alice",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -310,10 +325,18 @@ class TestDotoDeleteFilters:
         """Test delete with --filter-tags."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-tags", "bug", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-tags",
+                "bug",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "TASK-002" in result.output
@@ -323,10 +346,10 @@ class TestDotoDeleteFilters:
         """Test delete with --filter-archived."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-archived", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(delete_project), "delete", "--filter-archived", "--all", "--dry-run"],
+        )
 
         assert result.exit_code == 0
         assert "TASK-003" in result.output
@@ -338,10 +361,9 @@ class TestDotoDeleteFilters:
         """Test that filter-based delete requires --all flag."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-status", "done"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(delete_project), "delete", "--filter-status", "done"]
+        )
 
         assert result.exit_code == 1
         assert "--all flag is required" in result.output
@@ -350,10 +372,10 @@ class TestDotoDeleteFilters:
         """Test filter-based delete with --force."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-archived", "--all", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(delete_project), "delete", "--filter-archived", "--all", "--force"],
+        )
 
         assert result.exit_code == 0
         assert "Deleted task TASK-003" in result.output
@@ -366,10 +388,18 @@ class TestDotoDeleteFilters:
         """Test filter-based delete with no matches."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-status", "blocked", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-status",
+                "blocked",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "No tasks matched" in result.output
@@ -378,13 +408,20 @@ class TestDotoDeleteFilters:
         """Test delete with multiple filters combined."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete",
-            "--filter-status", "open",
-            "--filter-priority", "high",
-            "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-status",
+                "open",
+                "--filter-priority",
+                "high",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         # Only TASK-001 matches both open and high priority
@@ -395,10 +432,18 @@ class TestDotoDeleteFilters:
         """Test filter-based delete with JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(delete_project),
-            "delete", "--filter-archived", "--all", "--force", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(delete_project),
+                "delete",
+                "--filter-archived",
+                "--all",
+                "--force",
+                "--json",
+            ],
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)

@@ -1,4 +1,5 @@
 """Tests for HTML output of doto directives."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ import pytest
 @pytest.fixture
 def sphinx_build(tmp_path):
     """Helper fixture that runs a minimal Sphinx HTML build."""
+
     def _build(rst_content: str, conf_extra: str = "") -> tuple[Path, str]:
         """
         Build a single RST page and return (outdir, page_html).
@@ -23,15 +25,12 @@ def sphinx_build(tmp_path):
         out = tmp_path / "out"
 
         (src / "conf.py").write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            + conf_extra + "\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\n" + conf_extra + "\n"
         )
-        (src / "index.rst").write_text(
-            "Test\n====\n\n" + rst_content
-        )
+        (src / "index.rst").write_text("Test\n====\n\n" + rst_content)
 
         from sphinx.application import Sphinx
+
         app = Sphinx(
             srcdir=str(src),
             confdir=str(src),
@@ -53,10 +52,7 @@ def sphinx_build(tmp_path):
 def test_doto_node_renders_task_id(sphinx_build):
     """A doto directive produces an element with the task id."""
     _, html = sphinx_build(
-        ".. doto:: My Task\n"
-        "   :id: TASK-001\n"
-        "   :priority: high\n"
-        "   :status: open\n"
+        ".. doto:: My Task\n   :id: TASK-001\n   :priority: high\n   :status: open\n"
     )
     assert 'id="TASK-001"' in html
     assert "TASK-001" in html
@@ -65,20 +61,14 @@ def test_doto_node_renders_task_id(sphinx_build):
 
 def test_doto_node_priority_class(sphinx_build):
     """Priority is reflected as a CSS class on the container div."""
-    _, html = sphinx_build(
-        ".. doto:: Critical task\n"
-        "   :id: TASK-002\n"
-        "   :priority: critical\n"
-    )
+    _, html = sphinx_build(".. doto:: Critical task\n   :id: TASK-002\n   :priority: critical\n")
     assert "doto-priority-critical" in html
 
 
 def test_doto_node_low_priority_class(sphinx_build):
     """Low priority gets the correct CSS class."""
     _, html = sphinx_build(
-        ".. doto:: Task with low priority\n"
-        "   :id: TASK-low\n"
-        "   :priority: low\n"
+        ".. doto:: Task with low priority\n   :id: TASK-low\n   :priority: low\n"
     )
     assert "doto-priority-low" in html
 
@@ -86,9 +76,7 @@ def test_doto_node_low_priority_class(sphinx_build):
 def test_doto_node_medium_priority_class(sphinx_build):
     """Medium priority gets the correct CSS class."""
     _, html = sphinx_build(
-        ".. doto:: Task with medium priority\n"
-        "   :id: TASK-medium\n"
-        "   :priority: medium\n"
+        ".. doto:: Task with medium priority\n   :id: TASK-medium\n   :priority: medium\n"
     )
     assert "doto-priority-medium" in html
 
@@ -96,9 +84,7 @@ def test_doto_node_medium_priority_class(sphinx_build):
 def test_doto_node_high_priority_class(sphinx_build):
     """High priority gets the correct CSS class."""
     _, html = sphinx_build(
-        ".. doto:: Task with high priority\n"
-        "   :id: TASK-high\n"
-        "   :priority: high\n"
+        ".. doto:: Task with high priority\n   :id: TASK-high\n   :priority: high\n"
     )
     assert "doto-priority-high" in html
 
@@ -106,30 +92,20 @@ def test_doto_node_high_priority_class(sphinx_build):
 def test_doto_node_status_class(sphinx_build):
     """Status is reflected as a CSS class on the container div."""
     _, html = sphinx_build(
-        ".. doto:: In progress task\n"
-        "   :id: TASK-003\n"
-        "   :status: in-progress\n"
+        ".. doto:: In progress task\n   :id: TASK-003\n   :status: in-progress\n"
     )
     assert "doto-status-in-progress" in html
 
 
 def test_doto_node_overdue_class(sphinx_build):
     """An overdue task gets the doto-overdue CSS class."""
-    _, html = sphinx_build(
-        ".. doto:: Overdue\n"
-        "   :id: TASK-004\n"
-        "   :due: 2000-01-01\n"
-    )
+    _, html = sphinx_build(".. doto:: Overdue\n   :id: TASK-004\n   :due: 2000-01-01\n")
     assert "doto-overdue" in html
 
 
 def test_doto_node_not_overdue_for_future_date(sphinx_build):
     """A task with a future due date does not get doto-overdue class."""
-    _, html = sphinx_build(
-        ".. doto:: Future task\n"
-        "   :id: TASK-005\n"
-        "   :due: 2099-12-31\n"
-    )
+    _, html = sphinx_build(".. doto:: Future task\n   :id: TASK-005\n   :due: 2099-12-31\n")
     # The task should exist but not be marked overdue
     assert 'id="TASK-005"' in html
     # Check that doto-overdue is not in the task's container
@@ -140,10 +116,7 @@ def test_doto_node_not_overdue_for_future_date(sphinx_build):
 def test_doto_node_done_not_overdue(sphinx_build):
     """A done task with past due date is not marked overdue."""
     _, html = sphinx_build(
-        ".. doto:: Completed task\n"
-        "   :id: TASK-006\n"
-        "   :status: done\n"
-        "   :due: 2000-01-01\n"
+        ".. doto:: Completed task\n   :id: TASK-006\n   :status: done\n   :due: 2000-01-01\n"
     )
     # The task should have done status class
     assert "doto-status-done" in html
@@ -154,22 +127,14 @@ def test_doto_node_done_not_overdue(sphinx_build):
 
 def test_doto_node_renders_assignee(sphinx_build):
     """A doto directive renders the assignee."""
-    _, html = sphinx_build(
-        ".. doto:: Assigned task\n"
-        "   :id: TASK-007\n"
-        "   :assignee: alice\n"
-    )
+    _, html = sphinx_build(".. doto:: Assigned task\n   :id: TASK-007\n   :assignee: alice\n")
     assert "alice" in html
     assert "doto-assignee" in html
 
 
 def test_doto_node_renders_tags(sphinx_build):
     """A doto directive renders tags."""
-    _, html = sphinx_build(
-        ".. doto:: Tagged task\n"
-        "   :id: TASK-008\n"
-        "   :tags: backend, security\n"
-    )
+    _, html = sphinx_build(".. doto:: Tagged task\n   :id: TASK-008\n   :tags: backend, security\n")
     assert "backend" in html
     assert "security" in html
     assert "doto-tag" in html
@@ -177,11 +142,7 @@ def test_doto_node_renders_tags(sphinx_build):
 
 def test_doto_node_renders_due_date(sphinx_build):
     """A doto directive renders the due date."""
-    _, html = sphinx_build(
-        ".. doto:: Task with due date\n"
-        "   :id: TASK-009\n"
-        "   :due: 2026-08-15\n"
-    )
+    _, html = sphinx_build(".. doto:: Task with due date\n   :id: TASK-009\n   :due: 2026-08-15\n")
     assert "2026-08-15" in html
     assert "doto-due" in html
 
@@ -227,7 +188,7 @@ def test_doto_list_empty_message(sphinx_build):
         "   :id: TASK-020\n"
         "   :status: open\n\n"
         ".. doto-list::\n"
-        "   :status: done\n"          # filter for done; nothing is done
+        "   :status: done\n"  # filter for done; nothing is done
     )
     assert "No tasks match" in html
 
@@ -235,10 +196,7 @@ def test_doto_list_empty_message(sphinx_build):
 def test_doto_list_cards_format(sphinx_build):
     """doto-list with format: cards produces card divs."""
     _, html = sphinx_build(
-        ".. doto:: Card task\n"
-        "   :id: TASK-030\n\n"
-        ".. doto-list::\n"
-        "   :format: cards\n"
+        ".. doto:: Card task\n   :id: TASK-030\n\n.. doto-list::\n   :format: cards\n"
     )
     assert "doto-card" in html
 
@@ -262,11 +220,7 @@ def test_doto_list_cards_show_task_details(sphinx_build):
 
 def test_doto_list_default_format_is_list(sphinx_build):
     """doto-list without format option uses list format."""
-    _, html = sphinx_build(
-        ".. doto:: List task\n"
-        "   :id: TASK-032\n\n"
-        ".. doto-list::\n"
-    )
+    _, html = sphinx_build(".. doto:: List task\n   :id: TASK-032\n\n.. doto-list::\n")
     assert "doto-task-list" in html or "doto-list-item" in html
 
 
@@ -308,20 +262,15 @@ def test_doto_list_filters_by_priority(sphinx_build):
 def test_doto_summary_shows_total(sphinx_build):
     """doto-summary renders the total task count."""
     _, html = sphinx_build(
-        ".. doto:: A\n   :id: TASK-040\n\n"
-        ".. doto:: B\n   :id: TASK-041\n\n"
-        ".. doto-summary::\n"
+        ".. doto:: A\n   :id: TASK-040\n\n.. doto:: B\n   :id: TASK-041\n\n.. doto-summary::\n"
     )
-    assert "2" in html       # two tasks
+    assert "2" in html  # two tasks
     assert "Total" in html
 
 
 def test_doto_summary_empty_message(sphinx_build):
     """doto-summary with no tasks shows empty message."""
-    _, html = sphinx_build(
-        ".. doto-summary::\n"
-        "   :status: done\n"
-    )
+    _, html = sphinx_build(".. doto-summary::\n   :status: done\n")
     assert "No tasks found" in html
 
 
@@ -344,9 +293,7 @@ def test_doto_summary_shows_status_breakdown(sphinx_build):
 def test_doto_summary_chart(sphinx_build):
     """doto-summary with show-chart emits SVG markup."""
     _, html = sphinx_build(
-        ".. doto:: Chart task\n   :id: TASK-050\n\n"
-        ".. doto-summary::\n"
-        "   :show-chart: true\n"
+        ".. doto:: Chart task\n   :id: TASK-050\n\n.. doto-summary::\n   :show-chart: true\n"
     )
     assert "<svg" in html
 
@@ -435,7 +382,7 @@ def test_export_json_contains_task_details(sphinx_build):
     )
     export_file = out / "_static" / "doto-tasks.json"
     data = json.loads(export_file.read_text())
-    
+
     assert "T-007" in data["tasks"]
     task = data["tasks"]["T-007"]
     assert task["title"] == "Detailed export"
@@ -489,6 +436,7 @@ def test_task_body_content_rendered(sphinx_build):
 
 
 # ── Feature 5: task-list icon-mode + clickable links ────────────────────────
+
 
 def test_doto_list_table_ids_are_clickable(sphinx_build):
     """Task id/title cells link to the task box in HTML table output."""
@@ -567,10 +515,7 @@ def test_doto_list_table_cell_template_override_renders_icons_and_links(tmp_path
     (src / "_doto" / "templates" / "html").mkdir(parents=True)
     out = tmp_path / "out"
 
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
     (src / "index.rst").write_text(
         "Test\n====\n\n"
         ".. doto:: Overridable\n   :id: TASK-OVR1\n   :assignee: alice\n\n"
@@ -581,15 +526,15 @@ def test_doto_list_table_cell_template_override_renders_icons_and_links(tmp_path
     )
     # Project override: compose cells from structured cell_data, adding a marker.
     (src / "_doto" / "templates" / "html" / "doto-list-table.html").write_text(
-        "<table class=\"custom-doto-table\">\n"
+        '<table class="custom-doto-table">\n'
         "{%- for task in tasks %}\n"
         "{%- set ti = loop.index0 %}\n"
         "<tr>\n"
         "{%- for col in columns %}\n"
         "{%- set d = cell_data[(ti, col)] %}\n"
-        "<td data-overridden=\"1\">\n"
-        "{%- if d.icon_class %}<i class=\"doto-list-icon {{ d.icon_class }}\"></i>{% endif %}\n"
-        "{%- if d.href %}<a class=\"doto-list-link\" href=\"{{ d.href }}\">{{ d.value }}</a>\n"
+        '<td data-overridden="1">\n'
+        '{%- if d.icon_class %}<i class="doto-list-icon {{ d.icon_class }}"></i>{% endif %}\n'
+        '{%- if d.href %}<a class="doto-list-link" href="{{ d.href }}">{{ d.value }}</a>\n'
         "{%- else %}{{ d.value }}{% endif %}\n"
         "</td>\n"
         "{%- endfor %}\n"
@@ -601,6 +546,7 @@ def test_doto_list_table_cell_template_override_renders_icons_and_links(tmp_path
     clear_template_cache()
     try:
         from sphinx.application import Sphinx
+
         app = Sphinx(
             srcdir=str(src),
             confdir=str(src),
@@ -652,9 +598,7 @@ def test_doto_list_custom_status_icon_from_config_renders(sphinx_build):
 def test_doto_list_simple_ids_clickable(sphinx_build):
     """Simple list format links id/title to the task box."""
     _, html = sphinx_build(
-        ".. doto:: SimpleLink\n   :id: TASK-H55\n\n"
-        ".. doto-list::\n"
-        "   :format: list\n"
+        ".. doto:: SimpleLink\n   :id: TASK-H55\n\n.. doto-list::\n   :format: list\n"
     )
     assert 'class="doto-list-link doto-list-id"' in html
     assert "#TASK-H55" in html

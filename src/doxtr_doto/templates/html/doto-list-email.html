@@ -1,0 +1,89 @@
+{# doto-list-email.html - Template for doto task list as a 3-pane email layout #}
+{#
+  Context variables:
+    - columns:    List of (status_value, display_label) pairs, in tree order.
+    - tree:       Dict mapping status_value -> list of DotoTask objects grouped
+                  under that status node (left pane).
+    - tasks:      Flat list of all DotoTask objects (top-right list pane).
+    - task_links: Dict mapping task.id -> href of the task box (Feature 5).
+    - icon_mode:  Effective icon mode ("icon" | "icon-text" | "text").
+    - visible_tasks: Resolved number of list rows to keep visible at once in
+                  the scrollable top-right list pane (0 = show all / no cap).
+                  Emitted as data-doto-visible-tasks and the
+                  --doto-visible-tasks CSS custom property so the CSS can
+                  compute the pane's max-height. All tasks still render.
+
+  Available filters:
+    - row_classes: Get CSS classes for a task.
+
+  Panes:
+    1. Left   — task tree grouped by status (collapsible status nodes).
+    2. Top-right    — the flat task list.
+    3. Bottom-right — the selected task's detail payload (one per task; shown
+                      when a tree node or list row is selected).
+
+  Client-side nature:
+    Selecting a tree node filters the list; selecting a list row populates the
+    detail pane. Both are handled by the vendored, dependency-free
+    doto-views.js. When JS is unavailable the markup degrades gracefully: all
+    three panes render statically (the first task's detail is shown by default
+    via CSS). A child theme can fully re-author this file via
+    <srcdir>/_doto/templates/html/.
+#}
+<div class="doto-email doto-list-icon-mode-{{ icon_mode | default('icon-text') }}" data-doto-view="email">
+  <div class="doto-email-tree" role="tree" aria-label="Task tree">
+    {%- for status, label in columns %}
+    <div class="doto-email-tree-group" data-doto-tree-group="{{ status }}">
+      <button type="button" class="doto-email-tree-node" data-doto-tree-filter="{{ status }}">
+        <span class="doto-email-tree-label">{{ label }}</span>
+        <span class="doto-email-tree-count">{{ tree.get(status, []) | length }}</span>
+      </button>
+    </div>
+    {%- endfor %}
+    <div class="doto-email-tree-group" data-doto-tree-group="">
+      <button type="button" class="doto-email-tree-node" data-doto-tree-filter="">
+        <span class="doto-email-tree-label">All tasks</span>
+        <span class="doto-email-tree-count">{{ tasks | length }}</span>
+      </button>
+    </div>
+  </div>
+  <div class="doto-email-main">
+    <ul class="doto-email-list" role="list"{% if visible_tasks is defined and visible_tasks %} data-doto-visible-tasks="{{ visible_tasks }}" style="--doto-visible-tasks: {{ visible_tasks }};"{% endif %}>
+      {%- for task in tasks %}
+      <li class="doto-email-list-item {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}"
+          data-doto-select="{{ task.id }}" data-doto-status="{{ task.status }}" tabindex="0">
+        <span class="doto-email-list-id">{{ task.id }}</span>
+        <span class="doto-email-list-title">{{ task.title }}</span>
+        <span class="doto-email-list-status">{{ task.status }}</span>
+      </li>
+      {%- endfor %}
+    </ul>
+    <div class="doto-email-detail">
+      {%- for task in tasks %}
+      {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+      <div class="doto-email-detail-panel {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}"
+           data-doto-detail="{{ task.id }}"{% if not loop.first %} hidden{% endif %}>
+        <h4 class="doto-email-detail-title">
+          <a class="doto-list-link" href="{{ href }}">{{ task.id }}: {{ task.title }}</a>
+        </h4>
+        <dl class="doto-email-detail-meta">
+          <dt>Priority</dt><dd>{{ task.priority }}</dd>
+          <dt>Status</dt><dd>{{ task.status }}</dd>
+          {%- if task.assignee %}
+          <dt>Assignee</dt><dd>{{ task.assignee }}</dd>
+          {%- endif %}
+          {%- if task.due %}
+          <dt>Due</dt><dd class="{% if task.is_overdue() %}doto-overdue{% endif %}">{{ task.due | display_date }}</dd>
+          {%- endif %}
+          {%- if task.tags %}
+          <dt>Tags</dt><dd>{% for tag in task.tags %}<span class="doto-tag">{{ tag }}</span>{% endfor %}</dd>
+          {%- endif %}
+        </dl>
+        {%- if task.body %}
+        <div class="doto-email-detail-body">{{ task.body }}</div>
+        {%- endif %}
+      </div>
+      {%- endfor %}
+    </div>
+  </div>
+</div>

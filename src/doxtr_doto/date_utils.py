@@ -11,13 +11,90 @@ This module provides:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import re
+from datetime import date, datetime, time, timedelta
 from typing import Union
-
 
 DateLike = Union[str, date, datetime, "DotoDate", None]
 
 _ISO_FORMAT = "%Y-%m-%d"
+
+# A due value may optionally carry a *naive, local* clock time appended to the
+# calendar date. The project intentionally models dates as naive local (ruff
+# DTZ is disabled); the time component follows the same convention -- it carries
+# no timezone and is interpreted in the author's local wall-clock. This keeps
+# the foundation simple for a later calendar-sync feature, which can attach a
+# timezone at that boundary.
+#
+# Accepted time syntaxes appended to a ``YYYY-MM-DD`` date, separated by a
+# single space or a ``T`` (ISO 8601 style):
+#   * ``HH:MM``       e.g. ``16:00``
+#   * ``HHh``         hour shorthand, e.g. ``16h`` -> ``16:00``
+#   * ``HH:MM:SS``    e.g. ``16:00:31``
+# A date with no time is still a pure date and behaves identically to before.
+_HOUR_SHORTHAND_RE = re.compile(r"^(?P<hour>\d{1,2})h$", re.IGNORECASE)
+_TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?$")
+
+
+def parse_time_token(token: str) -> time:
+    """Parse a single time token into a naive :class:`datetime.time`.
+
+    Accepts the documented time syntaxes (``HH:MM``, ``HHh``, ``HH:MM:SS``).
+    This is the public helper for callers (e.g. the CLI relative-date parser)
+    that must split a time suffix off before the date part is in ISO form.
+
+    Args:
+        token: The time portion of a due string (no date, already stripped).
+
+    Returns:
+        A naive ``time`` object (no timezone).
+
+    Raises:
+        ValueError: If the token is not a recognized/valid time.
+    """
+    shorthand = _HOUR_SHORTHAND_RE.match(token)
+    if shorthand is not None:
+        hour = int(shorthand.group("hour"))
+        return time(hour=hour)
+
+    match = _TIME_RE.match(token)
+    if match is None:
+        raise ValueError(f"Invalid time '{token}'")
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    second = int(match.group("second") or 0)
+    # time() validates the ranges (0-23 / 0-59) and raises ValueError otherwise.
+    return time(hour=hour, minute=minute, second=second)
+
+
+def _split_date_and_time(value: str) -> tuple[str, time | None]:
+    """Split a due string into its date part and optional naive time part.
+
+    The date and an optional time may be separated by a single space or a
+    ``T`` (ISO 8601 style). A value with no separator is treated as date-only.
+
+    Args:
+        value: The already-stripped due string.
+
+    Returns:
+        A ``(date_str, time_or_none)`` tuple. ``time_or_none`` is ``None`` for a
+        date-only value.
+
+    Raises:
+        ValueError: If a time part is present but not a recognized time.
+    """
+    # Prefer the ISO 'T' separator; fall back to a single space separator.
+    if "T" in value:
+        date_str, _, time_str = value.partition("T")
+    elif " " in value:
+        date_str, _, time_str = value.partition(" ")
+    else:
+        return value, None
+
+    time_str = time_str.strip()
+    if not time_str:
+        return date_str.strip(), None
+    return date_str.strip(), parse_time_token(time_str)
 
 
 class DotoDate:
@@ -39,27 +116,45 @@ class DotoDate:
         d2 = DotoDate.parse("2026-08-20")
         d1 < d2              # True
         d1 < date(2026, 8, 20)  # True
+
+    Comparison granularity: ``__eq__``/``__lt__``/``__gt__`` (and the
+    ``is_before``/``is_after`` helpers) compare the calendar *date only* and
+    ignore any time component -- two dues on the same day with different times
+    compare equal and ``__hash__`` is date-based. ``is_overdue()`` is the
+    exception: it is instant-aware when a time is present. For instant-level
+    comparison (e.g. future calendar-sync change detection) use
+    ``to_datetime()`` or compare ``isoformat()`` strings instead of ``==``.
     """
 
-    __slots__ = ("_date",)
+    __slots__ = ("_date", "_time")
 
-    def __init__(self, value: date) -> None:
-        """Initialize with a date object.
+    def __init__(self, value: date, time_part: time | None = None) -> None:
+        """Initialize with a date object and an optional naive time.
 
         Use DotoDate.parse() for flexible input types.
 
         Args:
             value: A date object (not datetime, not string).
+            time_part: Optional naive :class:`datetime.time` for a due that
+                carries a clock time. ``None`` (the default) means date-only,
+                which behaves exactly as before.
 
         Raises:
-            TypeError: If value is not a date object.
+            TypeError: If value is not a date object, or time_part is not a
+                naive time.
         """
         if not isinstance(value, date) or isinstance(value, datetime):
             raise TypeError(f"Expected date, got {type(value).__name__}")
+        if time_part is not None:
+            if not isinstance(time_part, time):
+                raise TypeError(f"Expected time, got {type(time_part).__name__}")
+            if time_part.tzinfo is not None:
+                raise ValueError("DotoDate time must be naive (no timezone)")
         self._date = value
+        self._time = time_part
 
     @classmethod
-    def parse(cls, value: DateLike) -> "DotoDate | None":
+    def parse(cls, value: DateLike) -> DotoDate | None:
         """Parse any date-like value. Returns None for None/empty.
 
         Args:
@@ -82,6 +177,10 @@ class DotoDate:
         if isinstance(value, DotoDate):
             return value
         if isinstance(value, datetime):
+            # Backward compatible: a datetime is reduced to its date part (the
+            # historical behavior). Time-bearing dues are expressed as strings
+            # (``YYYY-MM-DDTHH:MM``) and parsed via the str branch below, so
+            # created/updated datetimes keep rendering/serializing as before.
             return cls(value.date())
         if isinstance(value, date):
             return cls(value)
@@ -89,13 +188,15 @@ class DotoDate:
             v = value.strip()
             if not v:
                 return None
-            # Parse ISO format and create DotoDate
-            parsed = date.fromisoformat(v)
-            return cls(parsed)
+            # Split off an optional time component, then parse the date part as
+            # ISO format. A date-only string parses exactly as before.
+            date_str, time_part = _split_date_and_time(v)
+            parsed = date.fromisoformat(date_str)
+            return cls(parsed, time_part)
         raise TypeError(f"Cannot parse date from {type(value).__name__}")
 
     @classmethod
-    def parse_safe(cls, value: DateLike) -> "DotoDate | None":
+    def parse_safe(cls, value: DateLike) -> DotoDate | None:
         """Like parse() but returns None instead of raising on bad input.
 
         Args:
@@ -110,7 +211,7 @@ class DotoDate:
             return None
 
     @classmethod
-    def today(cls) -> "DotoDate":
+    def today(cls) -> DotoDate:
         """Return today's date as a DotoDate.
 
         Returns:
@@ -119,31 +220,100 @@ class DotoDate:
         return cls(date.today())
 
     def isoformat(self) -> str:
-        """Return date in ISO format (YYYY-MM-DD).
+        """Return the due in ISO format.
+
+        Date-only returns ``YYYY-MM-DD`` (unchanged). When a time is present it
+        returns ``YYYY-MM-DDTHH:MM`` (or ``YYYY-MM-DDTHH:MM:SS`` when seconds
+        are non-zero), i.e. an ISO 8601 datetime. This is the canonical storage
+        string round-tripped through RST and JSON.
 
         Returns:
             ISO format string.
         """
-        return self._date.isoformat()
+        if self._time is None:
+            return self._date.isoformat()
+        return f"{self._date.isoformat()}T{self._format_time()}"
+
+    def _format_time(self) -> str:
+        """Return the time component as ``HH:MM`` or ``HH:MM:SS``.
+
+        Seconds are only emitted when non-zero, so ``16:00`` round-trips as
+        ``16:00`` (not ``16:00:00``) and ``16:00:31`` keeps its seconds.
+        Returns an empty string when there is no time component.
+        """
+        if self._time is None:
+            return ""
+        t = self._time
+        if t.second:
+            return f"{t.hour:02d}:{t.minute:02d}:{t.second:02d}"
+        return f"{t.hour:02d}:{t.minute:02d}"
+
+    @property
+    def has_time(self) -> bool:
+        """Whether this due carries a clock time (vs being date-only).
+
+        Returns:
+            True when a time component is present.
+        """
+        return self._time is not None
+
+    @property
+    def time(self) -> time | None:
+        """Get the underlying naive time component, or None if date-only.
+
+        Returns:
+            A naive :class:`datetime.time`, or None when date-only.
+        """
+        return self._time
+
+    def to_datetime(self) -> datetime:
+        """Return a naive :class:`datetime` combining the date and time.
+
+        A date-only due is combined with midnight (00:00). The result is naive
+        (no timezone), consistent with the project's naive-local model.
+
+        Returns:
+            Naive datetime for this due.
+        """
+        return datetime.combine(self._date, self._time or time())
 
     def to_display(self, fmt: str = _ISO_FORMAT) -> str:
-        """Format date for display.
+        """Format the due for display.
+
+        Date-only formats with ``fmt`` exactly as before. When a time is
+        present it is appended as `` HH:MM`` (or `` HH:MM:SS`` with non-zero
+        seconds), space-separated, so date-only display is 100% unchanged and
+        time-bearing display shows the clock time.
 
         Args:
-            fmt: strftime format string. Defaults to YYYY-MM-DD.
+            fmt: strftime format string for the date part. Defaults to
+                YYYY-MM-DD.
 
         Returns:
-            Formatted date string.
+            Formatted display string.
         """
-        return self._date.strftime(fmt)
+        date_text = self._date.strftime(fmt)
+        if self._time is None:
+            return date_text
+        return f"{date_text} {self._format_time()}"
 
     def is_overdue(self) -> bool:
-        """Check if this date is in the past (before today).
+        """Check whether this due is in the past.
+
+        Date-only: overdue once the day has fully passed (``date < today``),
+        unchanged from before -- a task due today is NOT overdue.
+
+        Time-bearing: overdue once the specific naive-local instant has passed
+        (``datetime < now``), so a task due today at 16:00 becomes overdue at
+        16:00 local, not at midnight.
 
         Returns:
-            True if date is before today, False otherwise.
+            True if the due is in the past, False otherwise.
         """
-        return self._date < date.today()
+        if self._time is None:
+            return self._date < date.today()
+        # datetime.now() is naive local by design (project-wide DTZ convention).
+        return self.to_datetime() < datetime.now()
 
     def is_due_soon(self, days: int = 7) -> bool:
         """Check if this date is within the specified number of days.
@@ -223,7 +393,7 @@ class DotoDate:
         """
         return (self._date - date.today()).days
 
-    def add_days(self, days: int) -> "DotoDate":
+    def add_days(self, days: int) -> DotoDate:
         """Return a new DotoDate with days added.
 
         Args:

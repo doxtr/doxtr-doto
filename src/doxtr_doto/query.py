@@ -101,17 +101,19 @@ class TaskFilter:
         Returns:
             True if no filter criteria are set.
         """
-        return not any([
-            self.assignee,
-            self.priority,
-            self.status,
-            self.exclude_status,
-            self.tags,
-            self.depends_on,
-            self.due_before,
-            self.due_after,
-            self.regex,
-        ])
+        return not any(
+            [
+                self.assignee,
+                self.priority,
+                self.status,
+                self.exclude_status,
+                self.tags,
+                self.depends_on,
+                self.due_before,
+                self.due_after,
+                self.regex,
+            ]
+        )
 
 
 @dataclass
@@ -125,6 +127,11 @@ class DisplayOptions:
         limit: Maximum number of tasks to return (None for unlimited).
         show_archived: Whether to include archived tasks.
         columns: List of column names to display (for table format).
+        visible_tasks: Number of task rows kept visible at once in the email
+            view's scrollable list pane (None means "use config default"; 0
+            means "show all with no scroll cap"). This caps the visible
+            viewport only; it does not change how many tasks are included
+            (that is ``limit``).
     """
 
     format: str = "list"  # "list" | "table" | "cards"
@@ -132,9 +139,8 @@ class DisplayOptions:
     order: str = "desc"  # "asc" | "desc"
     limit: int | None = None
     show_archived: bool = False
-    columns: list[str] = field(
-        default_factory=lambda: ["id", "title", "priority", "status"]
-    )
+    columns: list[str] = field(default_factory=lambda: ["id", "title", "priority", "status"])
+    visible_tasks: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DisplayOptions:
@@ -156,6 +162,7 @@ class DisplayOptions:
             limit=d.get("limit"),
             show_archived=d.get("show_archived", False),
             columns=d.get("columns", ["id", "title", "priority", "status"]),
+            visible_tasks=d.get("visible_tasks"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -171,4 +178,5 @@ class DisplayOptions:
             "limit": self.limit,
             "show_archived": self.show_archived,
             "columns": self.columns,
+            "visible_tasks": self.visible_tasks,
         }

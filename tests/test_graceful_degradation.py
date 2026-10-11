@@ -1,8 +1,9 @@
 """Tests that the extension degrades gracefully under adverse conditions."""
+
 from __future__ import annotations
 
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ import pytest
 @pytest.fixture
 def sphinx_build(tmp_path):
     """Helper fixture that runs a minimal Sphinx HTML build."""
+
     def _build(
         rst_content: str,
         conf_extra: str = "",
@@ -28,16 +30,12 @@ def sphinx_build(tmp_path):
         out = tmp_path / "out"
 
         (src / "conf.py").write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            + conf_extra + "\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\n" + conf_extra + "\n"
         )
-        (src / "index.rst").write_text(
-            "Test\n====\n\n" + rst_content
-        )
+        (src / "index.rst").write_text("Test\n====\n\n" + rst_content)
 
         from sphinx.application import Sphinx
-        
+
         if expect_warning:
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
@@ -73,15 +71,11 @@ def test_build_with_no_tasks_succeeds(tmp_path):
     """A project with no doto directives builds without error."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
-    (src / "index.rst").write_text(
-        "Empty\n=====\n\nNo tasks here.\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
+    (src / "index.rst").write_text("Empty\n=====\n\nNo tasks here.\n")
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -89,8 +83,8 @@ def test_build_with_no_tasks_succeeds(tmp_path):
         doctreedir=str(tmp_path / ".doctrees"),
         buildername="html",
     )
-    app.build()   # Should not raise
-    
+    app.build()  # Should not raise
+
     # Build should complete and produce output
     assert (tmp_path / "out" / "index.html").exists()
 
@@ -99,17 +93,11 @@ def test_build_with_no_tasks_produces_valid_html(tmp_path):
     """A project with no doto directives produces valid HTML."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
-    (src / "index.rst").write_text(
-        "Empty Project\n"
-        "=============\n\n"
-        "This project has no tasks.\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
+    (src / "index.rst").write_text("Empty Project\n=============\n\nThis project has no tasks.\n")
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -118,7 +106,7 @@ def test_build_with_no_tasks_produces_valid_html(tmp_path):
         buildername="html",
     )
     app.build()
-    
+
     html = (tmp_path / "out" / "index.html").read_text()
     assert "Empty Project" in html
     assert "no tasks" in html.lower()
@@ -131,17 +119,11 @@ def test_doto_list_with_no_tasks_renders_empty_message(tmp_path):
     """A doto-list with no tasks in the project shows the empty state."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
-    (src / "index.rst").write_text(
-        "Empty\n=====\n\n"
-        ".. doto-list::\n"
-        "   :status: open\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
+    (src / "index.rst").write_text("Empty\n=====\n\n.. doto-list::\n   :status: open\n")
 
     from sphinx.application import Sphinx
+
     out = tmp_path / "out"
     app = Sphinx(
         srcdir=str(src),
@@ -170,8 +152,7 @@ def test_doto_list_with_no_matching_tasks(sphinx_build):
 def test_doto_summary_with_no_tasks_renders_empty_message(sphinx_build):
     """A doto-summary with no tasks shows empty state."""
     _, html = sphinx_build(
-        ".. doto-summary::\n"
-        "   :status: done\n"  # No tasks exist with done status
+        ".. doto-summary::\n   :status: done\n"  # No tasks exist with done status
     )
     assert "No tasks found" in html
 
@@ -191,6 +172,7 @@ def test_unknown_html_theme_falls_back_gracefully(tmp_path):
     (src / "index.rst").write_text("T\n=\n\n")
 
     from sphinx.application import Sphinx
+
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         app = Sphinx(
@@ -200,8 +182,8 @@ def test_unknown_html_theme_falls_back_gracefully(tmp_path):
             doctreedir=str(tmp_path / ".doctrees"),
             buildername="html",
         )
-        app.build()   # Must not raise; warning should have been emitted
-    
+        app.build()  # Must not raise; warning should have been emitted
+
     # Build should complete
     assert (tmp_path / "out" / "index.html").exists()
 
@@ -211,17 +193,14 @@ def test_unknown_html_theme_uses_default_css(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-        'doto_html_theme = "does-not-exist"\n'
+        "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_html_theme = \"does-not-exist\"\n"
     )
     (src / "index.rst").write_text(
-        "Theme Test\n==========\n\n"
-        ".. doto:: Test task\n"
-        "   :id: THEME-001\n"
+        "Theme Test\n==========\n\n.. doto:: Test task\n   :id: THEME-001\n"
     )
 
     from sphinx.application import Sphinx
+
     out = tmp_path / "out"
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
@@ -233,7 +212,7 @@ def test_unknown_html_theme_uses_default_css(tmp_path):
             buildername="html",
         )
         app.build()
-    
+
     # Should fall back to default CSS
     assert (out / "_static" / "doto.css").exists()
 
@@ -251,11 +230,10 @@ def test_sync_disabled_skips_json_operations(tmp_path):
         "doto_sync_on_build = False\n"
         "doto_auto_create_json = False\n"
     )
-    (src / "index.rst").write_text(
-        "T\n=\n\n.. doto:: Unsaved\n   :id: T-001\n"
-    )
+    (src / "index.rst").write_text("T\n=\n\n.. doto:: Unsaved\n   :id: T-001\n")
 
     from sphinx.application import Sphinx
+
     out = tmp_path / "out"
     app = Sphinx(
         srcdir=str(src),
@@ -281,13 +259,11 @@ def test_sync_disabled_still_renders_tasks(tmp_path):
         "doto_auto_create_json = False\n"
     )
     (src / "index.rst").write_text(
-        "Tasks\n=====\n\n"
-        ".. doto:: Rendered task\n"
-        "   :id: RENDER-001\n"
-        "   :priority: high\n"
+        "Tasks\n=====\n\n.. doto:: Rendered task\n   :id: RENDER-001\n   :priority: high\n"
     )
 
     from sphinx.application import Sphinx
+
     out = tmp_path / "out"
     app = Sphinx(
         srcdir=str(src),
@@ -308,15 +284,12 @@ def test_auto_create_json_disabled_no_json_created(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-        "doto_auto_create_json = False\n"
+        "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_auto_create_json = False\n"
     )
-    (src / "index.rst").write_text(
-        "T\n=\n\n.. doto:: Task\n   :id: T-002\n"
-    )
+    (src / "index.rst").write_text("T\n=\n\n.. doto:: Task\n   :id: T-002\n")
 
     from sphinx.application import Sphinx
+
     out = tmp_path / "out"
     app = Sphinx(
         srcdir=str(src),
@@ -340,18 +313,13 @@ def test_invalid_priority_value_produces_error(tmp_path):
     """An invalid priority value produces an error in the build."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
     (src / "index.rst").write_text(
-        "T\n=\n\n"
-        ".. doto:: Bad priority\n"
-        "   :id: BAD-001\n"
-        "   :priority: ultra-mega-high\n"
+        "T\n=\n\n.. doto:: Bad priority\n   :id: BAD-001\n   :priority: ultra-mega-high\n"
     )
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -361,7 +329,7 @@ def test_invalid_priority_value_produces_error(tmp_path):
         warningiserror=True,  # Make warnings/errors fail the build
     )
     app.build()
-    
+
     # Build should fail with non-zero status
     assert app.statuscode != 0
 
@@ -370,18 +338,13 @@ def test_invalid_status_value_produces_error(tmp_path):
     """An invalid status value produces an error in the build."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
     (src / "index.rst").write_text(
-        "T\n=\n\n"
-        ".. doto:: Bad status\n"
-        "   :id: BAD-002\n"
-        "   :status: maybe\n"
+        "T\n=\n\n.. doto:: Bad status\n   :id: BAD-002\n   :status: maybe\n"
     )
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -391,7 +354,7 @@ def test_invalid_status_value_produces_error(tmp_path):
         warningiserror=True,
     )
     app.build()
-    
+
     assert app.statuscode != 0
 
 
@@ -399,18 +362,13 @@ def test_invalid_due_date_produces_error(tmp_path):
     """An invalid due date produces an error in the build."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
     (src / "index.rst").write_text(
-        "T\n=\n\n"
-        ".. doto:: Bad date\n"
-        "   :id: BAD-003\n"
-        "   :due: not-a-date\n"
+        "T\n=\n\n.. doto:: Bad date\n   :id: BAD-003\n   :due: not-a-date\n"
     )
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -420,7 +378,7 @@ def test_invalid_due_date_produces_error(tmp_path):
         warningiserror=True,
     )
     app.build()
-    
+
     assert app.statuscode != 0
 
 
@@ -428,19 +386,13 @@ def test_duplicate_task_id_produces_error(tmp_path):
     """Duplicate task IDs produce an error in the build."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
     (src / "index.rst").write_text(
-        "T\n=\n\n"
-        ".. doto:: First task\n"
-        "   :id: DUP-001\n\n"
-        ".. doto:: Second task\n"
-        "   :id: DUP-001\n"
+        "T\n=\n\n.. doto:: First task\n   :id: DUP-001\n\n.. doto:: Second task\n   :id: DUP-001\n"
     )
 
     from sphinx.application import Sphinx
+
     app = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -450,7 +402,7 @@ def test_duplicate_task_id_produces_error(tmp_path):
         warningiserror=True,
     )
     app.build()
-    
+
     assert app.statuscode != 0
 
 
@@ -459,10 +411,7 @@ def test_duplicate_task_id_produces_error(tmp_path):
 
 def test_task_with_special_characters_in_title(sphinx_build):
     """Tasks with special characters in title render correctly."""
-    _, html = sphinx_build(
-        ".. doto:: Task with <special> & \"chars\"\n"
-        "   :id: SPECIAL-001\n"
-    )
+    _, html = sphinx_build('.. doto:: Task with <special> & "chars"\n   :id: SPECIAL-001\n')
     # Should be HTML-escaped
     assert "SPECIAL-001" in html
     # Title should be present (escaped)
@@ -471,21 +420,14 @@ def test_task_with_special_characters_in_title(sphinx_build):
 
 def test_task_with_empty_body(sphinx_build):
     """A task with no body content builds successfully."""
-    _, html = sphinx_build(
-        ".. doto:: Task without body\n"
-        "   :id: EMPTY-001\n"
-        "   :priority: low\n"
-    )
+    _, html = sphinx_build(".. doto:: Task without body\n   :id: EMPTY-001\n   :priority: low\n")
     assert "EMPTY-001" in html
     assert "Task without body" in html
 
 
 def test_task_with_only_required_fields(sphinx_build):
     """A task with only required fields (id, title) builds successfully."""
-    _, html = sphinx_build(
-        ".. doto:: Minimal task\n"
-        "   :id: MINIMAL-001\n"
-    )
+    _, html = sphinx_build(".. doto:: Minimal task\n   :id: MINIMAL-001\n")
     assert "MINIMAL-001" in html
     assert "Minimal task" in html
 
@@ -535,20 +477,14 @@ def test_clean_build_environment(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     out = tmp_path / "out"
-    
-    (src / "conf.py").write_text(
-        "extensions = ['doxtr_doto']\n"
-        "master_doc = 'index'\n"
-    )
-    
+
+    (src / "conf.py").write_text("extensions = ['doxtr_doto']\nmaster_doc = 'index'\n")
+
     # First build with one task
-    (src / "index.rst").write_text(
-        "First\n=====\n\n"
-        ".. doto:: First task\n"
-        "   :id: BUILD-001\n"
-    )
-    
+    (src / "index.rst").write_text("First\n=====\n\n.. doto:: First task\n   :id: BUILD-001\n")
+
     from sphinx.application import Sphinx
+
     app1 = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -558,21 +494,18 @@ def test_clean_build_environment(tmp_path):
         freshenv=True,
     )
     app1.build()
-    
+
     html1 = (out / "index.html").read_text()
     assert "BUILD-001" in html1
-    
+
     # Second build with different task
-    (src / "index.rst").write_text(
-        "Second\n======\n\n"
-        ".. doto:: Second task\n"
-        "   :id: BUILD-002\n"
-    )
-    
+    (src / "index.rst").write_text("Second\n======\n\n.. doto:: Second task\n   :id: BUILD-002\n")
+
     import shutil
+
     shutil.rmtree(out)
     shutil.rmtree(tmp_path / ".doctrees")
-    
+
     app2 = Sphinx(
         srcdir=str(src),
         confdir=str(src),
@@ -582,7 +515,7 @@ def test_clean_build_environment(tmp_path):
         freshenv=True,
     )
     app2.build()
-    
+
     html2 = (out / "index.html").read_text()
     assert "BUILD-002" in html2
     # First task should not appear in second build

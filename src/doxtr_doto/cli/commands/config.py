@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
 
 
 @click.command("config")
@@ -71,7 +72,7 @@ def config_cmd(ctx: DotoContext, output_format: str) -> None:
         _print_config_table(formatter, config_data)
 
 
-def _print_config_table(formatter, config_data: dict) -> None:
+def _print_config_table(formatter: OutputFormatter, config_data: dict[str, Any]) -> None:
     """Print configuration as a formatted table."""
     formatter.print("Current doto configuration:", style="bold")
     formatter.print("")

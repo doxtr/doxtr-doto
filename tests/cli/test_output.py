@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from io import StringIO
 
 import pytest
 
-from doxtr_doto.cli.output import OutputFormatter
+from doxtr_doto.cli.output import OutputFormatter, build_task_detail_lines
 
 
 class TestOutputFormatter:
@@ -114,7 +113,7 @@ class TestOutputFormatter:
         """format_task_list() handles empty list."""
         formatter = OutputFormatter()
         formatter.format_task_list([])
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should either output nothing or a "no tasks" message
         # Not crash
 
@@ -152,10 +151,50 @@ class TestOutputFormatterStyles:
         """print() with invalid style raises error."""
         formatter = OutputFormatter()
         # Invalid styles cause rich to raise an error
-        import pytest
         from rich.errors import MissingStyle
+
         with pytest.raises(MissingStyle):
             formatter.print("Normal text", style="nonexistent")
+
+
+class TestBuildTaskDetailLinesBodyInvariant:
+    """Pin the trailing ``["", body]`` invariant at its source.
+
+    The TUI ``CardViewerScreen.build_field_lines`` drops the body via a
+    ``lines[:-2]`` slice, which relies on ``build_task_detail_lines`` always
+    appending the body as exactly a trailing blank-separator + body pair and
+    emitting nothing after it. These tests guard that ``[:-2]`` slice against
+    drift so a change here fails loudly instead of silently corrupting the
+    card viewer's field region.
+    """
+
+    def test_body_is_trailing_blank_separator_then_body(self):
+        """A task with a body ends with ``["", body]`` (body is the last line)."""
+        body = "Some multi-word body text that is the final element."
+        task = {
+            "id": "TASK-001",
+            "title": "Test task",
+            "status": "open",
+            "priority": "high",
+            "body": body,
+        }
+        lines = build_task_detail_lines(task)
+        # Blank separator immediately precedes the body ...
+        assert lines[-2] == ""
+        # ... and the body text is the final element (nothing emitted after it).
+        assert body in lines[-1]
+
+    def test_body_does_not_leak_when_absent(self):
+        """The same task without a body must not emit the body text anywhere."""
+        body = "Some multi-word body text that is the final element."
+        task = {
+            "id": "TASK-001",
+            "title": "Test task",
+            "status": "open",
+            "priority": "high",
+        }
+        lines = build_task_detail_lines(task)
+        assert all(body not in line for line in lines)
 
 
 class TestOutputFormatterTableFormatting:
@@ -186,7 +225,13 @@ class TestOutputFormatterTableFormatting:
         """format_task_table() handles None values in cells."""
         formatter = OutputFormatter()
         tasks = [
-            {"id": "TASK-001", "assignee": None, "title": "Test", "status": "open", "priority": "medium"},
+            {
+                "id": "TASK-001",
+                "assignee": None,
+                "title": "Test",
+                "status": "open",
+                "priority": "medium",
+            },
         ]
         columns = ["id", "assignee"]
         formatter.format_task_table(tasks, columns)

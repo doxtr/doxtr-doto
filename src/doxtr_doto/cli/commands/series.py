@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 @click.group("series")
 def series() -> None:
     """Manage recurring task series.
-    
+
     A series is a collection of tasks generated from a recurrence pattern.
     Use 'doto add --repeat' to create a series, then manage it with these commands.
     """
@@ -41,31 +41,28 @@ def series_list(ctx: DotoContext, json_output: bool) -> None:
         return
 
     if formatter.json_output:
-        formatter.print_json({
-            "series": [
-                {"id": sid, **sdata}
-                for sid, sdata in all_series.items()
-            ]
-        })
+        formatter.print_json(
+            {"series": [{"id": sid, **sdata} for sid, sdata in all_series.items()]}
+        )
         return
 
     # Print series list
     formatter.print(f"{'ID':<12} {'Progress':<10} {'Pattern':<30} {'Title'}")
     formatter.print("-" * 80)
-    
+
     for series_id, series_data in sorted(all_series.items()):
         pattern = RecurrencePattern.from_dict(series_data["pattern"])
         tasks = store.get_tasks_in_series(series_id)
-        
+
         # Count status
         done_count = sum(1 for t in tasks if t.get("status") == "done")
         total_count = len(tasks)
         progress = f"{done_count}/{total_count}"
-        
+
         title = series_data["title_template"]
         if len(title) > 30:
             title = title[:27] + "..."
-        
+
         formatter.print(f"{series_id:<12} {progress:<10} {pattern.describe():<30} {title}")
 
 
@@ -75,7 +72,7 @@ def series_list(ctx: DotoContext, json_output: bool) -> None:
 @click.pass_obj
 def series_show(ctx: DotoContext, series_id: str, json_output: bool) -> None:
     """Show details of a series and its tasks.
-    
+
     SERIES_ID is the identifier of the series to show.
     """
     formatter = ctx.formatter
@@ -92,12 +89,14 @@ def series_show(ctx: DotoContext, series_id: str, json_output: bool) -> None:
     pattern = RecurrencePattern.from_dict(series_data["pattern"])
 
     if formatter.json_output:
-        formatter.print_json({
-            "id": series_id,
-            **series_data,
-            "pattern_description": pattern.describe(),
-            "tasks": tasks,
-        })
+        formatter.print_json(
+            {
+                "id": series_id,
+                **series_data,
+                "pattern_description": pattern.describe(),
+                "tasks": tasks,
+            }
+        )
         return
 
     # Print series info
@@ -131,8 +130,12 @@ def series_show(ctx: DotoContext, series_id: str, json_output: bool) -> None:
 
 @series.command("complete")
 @click.argument("series_id", shell_complete=complete_series_id)
-@click.option("--before", "-b", "before_date", help="Complete tasks due before this date (default: today).")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be completed without making changes.")
+@click.option(
+    "--before", "-b", "before_date", help="Complete tasks due before this date (default: today)."
+)
+@click.option(
+    "--dry-run", "-n", is_flag=True, help="Show what would be completed without making changes."
+)
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
 @click.pass_obj
 def series_complete(
@@ -143,9 +146,9 @@ def series_complete(
     json_output: bool,
 ) -> None:
     """Mark all past tasks in a series as done.
-    
+
     SERIES_ID is the identifier of the series.
-    
+
     By default, completes all tasks with a due date before today.
     Use --before to specify a different cutoff date.
     """
@@ -173,7 +176,7 @@ def series_complete(
     for task in tasks:
         task_due = task.get("due")
         task_status = task.get("status", "open")
-        
+
         if task_due and task_due < cutoff and task_status != "done":
             to_complete.append(task)
 
@@ -196,7 +199,9 @@ def series_complete(
     if dry_run:
         formatter.print(f"Would complete {len(to_complete)} tasks (due before {cutoff}):")
         for task in to_complete:
-            formatter.print(f"  {task['id']}: {task.get('title', '')} (due: {task.get('due', 'none')})")
+            formatter.print(
+                f"  {task['id']}: {task.get('title', '')} (due: {task.get('due', 'none')})"
+            )
         return
 
     # Complete the tasks
@@ -205,7 +210,7 @@ def series_complete(
 
     store.save()
     formatter.print_success(f"Completed {len(to_complete)} tasks in series {series_id}")
-    
+
 
 @series.command("delete")
 @click.argument("series_id", shell_complete=complete_series_id)
@@ -247,7 +252,7 @@ def series_delete(
     skip_confirm = yes or force
 
     task_count = len(series_data.get("task_ids", []))
-    
+
     # Confirmation
     if not skip_confirm and not json_output:
         if keep_tasks:
@@ -260,18 +265,20 @@ def series_delete(
 
     # Delete
     success, deleted_tasks = store.delete_series(series_id, delete_tasks=not keep_tasks)
-    
+
     if not success:
         raise click.ClickException(f"Failed to delete series '{series_id}'.")
 
     store.save()
 
     if formatter.json_output:
-        formatter.print_json({
-            "deleted_series": series_id,
-            "deleted_tasks": deleted_tasks,
-            "tasks_kept": keep_tasks,
-        })
+        formatter.print_json(
+            {
+                "deleted_series": series_id,
+                "deleted_tasks": deleted_tasks,
+                "tasks_kept": keep_tasks,
+            }
+        )
         return
 
     if keep_tasks:
@@ -283,7 +290,9 @@ def series_delete(
 @series.command("extend")
 @click.argument("series_id", shell_complete=complete_series_id)
 @click.argument("new_until")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be created without making changes.")
+@click.option(
+    "--dry-run", "-n", is_flag=True, help="Show what would be created without making changes."
+)
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
 @click.pass_obj
 def series_extend(
@@ -294,14 +303,14 @@ def series_extend(
     json_output: bool,
 ) -> None:
     """Extend a series with a new end date.
-    
+
     SERIES_ID is the identifier of the series.
     NEW_UNTIL is the new end date (YYYY-MM-DD or relative like +3m).
-    
+
     Creates additional tasks for the extended period.
     """
     from doxtr_doto.cli.commands.add import parse_relative_date
-    from doxtr_doto.cli.recurrence import generate_occurrences, format_date_for_title
+    from doxtr_doto.cli.recurrence import format_date_for_title, generate_occurrences
 
     formatter = ctx.formatter
     if json_output:
@@ -335,18 +344,22 @@ def series_extend(
         return
 
     if formatter.json_output and dry_run:
-        formatter.print_json({
-            "series_id": series_id,
-            "old_until": old_until_date,
-            "new_until": new_until_date,
-            "dry_run": True,
-            "new_occurrences": [d.isoformat() for d in new_dates],
-            "count": len(new_dates),
-        })
+        formatter.print_json(
+            {
+                "series_id": series_id,
+                "old_until": old_until_date,
+                "new_until": new_until_date,
+                "dry_run": True,
+                "new_occurrences": [d.isoformat() for d in new_dates],
+                "count": len(new_dates),
+            }
+        )
         return
 
     if dry_run:
-        formatter.print(f"Would extend series {series_id} from {old_until_date} to {new_until_date}:")
+        formatter.print(
+            f"Would extend series {series_id} from {old_until_date} to {new_until_date}:"
+        )
         formatter.print(f"  New occurrences: {len(new_dates)}")
         for d in new_dates[:10]:
             formatter.print(f"    {d.isoformat()}")
@@ -383,21 +396,26 @@ def series_extend(
 
     # Update series
     all_task_ids = series_data.get("task_ids", []) + new_task_ids
-    store.update_series(series_id, {
-        "end_date": new_until_date,
-        "task_ids": all_task_ids,
-    })
+    store.update_series(
+        series_id,
+        {
+            "end_date": new_until_date,
+            "task_ids": all_task_ids,
+        },
+    )
 
     store.save()
 
     if formatter.json_output:
-        formatter.print_json({
-            "series_id": series_id,
-            "old_until": old_until_date,
-            "new_until": new_until_date,
-            "new_tasks": new_task_ids,
-            "count": len(new_task_ids),
-        })
+        formatter.print_json(
+            {
+                "series_id": series_id,
+                "old_until": old_until_date,
+                "new_until": new_until_date,
+                "new_tasks": new_task_ids,
+                "count": len(new_task_ids),
+            }
+        )
         return
 
     formatter.print_success(f"Extended series {series_id} to {new_until_date}")

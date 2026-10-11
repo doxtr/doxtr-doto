@@ -10,6 +10,8 @@ from doxtr_doto.cli.completion import complete_task_id
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
+    from doxtr_doto.sync.json_store import TaskData
 
 
 @click.command("deps")
@@ -95,13 +97,15 @@ def deps(
 
     # Output
     if output_format == "json":
-        formatter.print_json({
-            "task_id": task_id,
-            "task_title": task.get("title", ""),
-            "dependencies": deps_info,
-            "total_count": len(deps_info),
-            "pending_count": sum(1 for d in deps_info if d.get("status") != "done"),
-        })
+        formatter.print_json(
+            {
+                "task_id": task_id,
+                "task_title": task.get("title", ""),
+                "dependencies": deps_info,
+                "total_count": len(deps_info),
+                "pending_count": sum(1 for d in deps_info if d.get("status") != "done"),
+            }
+        )
     elif output_format == "tree":
         _print_deps_tree(formatter, task_id, task, all_tasks, recursive, status_list, pending_only)
     elif output_format == "list":
@@ -112,7 +116,7 @@ def deps(
 
 def _collect_direct_deps(
     task_id: str,
-    all_tasks: dict[str, dict[str, Any]],
+    all_tasks: dict[str, TaskData],
 ) -> list[dict[str, Any]]:
     """Collect direct dependencies of a task."""
     task = all_tasks.get(task_id)
@@ -125,32 +129,36 @@ def _collect_direct_deps(
     for dep_id in depends_on:
         dep_task = all_tasks.get(dep_id)
         if dep_task:
-            deps_info.append({
-                "id": dep_id,
-                "title": dep_task.get("title", ""),
-                "status": dep_task.get("status", ""),
-                "priority": dep_task.get("priority", ""),
-                "assignee": dep_task.get("assignee", ""),
-                "depth": 1,
-            })
+            deps_info.append(
+                {
+                    "id": dep_id,
+                    "title": dep_task.get("title", ""),
+                    "status": dep_task.get("status", ""),
+                    "priority": dep_task.get("priority", ""),
+                    "assignee": dep_task.get("assignee", ""),
+                    "depth": 1,
+                }
+            )
         else:
             # Dependency references a non-existent task
-            deps_info.append({
-                "id": dep_id,
-                "title": "(task not found)",
-                "status": "unknown",
-                "priority": "",
-                "assignee": "",
-                "depth": 1,
-                "missing": True,
-            })
+            deps_info.append(
+                {
+                    "id": dep_id,
+                    "title": "(task not found)",
+                    "status": "unknown",
+                    "priority": "",
+                    "assignee": "",
+                    "depth": 1,
+                    "missing": True,
+                }
+            )
 
     return deps_info
 
 
 def _collect_recursive_deps(
     task_id: str,
-    all_tasks: dict[str, dict[str, Any]],
+    all_tasks: dict[str, TaskData],
     visited: set[str],
     depth: int = 1,
 ) -> list[dict[str, Any]]:
@@ -171,35 +179,39 @@ def _collect_recursive_deps(
         dep_task = all_tasks.get(dep_id)
 
         if dep_task:
-            deps_info.append({
-                "id": dep_id,
-                "title": dep_task.get("title", ""),
-                "status": dep_task.get("status", ""),
-                "priority": dep_task.get("priority", ""),
-                "assignee": dep_task.get("assignee", ""),
-                "depth": depth,
-            })
+            deps_info.append(
+                {
+                    "id": dep_id,
+                    "title": dep_task.get("title", ""),
+                    "status": dep_task.get("status", ""),
+                    "priority": dep_task.get("priority", ""),
+                    "assignee": dep_task.get("assignee", ""),
+                    "depth": depth,
+                }
+            )
             # Recursively collect dependencies of this dependency
             nested_deps = _collect_recursive_deps(dep_id, all_tasks, visited, depth + 1)
             deps_info.extend(nested_deps)
         else:
-            deps_info.append({
-                "id": dep_id,
-                "title": "(task not found)",
-                "status": "unknown",
-                "priority": "",
-                "assignee": "",
-                "depth": depth,
-                "missing": True,
-            })
+            deps_info.append(
+                {
+                    "id": dep_id,
+                    "title": "(task not found)",
+                    "status": "unknown",
+                    "priority": "",
+                    "assignee": "",
+                    "depth": depth,
+                    "missing": True,
+                }
+            )
 
     return deps_info
 
 
 def _print_deps_table(
-    formatter,
+    formatter: OutputFormatter,
     task_id: str,
-    task: dict[str, Any],
+    task: TaskData,
     deps_info: list[dict[str, Any]],
 ) -> None:
     """Print dependencies as a table."""
@@ -212,20 +224,24 @@ def _print_deps_table(
         return
 
     # Use the existing table formatter
-    formatter.format_task_table(deps_info, columns=["id", "status", "priority", "assignee", "title"])
+    formatter.format_task_table(
+        deps_info, columns=["id", "status", "priority", "assignee", "title"]
+    )
 
     # Summary
     pending = sum(1 for d in deps_info if d.get("status") != "done")
     if pending == 0:
         formatter.print("\nAll dependencies are complete. This task can be started.", style="green")
     else:
-        formatter.print(f"\n{pending} of {len(deps_info)} dependencies still pending.", style="yellow")
+        formatter.print(
+            f"\n{pending} of {len(deps_info)} dependencies still pending.", style="yellow"
+        )
 
 
 def _print_deps_list(
-    formatter,
+    formatter: OutputFormatter,
     task_id: str,
-    task: dict[str, Any],
+    task: TaskData,
     deps_info: list[dict[str, Any]],
 ) -> None:
     """Print dependencies as a simple list."""
@@ -245,10 +261,10 @@ def _print_deps_list(
 
 
 def _print_deps_tree(
-    formatter,
+    formatter: OutputFormatter,
     task_id: str,
-    task: dict[str, Any],
-    all_tasks: dict[str, dict[str, Any]],
+    task: TaskData,
+    all_tasks: dict[str, TaskData],
     recursive: bool,
     status_list: list[str] | None,
     pending_only: bool,
@@ -275,9 +291,9 @@ def _print_deps_tree(
 
 
 def _print_tree_branch(
-    formatter,
+    formatter: OutputFormatter,
     dep_ids: list[str],
-    all_tasks: dict[str, dict[str, Any]],
+    all_tasks: dict[str, TaskData],
     prefix: str,
     recursive: bool,
     visited: set[str],
@@ -317,7 +333,9 @@ def _print_tree_branch(
             marker = "○"
 
         title = dep_task.get("title", "")
-        formatter.print(f"{prefix}{connector}{marker} {dep_id}: {title} [{status}]", style=status_style)
+        formatter.print(
+            f"{prefix}{connector}{marker} {dep_id}: {title} [{status}]", style=status_style
+        )
 
         # Recurse if requested and not visited
         if recursive and dep_id not in visited:

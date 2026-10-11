@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import re as _re
+import sys
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -16,10 +19,13 @@ from doxtr_doto.constants import (
     VALID_STATUSES,
 )
 
-try:
-    import tomli
-except ImportError:
-    tomli = None  # type: ignore[assignment]
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib  # Python <3.11 (pinned in pyproject)
+    except ModuleNotFoundError:
+        tomllib = None
 
 
 class OperationMode(Enum):
@@ -27,6 +33,181 @@ class OperationMode(Enum):
 
     SPHINX = "sphinx"
     STANDALONE = "standalone"
+
+
+#: Matches ``$VAR`` and ``${VAR}`` environment-variable references.
+_ENV_VAR_RE = _re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def resolve_env_vars(value: str) -> str:
+    """Resolve ``$VAR`` and ``${VAR}`` references against the environment.
+
+    Each reference is replaced with the corresponding environment variable's
+    value, or the empty string when the variable is unset. Literal text is
+    passed through unchanged. A value containing no reference is returned
+    unchanged.
+
+    Args:
+        value: The raw string, possibly containing env-var references.
+
+    Returns:
+        The string with every reference resolved.
+
+    Examples:
+        >>> import os
+        >>> os.environ["EXAMPLE_USER"] = "alice"
+        >>> resolve_env_vars("$EXAMPLE_USER")
+        'alice'
+        >>> resolve_env_vars("${EXAMPLE_USER}")
+        'alice'
+        >>> resolve_env_vars("literal")
+        'literal'
+    """
+
+    def _sub(match: _re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        return os.environ.get(name, "")
+
+    return _ENV_VAR_RE.sub(_sub, value)
+
+
+def resolve_user(value: str) -> str:
+    """Resolve the configured user value, falling back to ``$USER``.
+
+    If ``value`` contains env-var references they are resolved via
+    :func:`resolve_env_vars`. When the result is empty (no user configured),
+    the OS ``$USER`` environment variable is used as a fallback.
+
+    Args:
+        value: The raw configured user (may be empty or contain ``$VAR``).
+
+    Returns:
+        The resolved user name, or the empty string when none can be found.
+    """
+    resolved = resolve_env_vars(value).strip() if value else ""
+    if not resolved:
+        resolved = os.environ.get("USER", "").strip()
+    return resolved
+
+
+#: Default working day boundaries and break window used when projecting a
+#: date-only (all-day) due onto a concrete calendar time slot. These keep the
+#: ``all-day`` -> timed-event projection sensible (a task "due today" lands in
+#: the work day rather than at midnight). All naive/local, matching DotoDate.
+DEFAULT_WORKDAY_START = "08:00"
+DEFAULT_WORKDAY_END = "17:00"
+DEFAULT_BREAK_START = "12:00"
+DEFAULT_BREAK_END = "13:00"
+DEFAULT_EVENT_DURATION_MINUTES = 30
+
+
+@dataclass
+class CalendarConfig:
+    """Calendar-sync configuration (the ``[calendar]`` TOML table).
+
+    Loaded independently of the flat :class:`DotoConfig` because calendar sync
+    has a self-contained set of knobs (provider, auth, event projection) that
+    only the ``doto calsync`` command group consumes. Keeping it separate
+    avoids bloating the core config surface for users who never sync.
+
+    All times are naive, local ``HH:MM`` strings, matching how doto models
+    due dates/times (see :mod:`doxtr_doto.date_utils`). A timezone is attached
+    only at the provider boundary.
+    """
+
+    #: Whether calendar sync is enabled at all.
+    enabled: bool = False
+
+    #: Provider id: ``"google"``, ``"microsoft"``, ``"apple"``, or ``"caldav"``.
+    provider: str = ""
+
+    #: Target calendar. For CalDAV/Apple this is the calendar collection URL or
+    #: display name; for Google/Microsoft it is the calendar id (``"primary"``
+    #: by default when empty).
+    calendar: str = ""
+
+    #: How a task is represented remotely:
+    #:   * ``"event"`` - a VEVENT on the due date (visible in the calendar grid).
+    #:   * ``"todo"``  - a VTODO item (a to-do, not a visible timed event).
+    event_mode: str = "event"
+
+    #: Sync direction. Only ``"push"`` (doto -> calendar) is implemented today;
+    #: the engine is direction-aware so ``"two-way"`` can be enabled later.
+    direction: str = "push"
+
+    # --- Event-projection (event_mode == "event") --------------------------
+    #: Duration (minutes) of the event created for a time-bearing due.
+    event_duration_minutes: int = DEFAULT_EVENT_DURATION_MINUTES
+
+    #: Working-day window. A date-only (all-day) due is projected to start at
+    #: ``workday_start``; a timed due that would fall outside the window is left
+    #: at its own time. These also bound the all-day "spread" behaviour.
+    workday_start: str = DEFAULT_WORKDAY_START
+    workday_end: str = DEFAULT_WORKDAY_END
+
+    #: Daily break window carved out of the working day. An event whose time
+    #: slot would overlap this window is pushed to ``break_end``.
+    break_start: str = DEFAULT_BREAK_START
+    break_end: str = DEFAULT_BREAK_END
+
+    #: When True, a date-only due becomes a true all-day event instead of being
+    #: projected onto ``workday_start``.
+    all_day_for_dateless: bool = True
+
+    # --- Auth --------------------------------------------------------------
+    #: Provider endpoint URL (CalDAV base URL, or override for Google/MS).
+    url: str = ""
+
+    #: Username / account identifier (CalDAV, Apple ID email).
+    username: str = ""
+
+    #: Password or app-specific password (CalDAV / Apple). May use ``$VAR``
+    #: references resolved against the environment; never store secrets in a
+    #: committed config -- prefer an env var reference here.
+    password: str = ""
+
+    #: Path to an OAuth2 client-secrets JSON (Google / Microsoft). When empty,
+    #: a bundled application client id is used if one is configured.
+    oauth_client_secrets: str = ""
+
+    def resolved_password(self) -> str:
+        """Return the password with any ``$VAR`` references resolved."""
+        return resolve_env_vars(self.password) if self.password else ""
+
+    #: Accepted provider names/aliases (lowercased).
+    _VALID_PROVIDERS = frozenset(
+        {"google", "microsoft", "outlook", "ms", "graph", "apple", "icloud", "caldav"}
+    )
+    #: Accepted event-mode values.
+    _VALID_EVENT_MODES = frozenset({"event", "todo"})
+    #: Accepted sync directions (only "push" is implemented today).
+    _VALID_DIRECTIONS = frozenset({"push"})
+
+    def validate(self) -> list[str]:
+        """Return a list of human-readable configuration problems (empty if OK).
+
+        Validation is intentionally performed on demand (by the ``calsync``
+        commands) rather than at load time, matching the rest of the config
+        loader which does not reject unknown values. This surfaces typos early
+        with a clear message instead of a late failure deep in a provider.
+
+        Returns:
+            A list of error strings; empty when the config is usable.
+        """
+        errors: list[str] = []
+        if self.provider and self.provider.lower() not in self._VALID_PROVIDERS:
+            errors.append(
+                f"Unknown calendar provider {self.provider!r}; expected one of: "
+                "google, microsoft, apple, caldav."
+            )
+        if self.event_mode and self.event_mode.lower() not in self._VALID_EVENT_MODES:
+            errors.append(f"Unknown event_mode {self.event_mode!r}; expected 'event' or 'todo'.")
+        if self.direction and self.direction.lower() not in self._VALID_DIRECTIONS:
+            errors.append(
+                f"Unsupported direction {self.direction!r}; only 'push' is implemented "
+                "(doto -> calendar). Two-way sync is planned."
+            )
+        return errors
 
 
 @dataclass
@@ -61,13 +242,16 @@ class DotoConfig:
         default_factory=lambda: ["id", "priority", "status", "assignee", "due", "title"]
     )
 
+    # Current user (for RACI auto-defaults)
+    user: str = ""
+
     # Validation
-    statuses: list[str] = field(
-        default_factory=lambda: list(VALID_STATUSES)
-    )
-    priorities: list[str] = field(
-        default_factory=lambda: list(VALID_PRIORITIES)
-    )
+    statuses: list[str] = field(default_factory=lambda: list(VALID_STATUSES))
+    priorities: list[str] = field(default_factory=lambda: list(VALID_PRIORITIES))
+
+    # Calendar sync (the ``[calendar]`` TOML table). Self-contained; only the
+    # ``doto calsync`` command group reads it.
+    calendar: CalendarConfig = field(default_factory=CalendarConfig)
 
     def get_json_path(self) -> Path:
         """Get the absolute path to the JSON store."""
@@ -188,12 +372,14 @@ def load_toml(path: Path) -> dict[str, Any]:
     Returns:
         Parsed TOML content.
     """
-    if tomli is None:
+    if tomllib is None:
         raise ImportError(
-            "tomli is required for TOML parsing. Install with: pip install tomli"
+            "A TOML parser is required for TOML parsing. On Python 3.11+ this is the "
+            "stdlib 'tomllib'; on older Pythons install 'tomli' (pip install tomli)."
         )
     with open(path, "rb") as f:
-        return tomli.load(f)
+        data: dict[str, Any] = tomllib.load(f)
+        return data
 
 
 def _warn_config_error(path: Path, exc: Exception) -> None:
@@ -204,8 +390,7 @@ def _warn_config_error(path: Path, exc: Exception) -> None:
         exc: The exception that was raised.
     """
     warnings.warn(
-        f"doto: Failed to load config from {path}: {exc}. "
-        "Using defaults for this file.",
+        f"doto: Failed to load config from {path}: {exc}. Using defaults for this file.",
         stacklevel=3,
     )
 
@@ -300,26 +485,27 @@ def load_config(
 
     # Load user config (~/.doto/config.toml)
     user_config_path = Path.home() / ".doto" / "config.toml"
-    
-    # Check for project .doto.toml path early for tomli check
+
+    # Check for project .doto.toml path early for TOML-parser check
     project_toml = (project_root / ".doto.toml") if project_root else None
-    
-    # Pre-check for missing tomli when TOML files exist
-    toml_files_exist = (
-        user_config_path.exists() or 
-        (project_toml is not None and project_toml.exists())
+
+    # Pre-check for a missing TOML parser when TOML files exist
+    toml_files_exist = user_config_path.exists() or (
+        project_toml is not None and project_toml.exists()
     )
-    if toml_files_exist and tomli is None:
+    if toml_files_exist and tomllib is None:
         warnings.warn(
-            "doto: tomli is not installed; .toml config files cannot be loaded. "
-            "Install with: pip install tomli",
+            "doto: no TOML parser available; .toml config files cannot be loaded. "
+            "On Python 3.11+ 'tomllib' is in the stdlib; on older Pythons install "
+            "'tomli' (pip install tomli).",
             stacklevel=2,
         )
-    
+
     if user_config_path.exists():
         try:
             user_config = load_toml(user_config_path)
             _apply_toml_config(config, user_config.get("doto", {}))
+            _apply_calendar_config(config, user_config.get("calendar", {}))
         except Exception as exc:
             _warn_config_error(user_config_path, exc)
 
@@ -341,6 +527,7 @@ def load_config(
             try:
                 project_config = load_toml(project_toml)
                 _apply_toml_config(config, project_config.get("doto", {}))
+                _apply_calendar_config(config, project_config.get("calendar", {}))
             except Exception as exc:
                 _warn_config_error(project_toml, exc)
 
@@ -394,6 +581,43 @@ def _apply_toml_config(config: DotoConfig, toml_config: dict[str, Any]) -> None:
         config.statuses = list(toml_config["statuses"])
     if "priorities" in toml_config:
         config.priorities = list(toml_config["priorities"])
+    if "user" in toml_config:
+        config.user = toml_config["user"]
+
+
+def _apply_calendar_config(config: DotoConfig, cal: dict[str, Any]) -> None:
+    """Apply the ``[calendar]`` TOML table to ``config.calendar``.
+
+    Only known keys are copied; unknown keys are ignored so forward-compatible
+    configs don't error on an older doto. String/int/bool values are coerced
+    to the dataclass field types.
+    """
+    if not cal:
+        return
+    cc = config.calendar
+    str_keys = (
+        "provider",
+        "calendar",
+        "event_mode",
+        "direction",
+        "workday_start",
+        "workday_end",
+        "break_start",
+        "break_end",
+        "url",
+        "username",
+        "password",
+        "oauth_client_secrets",
+    )
+    for key in str_keys:
+        if key in cal:
+            setattr(cc, key, str(cal[key]))
+    if "enabled" in cal:
+        cc.enabled = bool(cal["enabled"])
+    if "all_day_for_dateless" in cal:
+        cc.all_day_for_dateless = bool(cal["all_day_for_dateless"])
+    if "event_duration_minutes" in cal:
+        cc.event_duration_minutes = int(cal["event_duration_minutes"])
 
 
 def _apply_sphinx_config(config: DotoConfig, sphinx_config: dict[str, Any]) -> None:
@@ -416,11 +640,13 @@ def _apply_sphinx_config(config: DotoConfig, sphinx_config: dict[str, Any]) -> N
         config.id_prefix = sphinx_config["id_prefix"]
     if "list_columns" in sphinx_config:
         config.list_columns = list(sphinx_config["list_columns"])
+    if "default_user" in sphinx_config:
+        config.user = sphinx_config["default_user"]
 
 
 def _apply_env_config(config: DotoConfig) -> None:
     """Apply environment variable configuration."""
-    env_mappings = {
+    env_mappings: dict[str, tuple[str, Callable[[str], Any]]] = {
         "DOTO_JSON_FILE": ("json_file", Path),
         "DOTO_INBOX_FILE": ("inbox_file", Path),
         "DOTO_DEFAULT_PRIORITY": ("default_priority", str),
@@ -432,6 +658,7 @@ def _apply_env_config(config: DotoConfig) -> None:
         "DOTO_COLOR": ("color", str),
         "DOTO_LIST_COLUMNS": ("list_columns", lambda x: x.split(",")),
         "DOTO_MAX_OCCURRENCES": ("max_occurrences", int),
+        "DOTO_USER": ("user", str),
     }
 
     for env_var, (attr, converter) in env_mappings.items():

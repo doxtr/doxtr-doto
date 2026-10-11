@@ -9,7 +9,7 @@ from __future__ import annotations
 # Valid values for task status
 VALID_STATUSES: tuple[str, ...] = ("open", "in-progress", "blocked", "done")
 
-# Valid values for task priority  
+# Valid values for task priority
 VALID_PRIORITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
 
 # Valid task-list icon rendering modes (Feature 5). Single source of truth
@@ -19,6 +19,13 @@ VALID_PRIORITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
 #   "icon-text" = icon followed by text (default)
 #   "text"      = text only
 VALID_LIST_ICON_MODES: frozenset[str] = frozenset({"icon", "icon-text", "text"})
+
+# Valid PDF/LaTeX task-box layouts (Feature D). Single source of truth shared
+# by config.validate_config and nodes._resolve_latex_layout so the set cannot
+# drift across those sites.
+#   "default" = roomy stacked-icon box (one metadata group per row)
+#   "compact" = dense single-line header + inline icon+field pairs, same fields
+VALID_LATEX_LAYOUTS: frozenset[str] = frozenset({"default", "compact"})
 
 # Status ordering (higher value = more urgent/active)
 STATUS_ORDER: dict[str, int] = {
@@ -98,6 +105,16 @@ DEFAULT_STATUS = "open"
 
 # Status constants for specific checks
 DONE_STATUS = "done"
+
+# Monday-first three-letter weekday abbreviations, indexed by Python's
+# datetime.date.weekday() convention (Monday=0 .. Sunday=6). SINGLE SOURCE OF
+# TRUTH for weekday abbreviations: the title-case display labels and the
+# lowercase parse-match set used by the TUI time-management screens
+# (cli/tui/time_mgmt.py parse_workweek_text, cli/tui/widgets.py
+# weekday_range_label) are both derived from this tuple, so the ordering
+# cannot drift across those sites. This module imports nothing from the
+# package, so it is a safe low-level home with no circular-import risk.
+WEEKDAY_ABBR: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 # Archive defaults
 ARCHIVE_DEFAULT_STATUSES: list[str] = ["done"]

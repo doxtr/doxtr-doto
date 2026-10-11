@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-import click
 from click.shell_completion import CompletionItem
 
 if TYPE_CHECKING:
     from click import Context, Parameter
 
+    from doxtr_doto.sync.json_store import JsonTaskStore
 
-def get_task_store():
+
+def get_task_store() -> JsonTaskStore | None:
     """Get task store for completion, returns None if not available."""
     from doxtr_doto.cli.config import load_config
     from doxtr_doto.cli.json_store import JsonTaskStore
@@ -28,9 +28,7 @@ def get_task_store():
     return None
 
 
-def complete_task_id(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_task_id(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete task IDs from the task store."""
     store = get_task_store()
     if not store:
@@ -48,9 +46,7 @@ def complete_task_id(
     return completions
 
 
-def complete_open_task_id(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_open_task_id(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete task IDs for open/in-progress tasks only."""
     store = get_task_store()
     if not store:
@@ -68,9 +64,7 @@ def complete_open_task_id(
     return completions
 
 
-def complete_done_task_id(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_done_task_id(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete task IDs for done tasks only (for reopen command)."""
     store = get_task_store()
     if not store:
@@ -88,19 +82,22 @@ def complete_done_task_id(
     return completions
 
 
-def complete_assignee(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
-    """Complete assignee names from existing tasks."""
-    store = get_task_store()
-    if not store:
-        return []
+def complete_assignee(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
+    """Complete assignee names from existing tasks and the memory store."""
+    from doxtr_doto.cli.known_names import get_assignees
 
-    assignees = set()
-    for task in store.get_all_tasks().values():
-        assignee = task.get("assignee")
-        if assignee:
-            assignees.add(assignee)
+    store = get_task_store()
+
+    assignees: set[str] = set()
+    if store:
+        for task in store.get_all_tasks().values():
+            assignee = task.get("assignee")
+            if assignee:
+                assignees.add(assignee)
+
+    # Merge known names from the memory store
+    for name in get_assignees():
+        assignees.add(name)
 
     completions = []
     for assignee in sorted(assignees):
@@ -110,18 +107,21 @@ def complete_assignee(
     return completions
 
 
-def complete_tag(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
-    """Complete tag names from existing tasks."""
-    store = get_task_store()
-    if not store:
-        return []
+def complete_tag(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
+    """Complete tag names from existing tasks and the memory store."""
+    from doxtr_doto.cli.known_names import get_tags
 
-    tags = set()
-    for task in store.get_all_tasks().values():
-        for tag in task.get("tags", []):
-            tags.add(tag)
+    store = get_task_store()
+
+    tags: set[str] = set()
+    if store:
+        for task in store.get_all_tasks().values():
+            for tag in task.get("tags", []):
+                tags.add(tag)
+
+    # Merge known names from the memory store
+    for name in get_tags():
+        tags.add(name)
 
     completions = []
     for tag in sorted(tags):
@@ -131,24 +131,16 @@ def complete_tag(
     return completions
 
 
-def complete_status(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_status(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete status values."""
     statuses = ["open", "in-progress", "blocked", "done"]
-    return [
-        CompletionItem(s) for s in statuses if s.startswith(incomplete.lower())
-    ]
+    return [CompletionItem(s) for s in statuses if s.startswith(incomplete.lower())]
 
 
-def complete_priority(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_priority(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete priority values."""
     priorities = ["low", "medium", "high", "critical"]
-    return [
-        CompletionItem(p) for p in priorities if p.startswith(incomplete.lower())
-    ]
+    return [CompletionItem(p) for p in priorities if p.startswith(incomplete.lower())]
 
 
 def _format_date(d: date) -> str:
@@ -158,7 +150,7 @@ def _format_date(d: date) -> str:
 
 def _next_weekday(weekday: int, after_today: bool = True) -> date:
     """Get next occurrence of a weekday (0=Monday, 6=Sunday).
-    
+
     If after_today is True, always returns a future date.
     If after_today is False and today is that weekday, returns today.
     """
@@ -175,8 +167,23 @@ def _add_months(d: date, months: int) -> date:
     year = d.year + (month - 1) // 12
     month = (month - 1) % 12 + 1
     # Handle edge cases like Jan 31 + 1 month
-    day = min(d.day, [31, 28 + (1 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 0), 
-                      31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    day = min(
+        d.day,
+        [
+            31,
+            28 + (1 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 0),
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ][month - 1],
+    )
     return date(year, month, day)
 
 
@@ -195,18 +202,15 @@ def _end_of_month() -> date:
     return date(today.year, today.month + 1, 1) - timedelta(days=1)
 
 
-def complete_date(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_date(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete date shortcuts with dynamic date calculation."""
     today = date.today()
-    
+
     # Build shortcuts with actual resolved dates
     shortcuts = [
         # Named dates
         ("today", today),
         ("tomorrow", today + timedelta(days=1)),
-        
         # Relative days
         ("+1d", today + timedelta(days=1)),
         ("+2d", today + timedelta(days=2)),
@@ -216,18 +220,15 @@ def complete_date(
         ("+10d", today + timedelta(days=10)),
         ("+14d", today + timedelta(days=14)),
         ("+30d", today + timedelta(days=30)),
-        
         # Relative weeks
         ("+1w", today + timedelta(weeks=1)),
         ("+2w", today + timedelta(weeks=2)),
         ("+3w", today + timedelta(weeks=3)),
         ("+4w", today + timedelta(weeks=4)),
-        
         # Relative months
         ("+1m", _add_months(today, 1)),
         ("+2m", _add_months(today, 2)),
         ("+3m", _add_months(today, 3)),
-        
         # Weekdays (next occurrence, could be today)
         ("monday", _next_weekday(0, after_today=False)),
         ("tuesday", _next_weekday(1, after_today=False)),
@@ -236,7 +237,6 @@ def complete_date(
         ("friday", _next_weekday(4, after_today=False)),
         ("saturday", _next_weekday(5, after_today=False)),
         ("sunday", _next_weekday(6, after_today=False)),
-        
         # Next weekday (always in the future)
         ("next-monday", _next_weekday(0, after_today=True)),
         ("next-tuesday", _next_weekday(1, after_today=True)),
@@ -245,13 +245,12 @@ def complete_date(
         ("next-friday", _next_weekday(4, after_today=True)),
         ("next-saturday", _next_weekday(5, after_today=True)),
         ("next-sunday", _next_weekday(6, after_today=True)),
-        
         # Period shortcuts
         ("next-week", today + timedelta(weeks=1)),
         ("end-of-week", _end_of_week()),
         ("end-of-month", _end_of_month()),
     ]
-    
+
     return [
         CompletionItem(value, help=_format_date(target_date))
         for value, target_date in shortcuts
@@ -259,9 +258,7 @@ def complete_date(
     ]
 
 
-def complete_series_id(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_series_id(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete series IDs from the task store."""
     store = get_task_store()
     if not store:
@@ -277,9 +274,7 @@ def complete_series_id(
     return completions
 
 
-def complete_recurrence(
-    ctx: Context, param: Parameter, incomplete: str
-) -> list[CompletionItem]:
+def complete_recurrence(ctx: Context, param: Parameter, incomplete: str) -> list[CompletionItem]:
     """Complete recurrence pattern suggestions."""
     patterns = [
         ("every day", "Daily"),
@@ -299,7 +294,7 @@ def complete_recurrence(
         ("every month on last friday", "Last Friday of month"),
         ("every 3 months on first monday", "Quarterly"),
     ]
-    
+
     return [
         CompletionItem(value, help=desc)
         for value, desc in patterns

@@ -45,7 +45,18 @@ def _format_csv(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
         return ""
 
-    columns = ["id", "title", "priority", "status", "assignee", "due", "tags", "depends_on", "created", "updated"]
+    columns = [
+        "id",
+        "title",
+        "priority",
+        "status",
+        "assignee",
+        "due",
+        "tags",
+        "depends_on",
+        "created",
+        "updated",
+    ]
 
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")

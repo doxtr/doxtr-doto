@@ -16,9 +16,10 @@ from doxtr_doto.cli.completion import (
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.sync.json_store import JsonTaskStore
 
 
-def _get_series_for_task(store, task_id: str) -> str | None:
+def _get_series_for_task(store: JsonTaskStore, task_id: str) -> str | None:
     """Check if a task belongs to a series.
 
     Args:
@@ -30,12 +31,12 @@ def _get_series_for_task(store, task_id: str) -> str | None:
     """
     for series_id, series_data in store.get_all_series().items():
         if task_id in series_data.get("task_ids", []):
-            return series_id
+            return str(series_id)
     return None
 
 
 def _collect_tasks_to_delete(
-    ctx: "DotoContext",
+    ctx: DotoContext,
     task_ids: tuple[str, ...],
     filter_status: str | None,
     filter_priority: str | None,
@@ -161,7 +162,7 @@ def _collect_tasks_to_delete(
 )
 @click.pass_obj
 def delete(
-    ctx: "DotoContext",
+    ctx: DotoContext,
     task_ids: tuple[str, ...],
     filter_status: str | None,
     filter_priority: str | None,
@@ -205,7 +206,9 @@ def delete(
     store = ctx.store
 
     # Validate: either task_ids or filters must be provided
-    has_filters = any([filter_status, filter_priority, filter_assignee, filter_tags, filter_archived])
+    has_filters = any(
+        [filter_status, filter_priority, filter_assignee, filter_tags, filter_archived]
+    )
 
     # Warn if both task IDs and filters are provided (IDs take precedence)
     if task_ids and has_filters:
@@ -213,23 +216,29 @@ def delete(
 
     if not task_ids and not has_filters:
         if json_output:
-            formatter.print_json({
-                "error": "No tasks specified. Provide task IDs or use filter options with --all.",
-                "deleted": [],
-                "not_found": [],
-            })
+            formatter.print_json(
+                {
+                    "error": "No tasks specified. Provide task IDs or use filter options with --all.",
+                    "deleted": [],
+                    "not_found": [],
+                }
+            )
         else:
-            formatter.print_error("No tasks specified. Provide task IDs or use filter options with --all.")
+            formatter.print_error(
+                "No tasks specified. Provide task IDs or use filter options with --all."
+            )
         raise SystemExit(1)
 
     # Safety check: require --all flag when using filters without specific IDs
     if has_filters and not task_ids and not all_flag:
         if json_output:
-            formatter.print_json({
-                "error": "The --all flag is required when using filters without specific task IDs.",
-                "deleted": [],
-                "not_found": [],
-            })
+            formatter.print_json(
+                {
+                    "error": "The --all flag is required when using filters without specific task IDs.",
+                    "deleted": [],
+                    "not_found": [],
+                }
+            )
         else:
             formatter.print_error(
                 "The --all flag is required when using filters without specific task IDs.\n"
@@ -252,11 +261,13 @@ def delete(
 
     if not tasks_to_delete and not not_found:
         if json_output:
-            formatter.print_json({
-                "message": "No tasks matched the specified criteria.",
-                "deleted": [],
-                "not_found": [],
-            })
+            formatter.print_json(
+                {
+                    "message": "No tasks matched the specified criteria.",
+                    "deleted": [],
+                    "not_found": [],
+                }
+            )
         else:
             formatter.print_warning("No tasks matched the specified criteria.")
         return
@@ -272,15 +283,16 @@ def delete(
     # Dry run mode: just show what would be deleted
     if dry_run:
         if json_output:
-            formatter.print_json({
-                "dry_run": True,
-                "would_delete": [t["id"] for t in tasks_to_delete],
-                "series_warnings": [
-                    {"task_id": tid, "series_id": sid}
-                    for tid, sid in series_warnings
-                ],
-                "not_found": not_found,
-            })
+            formatter.print_json(
+                {
+                    "dry_run": True,
+                    "would_delete": [t["id"] for t in tasks_to_delete],
+                    "series_warnings": [
+                        {"task_id": tid, "series_id": sid} for tid, sid in series_warnings
+                    ],
+                    "not_found": not_found,
+                }
+            )
         else:
             formatter.print("Dry run - the following tasks would be deleted:", style="bold")
             for task in tasks_to_delete:
@@ -351,7 +363,6 @@ def delete(
         }
         if series_warnings:
             result["series_warnings"] = [
-                {"task_id": tid, "series_id": sid}
-                for tid, sid in series_warnings
+                {"task_id": tid, "series_id": sid} for tid, sid in series_warnings
             ]
         formatter.print_json(result)

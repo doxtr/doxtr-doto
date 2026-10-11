@@ -13,7 +13,6 @@ from doxtr_doto.utils import (
     validate_path_within,
 )
 
-
 # ── HTML escaping tests ────────────────────────────────────────────────────
 
 
@@ -136,7 +135,7 @@ class TestValidatePathWithin:
         """Valid relative paths within base are accepted."""
         base = tmp_path / "project"
         base.mkdir()
-        
+
         result = validate_path_within("tasks/new.rst", base)
         assert result == base / "tasks" / "new.rst"
 
@@ -145,7 +144,7 @@ class TestValidatePathWithin:
         base = tmp_path / "project"
         base.mkdir()
         target = base / "tasks" / "new.rst"
-        
+
         result = validate_path_within(str(target), base)
         assert result == target
 
@@ -153,7 +152,7 @@ class TestValidatePathWithin:
         """Parent directory traversal is rejected."""
         base = tmp_path / "project" / "docs"
         base.mkdir(parents=True)
-        
+
         with pytest.raises(ValueError, match="outside"):
             validate_path_within("../secret.txt", base)
 
@@ -161,7 +160,7 @@ class TestValidatePathWithin:
         """Multiple parent traversals are rejected."""
         base = tmp_path / "project" / "docs"
         base.mkdir(parents=True)
-        
+
         with pytest.raises(ValueError, match="outside"):
             validate_path_within("../../etc/passwd", base)
 
@@ -169,7 +168,7 @@ class TestValidatePathWithin:
         """Absolute paths outside base are rejected."""
         base = tmp_path / "project"
         base.mkdir()
-        
+
         with pytest.raises(ValueError, match="outside"):
             validate_path_within("/etc/passwd", base)
 
@@ -177,7 +176,7 @@ class TestValidatePathWithin:
         """Nested relative paths are resolved correctly."""
         base = tmp_path / "project"
         base.mkdir()
-        
+
         # Path with internal .. that still stays within base
         result = validate_path_within("tasks/../docs/file.rst", base)
         assert result == base / "docs" / "file.rst"
@@ -186,7 +185,7 @@ class TestValidatePathWithin:
         """Path objects work as input."""
         base = tmp_path / "project"
         base.mkdir()
-        
+
         result = validate_path_within(Path("tasks/new.rst"), base)
         assert result == base / "tasks" / "new.rst"
 
@@ -197,21 +196,19 @@ class TestValidatePathWithin:
 @pytest.fixture
 def sphinx_build(tmp_path):
     """Helper fixture that runs a minimal Sphinx HTML build."""
+
     def _build(rst_content: str, conf_extra: str = "") -> tuple[Path, str]:
         src = tmp_path / "src"
         src.mkdir()
         out = tmp_path / "out"
 
         (src / "conf.py").write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            + conf_extra + "\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\n" + conf_extra + "\n"
         )
-        (src / "index.rst").write_text(
-            "Test\n====\n\n" + rst_content
-        )
+        (src / "index.rst").write_text("Test\n====\n\n" + rst_content)
 
         from sphinx.application import Sphinx
+
         app = Sphinx(
             srcdir=str(src),
             confdir=str(src),
@@ -232,10 +229,7 @@ class TestXssPrevention:
 
     def test_title_with_script_tag_is_escaped(self, sphinx_build):
         """Script tags in task titles are escaped."""
-        _, html = sphinx_build(
-            ".. doto:: <script>alert('xss')</script>\n"
-            "   :id: XSS-001\n"
-        )
+        _, html = sphinx_build(".. doto:: <script>alert('xss')</script>\n   :id: XSS-001\n")
         # Script tag should be escaped, not raw
         assert "<script>alert" not in html
         assert "&lt;script&gt;" in html or "alert" not in html
@@ -243,9 +237,7 @@ class TestXssPrevention:
     def test_assignee_with_html_is_escaped(self, sphinx_build):
         """HTML in assignee field is escaped."""
         _, html = sphinx_build(
-            ".. doto:: Test task\n"
-            "   :id: XSS-002\n"
-            '   :assignee: <img src=x onerror="alert(1)">\n'
+            '.. doto:: Test task\n   :id: XSS-002\n   :assignee: <img src=x onerror="alert(1)">\n'
         )
         # Should not contain unescaped img tag
         assert '<img src=x onerror="alert(1)">' not in html
@@ -253,9 +245,7 @@ class TestXssPrevention:
     def test_tag_with_html_is_escaped(self, sphinx_build):
         """HTML in tags is escaped."""
         _, html = sphinx_build(
-            ".. doto:: Test task\n"
-            "   :id: XSS-003\n"
-            "   :tags: <b>bold</b>, normal\n"
+            ".. doto:: Test task\n   :id: XSS-003\n   :tags: <b>bold</b>, normal\n"
         )
         # Bold tag should be escaped
         assert "<b>bold</b>" not in html
@@ -267,7 +257,7 @@ class TestLatexEscaping:
     def test_latex_escape_function(self):
         """LaTeX special characters are properly escaped."""
         from doxtr_doto.nodes import _latex_escape
-        
+
         # Test special characters
         assert _latex_escape("test&value") == "test\\&value"
         assert _latex_escape("100%") == "100\\%"
@@ -279,12 +269,12 @@ class TestLatexEscaping:
     def test_latex_escape_empty_string(self):
         """Empty string returns empty string."""
         from doxtr_doto.nodes import _latex_escape
-        
+
         assert _latex_escape("") == ""
 
     def test_latex_escape_backslash(self):
         """Backslashes are escaped."""
         from doxtr_doto.nodes import _latex_escape
-        
+
         result = _latex_escape("path\\to\\file")
         assert "\\\\" in result or "textbackslash" in result

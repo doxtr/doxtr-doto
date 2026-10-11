@@ -7,16 +7,14 @@ and that the JsonTaskStore delegation maintains backward compatibility.
 from __future__ import annotations
 
 import pytest
-from datetime import datetime
-from pathlib import Path
 
 from doxtr_doto.sync.json_store import (
     JsonTaskStore,
-    _IdGenerator,
-    _TaskRepository,
-    _SeriesRepository,
-    TaskData,
     SeriesData,
+    TaskData,
+    _IdGenerator,
+    _SeriesRepository,
+    _TaskRepository,
 )
 
 
@@ -239,8 +237,22 @@ class TestSeriesRepository:
 
     def test_get_all(self, repo):
         """Get all returns the series dictionary."""
-        repo.add("SER-001", title_template="S1", pattern={}, start_date="2024-01-01", end_date="2024-12-31", task_ids=[])
-        repo.add("SER-002", title_template="S2", pattern={}, start_date="2024-01-01", end_date="2024-12-31", task_ids=[])
+        repo.add(
+            "SER-001",
+            title_template="S1",
+            pattern={},
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            task_ids=[],
+        )
+        repo.add(
+            "SER-002",
+            title_template="S2",
+            pattern={},
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            task_ids=[],
+        )
         all_series = repo.get_all()
         assert len(all_series) == 2
 
@@ -250,8 +262,22 @@ class TestSeriesRepository:
 
     def test_generate_id_increments(self, repo):
         """Generate ID increments from highest existing."""
-        repo.add("SER-001", title_template="S1", pattern={}, start_date="2024-01-01", end_date="2024-12-31", task_ids=[])
-        repo.add("SER-005", title_template="S5", pattern={}, start_date="2024-01-01", end_date="2024-12-31", task_ids=[])
+        repo.add(
+            "SER-001",
+            title_template="S1",
+            pattern={},
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            task_ids=[],
+        )
+        repo.add(
+            "SER-005",
+            title_template="S5",
+            pattern={},
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            task_ids=[],
+        )
         assert repo.generate_id() == "SER-006"
 
 
@@ -265,7 +291,8 @@ class TestJsonTaskStoreDelegation:
 
     def test_helper_classes_are_exposed(self):
         """Helper classes can be imported from the module."""
-        from doxtr_doto.sync.json_store import _IdGenerator, _TaskRepository, _SeriesRepository
+        from doxtr_doto.sync.json_store import _IdGenerator, _SeriesRepository, _TaskRepository
+
         assert _IdGenerator is not None
         assert _TaskRepository is not None
         assert _SeriesRepository is not None
@@ -432,11 +459,11 @@ class TestBackwardCompatibility:
         """iter_tasks with include_archived parameter still works."""
         store.add_task("DOTO-001", {"title": "Active"})
         store.add_task("DOTO-002", {"title": "Archived", "archived": True})
-        
+
         # Without archived
         active = list(store.iter_tasks(include_archived=False))
         assert len(active) == 1
-        
+
         # With archived
         all_tasks = list(store.iter_tasks(include_archived=True))
         assert len(all_tasks) == 2
@@ -469,10 +496,10 @@ class TestBackwardCompatibility:
             task_ids=["DOTO-001"],
         )
         store.save()
-        
+
         # Load in a new store instance
         store2 = JsonTaskStore(store.path)
         store2.load()
-        
+
         assert store2.get_task("DOTO-001")["title"] == "Test task"
         assert store2.get_series("SER-001")["title_template"] == "Weekly"

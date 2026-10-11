@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -12,9 +12,11 @@ from doxtr_doto.constants import (
     PRIORITY_DISPLAY_ORDER,
     STATUS_DISPLAY_ORDER,
 )
+from doxtr_doto.date_utils import is_overdue, parse_date_safe
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
 
 
 @click.command("stats")
@@ -100,9 +102,10 @@ def stats(
     # Overdue tasks
     today = date.today()
     overdue = [
-        t for t in tasks
+        t
+        for t in tasks
         if t.get("due")
-        and datetime.fromisoformat(t["due"]).date() < today
+        and is_overdue(t["due"])
         and t.get("status") != "done"
         and not t.get("archived")
     ]
@@ -110,14 +113,15 @@ def stats(
 
     # Tasks due this week
     from datetime import timedelta
+
     week_end = today + timedelta(days=7)
-    due_this_week = [
-        t for t in tasks
-        if t.get("due")
-        and today <= datetime.fromisoformat(t["due"]).date() <= week_end
-        and t.get("status") != "done"
-        and not t.get("archived")
-    ]
+    due_this_week = []
+    for t in tasks:
+        if not t.get("due") or t.get("status") == "done" or t.get("archived"):
+            continue
+        due = parse_date_safe(t["due"])
+        if due is not None and today <= due.date <= week_end:
+            due_this_week.append(t)
     stats_data["due_this_week"] = len(due_this_week)
 
     # If no grouping specified, show all groupings
@@ -130,12 +134,16 @@ def stats(
 
     # Group by priority
     if by_priority or show_all:
-        priority_counts = Counter(t.get("priority", "medium") for t in tasks if not t.get("archived"))
+        priority_counts = Counter(
+            t.get("priority", "medium") for t in tasks if not t.get("archived")
+        )
         stats_data["by_priority"] = dict(priority_counts)
 
     # Group by assignee
     if by_assignee or show_all:
-        assignee_counts = Counter(t.get("assignee") or "unassigned" for t in tasks if not t.get("archived"))
+        assignee_counts = Counter(
+            t.get("assignee") or "unassigned" for t in tasks if not t.get("archived")
+        )
         stats_data["by_assignee"] = dict(assignee_counts)
 
     # Group by tag
@@ -155,11 +163,13 @@ def stats(
     if output_format == "json":
         formatter.print_json(stats_data)
     else:
-        _format_stats_text(formatter, stats_data, by_status, by_priority, by_assignee, by_tag, show_all)
+        _format_stats_text(
+            formatter, stats_data, by_status, by_priority, by_assignee, by_tag, show_all
+        )
 
 
 def _format_stats_text(
-    formatter,
+    formatter: OutputFormatter,
     stats_data: dict[str, Any],
     by_status: bool,
     by_priority: bool,
@@ -174,12 +184,12 @@ def _format_stats_text(
     # Summary
     formatter.print(f"\nTotal tasks: {stats_data['total']}")
     formatter.print(f"  Active: {stats_data['active']}")
-    if stats_data['archived'] > 0:
+    if stats_data["archived"] > 0:
         formatter.print(f"  Archived: {stats_data['archived']}")
 
-    if stats_data['overdue'] > 0:
+    if stats_data["overdue"] > 0:
         formatter.print(f"  Overdue: {stats_data['overdue']}", style="red")
-    if stats_data['due_this_week'] > 0:
+    if stats_data["due_this_week"] > 0:
         formatter.print(f"  Due this week: {stats_data['due_this_week']}", style="yellow")
 
     # Status breakdown
@@ -205,7 +215,7 @@ PRIORITY_ORDER = PRIORITY_DISPLAY_ORDER
 
 
 def _print_breakdown(
-    formatter,
+    formatter: OutputFormatter,
     title: str,
     counts: dict[str, int],
     order: list[str] | None = None,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+
 import pytest
 from click.testing import CliRunner
 
@@ -18,47 +19,51 @@ def archive_project(tmp_path):
     """Create a project with tasks for archive testing."""
     doto_dir = tmp_path / ".doto"
     doto_dir.mkdir()
-    
+
     config_file = tmp_path / ".doto.toml"
-    config_file.write_text('''
+    config_file.write_text("""
 [doto]
 json_file = ".doto/tasks.json"
 id_prefix = "TEST"
-''')
-    
+""")
+
     json_file = doto_dir / "tasks.json"
-    json_file.write_text(json.dumps({
-        "version": 3,
-        "updated": "2026-07-26T10:00:00",
-        "tasks": {
-            "TASK-001": {
-                "title": "First task",
-                "status": "open",
-                "priority": "high",
-                "archived": False,
-            },
-            "TASK-002": {
-                "title": "Second task",
-                "status": "done",
-                "priority": "medium",
-                "archived": False,
-            },
-            "TASK-003": {
-                "title": "Third task",
-                "status": "open",
-                "priority": "low",
-                "archived": False,
-            },
-            "TASK-004": {
-                "title": "Already archived",
-                "status": "done",
-                "priority": "medium",
-                "archived": True,
-            },
-        },
-        "series": {},
-    }))
-    
+    json_file.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    "TASK-001": {
+                        "title": "First task",
+                        "status": "open",
+                        "priority": "high",
+                        "archived": False,
+                    },
+                    "TASK-002": {
+                        "title": "Second task",
+                        "status": "done",
+                        "priority": "medium",
+                        "archived": False,
+                    },
+                    "TASK-003": {
+                        "title": "Third task",
+                        "status": "open",
+                        "priority": "low",
+                        "archived": False,
+                    },
+                    "TASK-004": {
+                        "title": "Already archived",
+                        "status": "done",
+                        "priority": "medium",
+                        "archived": True,
+                    },
+                },
+                "series": {},
+            }
+        )
+    )
+
     return tmp_path
 
 
@@ -70,10 +75,9 @@ class TestArchiveConfirmation:
         from doxtr_doto.cli.main import cli
 
         # Decline confirmation
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001"
-        ], input="n\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001"], input="n\n"
+        )
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
@@ -87,10 +91,9 @@ class TestArchiveConfirmation:
         """Test archiving a single task with user confirmation."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001"
-        ], input="y\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001"], input="y\n"
+        )
 
         assert result.exit_code == 0
         assert "Archived task TASK-001" in result.output
@@ -103,10 +106,11 @@ class TestArchiveConfirmation:
         """Test that bulk archive shows task count in confirmation."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "TASK-002", "TASK-003"
-        ], input="n\n")
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(archive_project), "archive", "TASK-001", "TASK-002", "TASK-003"],
+            input="n\n",
+        )
 
         assert result.exit_code == 0
         assert "3 tasks" in result.output
@@ -116,10 +120,9 @@ class TestArchiveConfirmation:
         """Test bulk archive with user confirmation."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "TASK-002"
-        ], input="y\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "TASK-002"], input="y\n"
+        )
 
         assert result.exit_code == 0
         assert "Archived task TASK-001" in result.output
@@ -134,10 +137,9 @@ class TestArchiveConfirmation:
         """Test that --yes flag skips confirmation prompt."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "--yes"]
+        )
 
         assert result.exit_code == 0
         assert "Archived task TASK-001" in result.output
@@ -150,10 +152,9 @@ class TestArchiveConfirmation:
         """Test that -y flag skips confirmation prompt."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "-y"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "-y"]
+        )
 
         assert result.exit_code == 0
         assert "Archived task TASK-001" in result.output
@@ -162,10 +163,18 @@ class TestArchiveConfirmation:
         """Test bulk archive with --yes flag."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "TASK-002", "TASK-003", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(archive_project),
+                "archive",
+                "TASK-001",
+                "TASK-002",
+                "TASK-003",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
 
@@ -179,10 +188,9 @@ class TestArchiveConfirmation:
         """Test that --json flag skips confirmation prompt."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -192,10 +200,9 @@ class TestArchiveConfirmation:
         """Test archiving a task that doesn't exist."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "NONEXISTENT", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "NONEXISTENT", "--yes"]
+        )
 
         assert result.exit_code == 0
         assert "not found" in result.output
@@ -204,10 +211,9 @@ class TestArchiveConfirmation:
         """Test archiving an already archived task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-004", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-004", "--yes"]
+        )
 
         assert result.exit_code == 0
         assert "already archived" in result.output

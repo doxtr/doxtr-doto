@@ -11,7 +11,7 @@ from sphinx.util.docutils import SphinxDirective
 from doxtr_doto.constants import VALID_LIST_ICON_MODES
 from doxtr_doto.enums import ListFormat
 from doxtr_doto.nodes import doto_list_node
-from doxtr_doto.query import DisplayOptions, TaskFilter
+from doxtr_doto.query import DisplayOptions
 from doxtr_doto.utils import parse_boolean, parse_date, parse_list
 
 if TYPE_CHECKING:
@@ -19,9 +19,7 @@ if TYPE_CHECKING:
 
 
 # Valid sort fields
-VALID_SORT_FIELDS = frozenset({
-    "priority", "due", "status", "assignee", "created", "title", "id"
-})
+VALID_SORT_FIELDS = frozenset({"priority", "due", "status", "assignee", "created", "title", "id"})
 
 # Valid format types
 VALID_FORMATS = frozenset(e.value for e in ListFormat)
@@ -31,37 +29,39 @@ VALID_ORDERS = frozenset({"asc", "desc"})
 
 
 def parse_int(value: str) -> int | None:
-    """Parse an integer value.
-    
+    """Parse a non-negative integer value (shared by :limit: and :visible-tasks:).
+
     Args:
         value: String to parse as integer.
-        
+
     Returns:
-        Integer value or None if empty.
-        
+        Integer value (>= 0), or None if the string is empty/blank.
+
     Raises:
-        ValueError: If value is not a valid integer.
+        ValueError: If the value is not a valid integer, or if it is a valid
+            integer but negative. A negative value reports a non-negative
+            specific message; a non-integer reports the invalid-integer message.
     """
     if not value or not value.strip():
         return None
     try:
         result = int(value.strip())
-        if result < 0:
-            raise ValueError("Value must be non-negative")
-        return result
     except ValueError as e:
         raise ValueError(f"Invalid integer value '{value}'") from e
+    if result < 0:
+        raise ValueError(f"Value '{value}' must be non-negative")
+    return result
 
 
 def validate_sort_fields(value: str) -> list[str]:
     """Validate sort field names.
-    
+
     Args:
         value: Comma-separated sort fields.
-        
+
     Returns:
         List of validated sort field names.
-        
+
     Raises:
         ValueError: If any sort field is invalid.
     """
@@ -77,50 +77,47 @@ def validate_sort_fields(value: str) -> list[str]:
 
 def validate_format(value: str) -> str:
     """Validate display format.
-    
+
     Args:
         value: Format string to validate.
-        
+
     Returns:
         Validated format string.
-        
+
     Raises:
         ValueError: If format is not valid.
     """
     normalized = value.strip().lower()
     if normalized not in VALID_FORMATS:
         raise ValueError(
-            f"Invalid format '{value}'. "
-            f"Must be one of: {', '.join(sorted(VALID_FORMATS))}"
+            f"Invalid format '{value}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}"
         )
     return normalized
 
 
 def validate_order(value: str) -> str:
     """Validate sort order.
-    
+
     Args:
         value: Order string to validate.
-        
+
     Returns:
         Validated order string.
-        
+
     Raises:
         ValueError: If order is not valid.
     """
     normalized = value.strip().lower()
     if normalized not in VALID_ORDERS:
-        raise ValueError(
-            f"Invalid order '{value}'. Must be 'asc' or 'desc'."
-        )
+        raise ValueError(f"Invalid order '{value}'. Must be 'asc' or 'desc'.")
     return normalized
 
 
 class DotoListDirective(SphinxDirective):
     """Directive for displaying a filtered list of tasks.
-    
+
     Usage::
-    
+
         .. doto-list::
            :assignee: alice, bob
            :priority: high, critical
@@ -131,15 +128,16 @@ class DotoListDirective(SphinxDirective):
            :sort: priority, due
            :order: desc
            :limit: 20
-           :format: table
+           :format: email
+           :visible-tasks: 5
            :show-archived: false
            :columns: id, title, assignee, due
     """
-    
+
     has_content: ClassVar[bool] = False
     required_arguments: ClassVar[int] = 0
     optional_arguments: ClassVar[int] = 0
-    
+
     option_spec: ClassVar[dict[str, object]] = {
         # Filter options
         "assignee": directives.unchanged,
@@ -158,20 +156,26 @@ class DotoListDirective(SphinxDirective):
         "format": directives.unchanged,
         "show-archived": directives.unchanged,
         "columns": directives.unchanged,
+        # Email view: number of task rows kept visible at once in the
+        # scrollable list pane. 0 means "show all" (no viewport cap);
+        # empty/absent -> None -> fall back to doto_list_visible_tasks; any
+        # positive integer caps the visible rows. Overrides
+        # doto_list_visible_tasks.
+        "visible-tasks": directives.unchanged,
         # Per-directive override of doto_list_icon_mode (Feature 5):
         # "icon" | "icon-text" | "text".
         "icon-mode": directives.unchanged,
     }
-    
+
     def run(self) -> list[nodes.Node]:
         """Process the directive and return document nodes.
-        
+
         Returns:
             List containing the doto_list_node with filter configuration.
         """
         # Parse filter options
         filters = self._parse_filters()
-        
+
         # Parse display options
         display = self._parse_display_options()
 
@@ -188,13 +192,13 @@ class DotoListDirective(SphinxDirective):
             docname=self.env.docname,
             lineno=self.lineno,
         )
-        
+
         # Set source info for better error messages
         node.source = self.get_source_info()[0]
         node.line = self.lineno
-        
+
         return [node]
-    
+
     def _parse_icon_mode(self) -> str | None:
         """Parse and validate the per-directive ``:icon-mode:`` override.
 
@@ -208,7 +212,7 @@ class DotoListDirective(SphinxDirective):
         """
         if "icon-mode" not in self.options:
             return None
-        mode = self.options["icon-mode"].strip().lower()
+        mode = str(self.options["icon-mode"]).strip().lower()
         if mode not in VALID_LIST_ICON_MODES:
             raise self.error(
                 f"Invalid icon-mode '{mode}'. "
@@ -218,18 +222,18 @@ class DotoListDirective(SphinxDirective):
 
     def _parse_filters(self) -> dict[str, Any]:
         """Parse and validate filter options.
-        
+
         Returns:
             Dictionary with filter configuration including:
             - All TaskFilter fields
             - regex_compiled: Pre-compiled regex pattern (if regex specified)
         """
         from doxtr_doto.config import get_config
-        
+
         # Get valid values from config
         valid_statuses = set(get_config(self.env.app, "statuses"))
         valid_priorities = set(get_config(self.env.app, "priorities"))
-        
+
         # Initialize filter fields
         assignee: list[str] = []
         priority: list[str] = []
@@ -241,11 +245,11 @@ class DotoListDirective(SphinxDirective):
         due_after: str | None = None
         regex: str | None = None
         regex_compiled: Any = None  # Pre-compiled regex pattern
-        
+
         # Parse list filters
         if "assignee" in self.options:
             assignee = parse_list(self.options["assignee"])
-        
+
         if "priority" in self.options:
             priorities = parse_list(self.options["priority"])
             # Validate priority values against config
@@ -256,18 +260,17 @@ class DotoListDirective(SphinxDirective):
                         f"Must be one of: {', '.join(sorted(valid_priorities))}"
                     )
             priority = [p.lower() for p in priorities]
-        
+
         if "status" in self.options:
             statuses = parse_list(self.options["status"])
             # Validate status values against config
             for s in statuses:
                 if s.lower() not in valid_statuses:
                     raise self.error(
-                        f"Invalid status '{s}'. "
-                        f"Must be one of: {', '.join(sorted(valid_statuses))}"
+                        f"Invalid status '{s}'. Must be one of: {', '.join(sorted(valid_statuses))}"
                     )
             status = [s.lower() for s in statuses]
-        
+
         if "exclude-status" in self.options:
             exclude_statuses = parse_list(self.options["exclude-status"])
             for s in exclude_statuses:
@@ -277,13 +280,13 @@ class DotoListDirective(SphinxDirective):
                         f"Must be one of: {', '.join(sorted(valid_statuses))}"
                     )
             exclude_status = [s.lower() for s in exclude_statuses]
-        
+
         if "tags" in self.options:
             tags = parse_list(self.options["tags"])
-        
+
         if "depends-on" in self.options:
             depends_on = parse_list(self.options["depends-on"])
-        
+
         # Parse date filters
         if "due-before" in self.options:
             try:
@@ -292,7 +295,7 @@ class DotoListDirective(SphinxDirective):
                     due_before = due_before_date.isoformat()
             except ValueError as e:
                 raise self.error(f"Invalid due-before: {e}") from e
-        
+
         if "due-after" in self.options:
             try:
                 due_after_date = parse_date(self.options["due-after"])
@@ -300,7 +303,7 @@ class DotoListDirective(SphinxDirective):
                     due_after = due_after_date.isoformat()
             except ValueError as e:
                 raise self.error(f"Invalid due-after: {e}") from e
-        
+
         # Parse regex filter
         if "regex" in self.options:
             regex_str = self.options["regex"].strip()
@@ -309,7 +312,9 @@ class DotoListDirective(SphinxDirective):
                 # This rejects patterns that could cause ReDoS (catastrophic backtracking)
                 # Compiled regex is picklable in Python 3.7+, so safe to store on node
                 import re
-                from doxtr_doto.regex_utils import compile_safe, UnsafePatternError
+
+                from doxtr_doto.regex_utils import UnsafePatternError, compile_safe
+
                 try:
                     regex_compiled = compile_safe(regex_str)
                 except UnsafePatternError as e:
@@ -317,7 +322,7 @@ class DotoListDirective(SphinxDirective):
                 except re.error as e:
                     raise self.error(f"Invalid regex pattern: {e}") from e
                 regex = regex_str
-        
+
         # Return as dict to include compiled regex alongside TaskFilter fields
         # filter_tasks() accepts both TaskFilter objects and dicts
         return {
@@ -332,10 +337,10 @@ class DotoListDirective(SphinxDirective):
             "regex": regex,
             "regex_compiled": regex_compiled,  # Pre-compiled for performance
         }
-    
+
     def _parse_display_options(self) -> DisplayOptions:
         """Parse and validate display options.
-        
+
         Returns:
             DisplayOptions object with validated display configuration.
         """
@@ -346,14 +351,15 @@ class DotoListDirective(SphinxDirective):
         format_str: str = "list"
         show_archived: bool = False
         columns: list[str] = ["id", "title", "priority", "status"]
-        
+        visible_tasks: int | None = None
+
         # Parse sort fields
         if "sort" in self.options:
             try:
                 sort_fields = validate_sort_fields(self.options["sort"])
             except ValueError as e:
                 raise self.error(str(e)) from e
-        
+
         # Parse order
         if "order" in self.options:
             try:
@@ -367,28 +373,40 @@ class DotoListDirective(SphinxDirective):
                 order = "asc"
             else:
                 order = "desc"
-        
+
         # Parse limit
         if "limit" in self.options:
             try:
                 limit = parse_int(self.options["limit"])
             except ValueError as e:
                 raise self.error(f"Invalid limit: {e}") from e
-        
+
+        # Parse visible-tasks (email view scroll cap). 0 means "show all" (no
+        # viewport cap); empty/absent -> None -> fall back to
+        # doto_list_visible_tasks; any positive integer caps the visible rows.
+        # A negative or non-integer value is rejected at parse time by
+        # ``parse_int``.
+        if "visible-tasks" in self.options:
+            try:
+                visible_tasks = parse_int(self.options["visible-tasks"])
+            except ValueError as e:
+                raise self.error(f"Invalid visible-tasks: {e}") from e
+
         # Parse format
         if "format" in self.options:
             try:
                 format_str = validate_format(self.options["format"])
             except ValueError as e:
                 raise self.error(str(e)) from e
-        
+
         # Parse show-archived
         if "show-archived" in self.options:
             show_archived = parse_boolean(self.options["show-archived"])
-        
+
         # Parse columns
         if "columns" in self.options:
             from doxtr_doto.fields import VALID_COLUMNS
+
             columns_raw = parse_list(self.options["columns"])
             # Validate column names against central field registry
             for col in columns_raw:
@@ -398,7 +416,7 @@ class DotoListDirective(SphinxDirective):
                         f"Must be one of: {', '.join(sorted(VALID_COLUMNS))}"
                     )
             columns = [col.lower() for col in columns_raw]
-        
+
         return DisplayOptions(
             format=format_str,
             sort=sort_fields,
@@ -406,20 +424,21 @@ class DotoListDirective(SphinxDirective):
             limit=limit,
             show_archived=show_archived,
             columns=columns,
+            visible_tasks=visible_tasks,
         )
 
 
 def setup(app: Sphinx) -> dict[str, object]:
     """Set up the doto-list directive.
-    
+
     Args:
         app: Sphinx application instance.
-        
+
     Returns:
         Extension metadata.
     """
     app.add_directive("doto-list", DotoListDirective)
-    
+
     return {
         "version": "0.1.0",
         "parallel_read_safe": True,

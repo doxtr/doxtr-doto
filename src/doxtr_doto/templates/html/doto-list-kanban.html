@@ -1,0 +1,52 @@
+{# doto-list-kanban.html - Template for doto task list as a kanban board #}
+{#
+  Context variables:
+    - columns:    List of (status_value, display_label) pairs, in column order.
+    - grouped:    Dict mapping status_value -> list of DotoTask objects in that
+                  column.
+    - task_links: Dict mapping task.id -> href of the task box (Feature 5).
+    - icon_mode:  Effective icon mode ("icon" | "icon-text" | "text").
+
+  Available filters:
+    - row_classes: Get CSS classes for a task.
+
+  Client-side nature:
+    The board is draggable via the vendored, dependency-free doto-views.js.
+    Dragging a card to another column updates the card's column and status
+    badge VISUALLY ONLY — a static Sphinx HTML build has no backend to persist
+    the change, so a reload restores the original layout. The markup degrades
+    gracefully (a static multi-column board) when JS is unavailable. A child
+    theme can fully re-author this file via <srcdir>/_doto/templates/html/.
+#}
+<div class="doto-kanban doto-list-icon-mode-{{ icon_mode | default('icon-text') }}" data-doto-view="kanban">
+  {%- for status, label in columns %}
+  <div class="doto-kanban-column" data-doto-status="{{ status }}">
+    <div class="doto-kanban-column-header">
+      <span class="doto-kanban-column-title">{{ label }}</span>
+      <span class="doto-kanban-column-count">{{ grouped.get(status, []) | length }}</span>
+    </div>
+    <ul class="doto-kanban-cards" data-doto-dropzone="{{ status }}">
+      {%- for task in grouped.get(status, []) %}
+      {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+      <li class="doto-kanban-card {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}"
+          draggable="true" data-doto-task="{{ task.id }}" data-doto-status="{{ task.status }}">
+        <div class="doto-kanban-card-header">
+          <a class="doto-list-link doto-kanban-card-id" href="{{ href }}">{{ task.id }}</a>
+          <span class="doto-kanban-card-priority">{{ task.priority }}</span>
+        </div>
+        <a class="doto-list-link doto-kanban-card-title" href="{{ href }}">{{ task.title }}</a>
+        <div class="doto-kanban-card-meta">
+          {%- if task.assignee %}
+          <span class="doto-kanban-card-assignee">{{ task.assignee }}</span>
+          {%- endif %}
+          {%- if task.due %}
+          <span class="doto-kanban-card-due{% if task.is_overdue() %} doto-overdue{% endif %}">{{ task.due | display_date }}</span>
+          {%- endif %}
+          <span class="doto-kanban-card-status" data-doto-status-badge>{{ task.status }}</span>
+        </div>
+      </li>
+      {%- endfor %}
+    </ul>
+  </div>
+  {%- endfor %}
+</div>

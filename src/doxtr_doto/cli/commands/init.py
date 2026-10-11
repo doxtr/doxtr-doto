@@ -131,9 +131,7 @@ def init(
 
         # Check for existing files
         if config_file.exists() and not force:
-            raise click.ClickException(
-                f"{config_file} already exists. Use --force to overwrite."
-            )
+            raise click.ClickException(f"{config_file} already exists. Use --force to overwrite.")
 
         # Create directory
         doto_dir.mkdir(parents=True, exist_ok=True)
@@ -170,9 +168,7 @@ def init(
 
     # Check for existing files
     if doto_toml.exists() and not force:
-        raise click.ClickException(
-            f"{doto_toml} already exists. Use --force to overwrite."
-        )
+        raise click.ClickException(f"{doto_toml} already exists. Use --force to overwrite.")
 
     # Create .doto directory
     doto_dir.mkdir(parents=True, exist_ok=True)

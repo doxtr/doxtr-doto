@@ -2,6 +2,7 @@
 
 Tests cover pattern validation, safe compilation, and timeout-protected matching.
 """
+
 from __future__ import annotations
 
 import re

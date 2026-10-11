@@ -13,9 +13,13 @@ from doxtr_doto.enums import (
     ChartType,
     ConflictResolution,
     DotoIntegration,
+    DueFilter,
     ListFormat,
+    SortKey,
+    SortOrder,
     SyncAction,
     TaskSource,
+    TuiLayout,
 )
 
 
@@ -37,7 +41,7 @@ class TestSyncAction:
     def test_all_values(self) -> None:
         """Verify all expected values exist."""
         values = {e.value for e in SyncAction}
-        assert values == {"create", "update", "remove"}
+        assert values == {"create", "update", "remove", "insert-id"}
 
     def test_can_use_in_string_operations(self) -> None:
         """Verify enums can be used in string formatting."""
@@ -173,12 +177,18 @@ class TestListFormat:
         assert isinstance(ListFormat.TABLE, str)
         assert isinstance(ListFormat.LIST, str)
         assert isinstance(ListFormat.CARDS, str)
+        assert isinstance(ListFormat.KANBAN, str)
+        assert isinstance(ListFormat.CALENDAR, str)
+        assert isinstance(ListFormat.EMAIL, str)
 
     def test_string_comparison(self) -> None:
         """Verify enums can be compared with string literals."""
         assert ListFormat.TABLE == "table"
         assert ListFormat.LIST == "list"
         assert ListFormat.CARDS == "cards"
+        assert ListFormat.KANBAN == "kanban"
+        assert ListFormat.CALENDAR == "calendar"
+        assert ListFormat.EMAIL == "email"
 
     def test_matches_directive_valid_formats(self) -> None:
         """Verify enum values match VALID_FORMATS in doto_list directive."""
@@ -190,7 +200,89 @@ class TestListFormat:
     def test_all_values(self) -> None:
         """Verify all expected values exist."""
         values = {e.value for e in ListFormat}
-        assert values == {"table", "list", "cards"}
+        assert values == {"table", "list", "cards", "kanban", "calendar", "email"}
+
+
+class TestTuiLayout:
+    """Tests for the TuiLayout enum (the interactive TUI layout views)."""
+
+    def test_values_are_strings(self) -> None:
+        """Verify all TuiLayout values are string instances."""
+        assert isinstance(TuiLayout.TABLE, str)
+        assert isinstance(TuiLayout.LIST, str)
+        assert isinstance(TuiLayout.KANBAN, str)
+        assert isinstance(TuiLayout.CALENDAR, str)
+        assert isinstance(TuiLayout.TIME, str)
+
+    def test_string_comparison(self) -> None:
+        """Verify enums can be compared with string literals."""
+        assert TuiLayout.TABLE == "table"
+        assert TuiLayout.LIST == "list"
+        assert TuiLayout.KANBAN == "kanban"
+        assert TuiLayout.CALENDAR == "calendar"
+        assert TuiLayout.TIME == "time"
+
+    def test_all_values(self) -> None:
+        """Verify all expected values exist."""
+        values = {e.value for e in TuiLayout}
+        assert values == {"table", "list", "kanban", "calendar", "time"}
+
+    def test_distinct_from_list_format(self) -> None:
+        """Verify TuiLayout is a separate enum from the directive ListFormat."""
+        # The TUI layout enum must not overload ListFormat (which has extra
+        # cards/email members for the static directive renders).
+        assert TuiLayout is not ListFormat
+        assert "cards" not in {e.value for e in TuiLayout}
+        assert "email" not in {e.value for e in TuiLayout}
+
+
+class TestDueFilterAndSortKeyUiSync:
+    """Guard tests tying the DueFilter/SortKey enums to their UI label maps.
+
+    Mirrors the ChartType/ListFormat sync-guard convention: a new
+    ``DueFilter``/``SortKey`` member must have a human label (so it is
+    UI-selectable) and must appear in the ``ViewPrefsScreen`` option list, so
+    an enum member cannot be backend-supported but UI-unselectable.
+    """
+
+    def test_due_filter_values(self) -> None:
+        assert {e.value for e in DueFilter} == {"all", "today", "week"}
+
+    def test_sort_key_values(self) -> None:
+        assert {e.value for e in SortKey} == {"none", "due", "priority", "tag", "next"}
+
+    def test_sort_order_values(self) -> None:
+        assert {e.value for e in SortOrder} == {"asc", "desc"}
+
+    def test_every_due_filter_member_has_a_label(self) -> None:
+        from doxtr_doto.enums import DUE_FILTER_LABELS
+
+        assert set(DUE_FILTER_LABELS) == set(DueFilter)
+        assert all(DUE_FILTER_LABELS[m] for m in DueFilter)
+
+    def test_every_sort_key_member_has_a_label(self) -> None:
+        from doxtr_doto.enums import SORT_KEY_LABELS
+
+        assert set(SORT_KEY_LABELS) == set(SortKey)
+        assert all(SORT_KEY_LABELS[m] for m in SortKey)
+
+    def test_view_prefs_screen_due_options_cover_every_member(self) -> None:
+        try:
+            from doxtr_doto.cli.tui.app import ViewPrefsScreen
+        except ImportError:
+            pytest.skip("textual not installed")
+
+        option_values = {value for value, _label in ViewPrefsScreen._due_options()}
+        assert option_values == {e.value for e in DueFilter}
+
+    def test_view_prefs_screen_sort_options_cover_every_member(self) -> None:
+        try:
+            from doxtr_doto.cli.tui.app import ViewPrefsScreen
+        except ImportError:
+            pytest.skip("textual not installed")
+
+        option_values = {value for value, _label in ViewPrefsScreen._sort_options()}
+        assert option_values == {e.value for e in SortKey}
 
 
 class TestTaskSourceIntegrationWithDotoTask:
@@ -211,7 +303,7 @@ class TestTaskSourceIntegrationWithDotoTask:
             "updated": "2024-01-15T10:00:00",
         }
         task = DotoTask.from_dict("TASK-001", data)
-        
+
         assert task.source == TaskSource.JSON
         assert task.source == "json"  # Backward compat with string comparison
 
@@ -220,7 +312,7 @@ class TestTaskSourceIntegrationWithDotoTask:
         from doxtr_doto.collectors import DotoTask
 
         task = DotoTask(id="TASK-002", title="Direct Task")
-        
+
         assert task.source == TaskSource.RST
         assert task.source == "rst"  # Backward compat with string comparison
 
@@ -229,7 +321,7 @@ class TestTaskSourceIntegrationWithDotoTask:
         from doxtr_doto.collectors import DotoTask
 
         task = DotoTask(id="TASK-003", title="Merged Task", source=TaskSource.MERGED)
-        
+
         assert task.source == TaskSource.MERGED
         assert task.source == "merged"
 
@@ -246,6 +338,7 @@ class TestEnumInheritance:
             TaskSource,
             ChartType,
             ListFormat,
+            TuiLayout,
         ]
         for enum_class in enums:
             for member in enum_class:

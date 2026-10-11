@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import click
 
 from doxtr_doto.cli.completion import complete_open_task_id
+from doxtr_doto.cli.id_resolver import resolve_task_ref
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
@@ -30,13 +31,16 @@ def done(
     if json_output:
         formatter.json_output = True
 
-    store = ctx.store
-
     completed = []
     not_found = []
 
     for task_id in task_ids:
-        task = store.get_task(task_id)
+        resolved = resolve_task_ref(ctx, task_id)
+        if resolved is None:
+            not_found.append(task_id)
+            continue
+        store = resolved.store
+        task = store.get_task(resolved.task_id)
         if task is None:
             not_found.append(task_id)
             continue
@@ -45,11 +49,11 @@ def done(
             formatter.print_warning(f"Task {task_id} is already done.")
             continue
 
-        store.update_task(task_id, {"status": "done"})
+        store.update_task(resolved.task_id, {"status": "done"})
+        store.save()
         completed.append(task_id)
 
     if completed:
-        store.save()
         for task_id in completed:
             formatter.print_success(f"Marked {task_id} as done.")
 
@@ -58,7 +62,9 @@ def done(
             formatter.print_error(f"Task '{task_id}' not found.")
 
     if json_output:
-        formatter.print_json({
-            "completed": completed,
-            "not_found": not_found,
-        })
+        formatter.print_json(
+            {
+                "completed": completed,
+                "not_found": not_found,
+            }
+        )

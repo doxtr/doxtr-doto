@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import pytest
 from pathlib import Path
+
+import pytest
 from click.testing import CliRunner
 
 
@@ -20,65 +21,69 @@ def cli_project(tmp_path):
     # Create project structure
     doto_dir = tmp_path / ".doto"
     doto_dir.mkdir()
-    
+
     # Create config
     config_file = tmp_path / ".doto.toml"
-    config_file.write_text('''
+    config_file.write_text("""
 [doto]
 json_file = ".doto/tasks.json"
 id_prefix = "TEST"
-''')
-    
+""")
+
     # Create empty tasks.json
     json_file = doto_dir / "tasks.json"
-    json_file.write_text(json.dumps({
-        "version": 2,
-        "updated": "2026-07-26T10:00:00",
-        "tasks": {}
-    }))
-    
+    json_file.write_text(json.dumps({"version": 2, "updated": "2026-07-26T10:00:00", "tasks": {}}))
+
     return tmp_path
 
 
 class TestDotoAdd:
     """Test the doto add command."""
-    
+
     def test_add_basic_task(self, cli_runner, cli_project):
         """Test adding a basic task."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task"
-        ])
-        
+
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "add", "Test task"])
+
         assert result.exit_code == 0
-        
+
         # Verify task was added
         json_file = cli_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
         assert len(data["tasks"]) == 1
-    
+
     def test_add_task_with_options(self, cli_runner, cli_project):
         """Test adding a task with all options."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Full task",
-            "--id", "CUSTOM-001",
-            "--assignee", "alice",
-            "--priority", "high",
-            "--status", "in-progress",
-            "--due", "2026-12-31",
-            "--tags", "feature,urgent",
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(cli_project),
+                "add",
+                "Full task",
+                "--id",
+                "CUSTOM-001",
+                "--assignee",
+                "alice",
+                "--priority",
+                "high",
+                "--status",
+                "in-progress",
+                "--due",
+                "2026-12-31",
+                "--tags",
+                "feature,urgent",
+            ],
+        )
+
         assert result.exit_code == 0
-        
+
         json_file = cli_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
-        
+
         assert "CUSTOM-001" in data["tasks"]
         task = data["tasks"]["CUSTOM-001"]
         assert task["title"] == "Full task"
@@ -87,19 +92,17 @@ class TestDotoAdd:
         assert task["status"] == "in-progress"
         assert task["due"] == "2026-12-31"
         assert task["tags"] == ["feature", "urgent"]
-    
+
     def test_add_dry_run(self, cli_runner, cli_project):
         """Test add with dry-run flag."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Dry run task",
-            "--dry-run"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Dry run task", "--dry-run"]
+        )
+
         assert result.exit_code == 0
-        
+
         # Task should not be added
         json_file = cli_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
@@ -108,104 +111,99 @@ class TestDotoAdd:
 
 class TestDotoList:
     """Test the doto list command."""
-    
+
     @pytest.fixture
     def populated_project(self, cli_project):
         """Create a project with some tasks."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Task one",
-                    "priority": "high",
-                    "status": "open",
-                    "assignee": "alice",
-                    "tags": ["feature"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Task two",
-                    "priority": "low",
-                    "status": "done",
-                    "assignee": "bob",
-                    "tags": ["bug"],
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Task three",
-                    "priority": "critical",
-                    "status": "blocked",
-                    "tags": ["urgent"],
-                    "archived": True,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Task one",
+                            "priority": "high",
+                            "status": "open",
+                            "assignee": "alice",
+                            "tags": ["feature"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Task two",
+                            "priority": "low",
+                            "status": "done",
+                            "assignee": "bob",
+                            "tags": ["bug"],
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Task three",
+                            "priority": "critical",
+                            "status": "blocked",
+                            "tags": ["urgent"],
+                            "archived": True,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
-    
+
     def test_list_all(self, cli_runner, populated_project):
         """Test listing all tasks."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(populated_project),
-            "list"
-        ])
-        
+
+        result = cli_runner.invoke(cli, ["--config", str(populated_project), "list"])
+
         assert result.exit_code == 0
         assert "TASK-001" in result.output
         assert "TASK-002" in result.output
         # Archived tasks should not show by default
         assert "TASK-003" not in result.output
-    
+
     def test_list_with_archived(self, cli_runner, populated_project):
         """Test listing including archived tasks."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(populated_project),
-            "list", "--archived"
-        ])
-        
+
+        result = cli_runner.invoke(cli, ["--config", str(populated_project), "list", "--archived"])
+
         assert result.exit_code == 0
         assert "TASK-003" in result.output
-    
+
     def test_list_filter_by_status(self, cli_runner, populated_project):
         """Test filtering by status."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(populated_project),
-            "list", "--status", "open"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(populated_project), "list", "--status", "open"]
+        )
+
         assert result.exit_code == 0
         assert "TASK-001" in result.output
         assert "TASK-002" not in result.output
-    
+
     def test_list_filter_by_assignee(self, cli_runner, populated_project):
         """Test filtering by assignee."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(populated_project),
-            "list", "--assignee", "alice"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(populated_project), "list", "--assignee", "alice"]
+        )
+
         assert result.exit_code == 0
         assert "TASK-001" in result.output
         assert "TASK-002" not in result.output
-    
+
     def test_list_json_format(self, cli_runner, populated_project):
         """Test JSON output format."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(populated_project),
-            "list", "--format", "json"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(populated_project), "list", "--format", "json"]
+        )
+
         assert result.exit_code == 0
         # Should be valid JSON
         data = json.loads(result.output)
@@ -214,68 +212,78 @@ class TestDotoList:
 
 class TestDotoUpdate:
     """Test the doto update command."""
-    
+
     @pytest.fixture
     def single_task_project(self, cli_project):
         """Create a project with one task."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Original task",
-                    "priority": "medium",
-                    "status": "open",
-                    "tags": ["original"],
-                    "archived": False,
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Original task",
+                            "priority": "medium",
+                            "status": "open",
+                            "tags": ["original"],
+                            "archived": False,
+                        }
+                    },
                 }
-            }
-        }))
+            )
+        )
         return cli_project
-    
+
     def test_update_status(self, cli_runner, single_task_project):
         """Test updating task status."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(single_task_project),
-            "update", "TASK-001", "--status", "in-progress"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--status", "in-progress"],
+        )
+
         assert result.exit_code == 0
-        
+
         json_file = single_task_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
         assert data["tasks"]["TASK-001"]["status"] == "in-progress"
-    
+
     def test_update_multiple_fields(self, cli_runner, single_task_project):
         """Test updating multiple fields at once."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(single_task_project),
-            "update", "TASK-001",
-            "--priority", "high",
-            "--assignee", "charlie"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(single_task_project),
+                "update",
+                "TASK-001",
+                "--priority",
+                "high",
+                "--assignee",
+                "charlie",
+            ],
+        )
+
         assert result.exit_code == 0
-        
+
         json_file = single_task_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
         assert data["tasks"]["TASK-001"]["priority"] == "high"
         assert data["tasks"]["TASK-001"]["assignee"] == "charlie"
-    
+
     def test_update_nonexistent_task(self, cli_runner, single_task_project):
         """Test updating a nonexistent task."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(single_task_project),
-            "update", "NONEXISTENT", "--status", "done"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(single_task_project), "update", "NONEXISTENT", "--status", "done"]
+        )
+
         assert result.exit_code != 0
 
 
@@ -286,10 +294,7 @@ class TestDotoConfig:
         """Test that config shows the JSON database path."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "config"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "config"])
 
         assert result.exit_code == 0
         assert ".doto/tasks.json" in result.output
@@ -299,10 +304,9 @@ class TestDotoConfig:
         """Test config with JSON output format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "config", "--format", "json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "config", "--format", "json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -314,10 +318,7 @@ class TestDotoConfig:
         """Test that config shows the operation mode."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "config"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "config"])
 
         assert result.exit_code == 0
         assert "Mode" in result.output
@@ -330,52 +331,53 @@ class TestDotoDeps:
     def deps_project(self, cli_project):
         """Create a project with task dependencies."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Main task",
-                    "status": "open",
-                    "depends_on": ["TASK-002", "TASK-003"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Dependency one",
-                    "status": "done",
-                    "priority": "high",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Dependency two",
-                    "status": "open",
-                    "priority": "medium",
-                    "depends_on": ["TASK-004"],
-                    "archived": False,
-                },
-                "TASK-004": {
-                    "title": "Nested dependency",
-                    "status": "in-progress",
-                    "priority": "low",
-                    "archived": False,
-                },
-                "TASK-005": {
-                    "title": "Independent task",
-                    "status": "open",
-                    "archived": False,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Main task",
+                            "status": "open",
+                            "depends_on": ["TASK-002", "TASK-003"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Dependency one",
+                            "status": "done",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Dependency two",
+                            "status": "open",
+                            "priority": "medium",
+                            "depends_on": ["TASK-004"],
+                            "archived": False,
+                        },
+                        "TASK-004": {
+                            "title": "Nested dependency",
+                            "status": "in-progress",
+                            "priority": "low",
+                            "archived": False,
+                        },
+                        "TASK-005": {
+                            "title": "Independent task",
+                            "status": "open",
+                            "archived": False,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_deps_shows_direct_dependencies(self, cli_runner, deps_project):
         """Test showing direct dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-001"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(deps_project), "deps", "TASK-001"])
 
         assert result.exit_code == 0
         assert "TASK-002" in result.output
@@ -387,10 +389,9 @@ class TestDotoDeps:
         """Test showing recursive dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-001", "--recursive"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(deps_project), "deps", "TASK-001", "--recursive"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-002" in result.output
@@ -401,10 +402,9 @@ class TestDotoDeps:
         """Test showing only pending dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-001", "--pending-only"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(deps_project), "deps", "TASK-001", "--pending-only"]
+        )
 
         assert result.exit_code == 0
         # TASK-002 is done, should not appear
@@ -416,10 +416,9 @@ class TestDotoDeps:
         """Test deps with JSON output format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-001", "--format", "json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(deps_project), "deps", "TASK-001", "--format", "json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -431,10 +430,7 @@ class TestDotoDeps:
         """Test task with no dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-005"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(deps_project), "deps", "TASK-005"])
 
         assert result.exit_code == 0
         assert "No dependencies" in result.output or "can be started" in result.output
@@ -443,10 +439,7 @@ class TestDotoDeps:
         """Test deps for nonexistent task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "NONEXISTENT"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(deps_project), "deps", "NONEXISTENT"])
 
         assert result.exit_code != 0
 
@@ -454,10 +447,10 @@ class TestDotoDeps:
         """Test deps with tree output format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_project),
-            "deps", "TASK-001", "--format", "tree", "--recursive"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(deps_project), "deps", "TASK-001", "--format", "tree", "--recursive"],
+        )
 
         assert result.exit_code == 0
         # Tree format should show hierarchy indicators
@@ -473,38 +466,39 @@ class TestDotoListColumns:
         """Create a project with custom list columns config."""
         # Update config to specify columns
         config_file = cli_project / ".doto.toml"
-        config_file.write_text('''
+        config_file.write_text("""
 [doto]
 json_file = ".doto/tasks.json"
 id_prefix = "TEST"
 list_columns = ["id", "title", "status"]
-''')
+""")
 
         # Add a task
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Test task",
-                    "priority": "high",
-                    "status": "open",
-                    "assignee": "alice",
-                    "archived": False,
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Test task",
+                            "priority": "high",
+                            "status": "open",
+                            "assignee": "alice",
+                            "archived": False,
+                        }
+                    },
                 }
-            }
-        }))
+            )
+        )
         return cli_project
 
     def test_list_uses_config_columns(self, cli_runner, project_with_columns_config):
         """Test that list uses columns from config."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(project_with_columns_config),
-            "list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(project_with_columns_config), "list"])
 
         assert result.exit_code == 0
         # With config ["id", "title", "status"], assignee column shouldn't appear as header
@@ -514,10 +508,9 @@ list_columns = ["id", "title", "status"]
         """Test that CLI --columns overrides config."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(project_with_columns_config),
-            "list", "--columns", "id,priority"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(project_with_columns_config), "list", "--columns", "id,priority"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -530,47 +523,48 @@ class TestDotoListWithDeps:
     def deps_list_project(self, cli_project):
         """Create a project with task dependencies for list testing."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Main task",
-                    "status": "open",
-                    "priority": "high",
-                    "depends_on": ["TASK-002", "TASK-003"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Dependency one",
-                    "status": "done",
-                    "priority": "medium",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Dependency two",
-                    "status": "open",
-                    "priority": "high",
-                    "archived": False,
-                },
-                "TASK-004": {
-                    "title": "Independent task",
-                    "status": "open",
-                    "priority": "low",
-                    "archived": False,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Main task",
+                            "status": "open",
+                            "priority": "high",
+                            "depends_on": ["TASK-002", "TASK-003"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Dependency one",
+                            "status": "done",
+                            "priority": "medium",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Dependency two",
+                            "status": "open",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                        "TASK-004": {
+                            "title": "Independent task",
+                            "status": "open",
+                            "priority": "low",
+                            "archived": False,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_list_with_deps_flag(self, cli_runner, deps_list_project):
         """Test list with --with-deps shows dependency column."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_list_project),
-            "list", "--with-deps"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(deps_list_project), "list", "--with-deps"])
 
         assert result.exit_code == 0
         # Should show dependency markers
@@ -581,10 +575,9 @@ class TestDotoListWithDeps:
         """Test list with tree format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_list_project),
-            "list", "--format", "tree"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(deps_list_project), "list", "--format", "tree"]
+        )
 
         assert result.exit_code == 0
         # Tree format shows ready vs waiting
@@ -594,10 +587,9 @@ class TestDotoListWithDeps:
         """Test list with --with-deps and JSON format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(deps_list_project),
-            "list", "--with-deps", "--format", "json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(deps_list_project), "list", "--with-deps", "--format", "json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -643,8 +635,9 @@ class TestOpenEditor:
 
     def test_find_editor_returns_none_when_no_editor(self, monkeypatch):
         """Test that _find_editor returns None when no editor is available."""
-        from doxtr_doto.cli.commands.add import _find_editor
         import shutil
+
+        from doxtr_doto.cli.commands.add import _find_editor
 
         monkeypatch.delenv("EDITOR", raising=False)
         monkeypatch.delenv("VISUAL", raising=False)
@@ -656,8 +649,9 @@ class TestOpenEditor:
 
     def test_open_editor_fallback_to_stdin(self, monkeypatch):
         """Test that open_editor falls back to stdin when no editor available."""
-        from doxtr_doto.cli.commands.add import open_editor
         import shutil
+
+        from doxtr_doto.cli.commands.add import open_editor
 
         monkeypatch.delenv("EDITOR", raising=False)
         monkeypatch.delenv("VISUAL", raising=False)
@@ -672,8 +666,9 @@ class TestOpenEditor:
 
     def test_open_editor_fallback_handles_eof(self, monkeypatch):
         """Test that open_editor fallback handles EOF gracefully."""
-        from doxtr_doto.cli.commands.add import open_editor
         import shutil
+
+        from doxtr_doto.cli.commands.add import open_editor
 
         monkeypatch.delenv("EDITOR", raising=False)
         monkeypatch.delenv("VISUAL", raising=False)
@@ -681,6 +676,7 @@ class TestOpenEditor:
 
         # Simulate EOF after some input
         input_count = [0]
+
         def fake_input():
             input_count[0] += 1
             if input_count[0] == 1:
@@ -694,18 +690,20 @@ class TestOpenEditor:
 
     def test_add_interactive_no_editor_available(self, cli_runner, cli_project, monkeypatch):
         """Test interactive add falls back gracefully when no editor exists."""
-        from doxtr_doto.cli.main import cli
         import shutil
+
+        from doxtr_doto.cli.main import cli
 
         monkeypatch.delenv("EDITOR", raising=False)
         monkeypatch.delenv("VISUAL", raising=False)
         monkeypatch.setattr(shutil, "which", lambda x: None)
 
         # Simulate interactive input including description via stdin fallback
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "--interactive"
-        ], input="Test task\nalice\nmedium\nopen\n\n\nn\n")
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(cli_project), "add", "--interactive"],
+            input="Test task\nalice\nmedium\nopen\n\n\nn\n",
+        )
 
         assert result.exit_code == 0
         assert "Added task" in result.output
@@ -718,33 +716,37 @@ class TestShellCompletion:
     def completion_project(self, cli_project):
         """Create a project with tasks for completion testing."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "First task",
-                    "status": "open",
-                    "assignee": "alice",
-                    "tags": ["feature", "backend"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Second task",
-                    "status": "in-progress",
-                    "assignee": "bob",
-                    "tags": ["bug"],
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Done task",
-                    "status": "done",
-                    "assignee": "alice",
-                    "tags": ["feature"],
-                    "archived": False,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "First task",
+                            "status": "open",
+                            "assignee": "alice",
+                            "tags": ["feature", "backend"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Second task",
+                            "status": "in-progress",
+                            "assignee": "bob",
+                            "tags": ["bug"],
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Done task",
+                            "status": "done",
+                            "assignee": "alice",
+                            "tags": ["feature"],
+                            "archived": False,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_complete_task_id(self, completion_project, monkeypatch):
@@ -849,7 +851,7 @@ class TestShellCompletion:
     def test_completion_without_project(self, tmp_path, monkeypatch):
         """Test completion gracefully handles missing project."""
         monkeypatch.chdir(tmp_path)
-        from doxtr_doto.cli.completion import complete_task_id, complete_assignee
+        from doxtr_doto.cli.completion import complete_assignee, complete_task_id
 
         # Should return empty list, not error
         results = complete_task_id(None, None, "TASK")
@@ -866,10 +868,7 @@ class TestCompletionCommand:
         """Test completion command outputs bash script."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "completion", "bash"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "completion", "bash"])
 
         assert result.exit_code == 0
         assert "_doto_completion" in result.output
@@ -879,10 +878,7 @@ class TestCompletionCommand:
         """Test completion command outputs zsh script."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "completion", "zsh"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "completion", "zsh"])
 
         assert result.exit_code == 0
         assert "_doto_completion" in result.output
@@ -891,10 +887,7 @@ class TestCompletionCommand:
         """Test completion command outputs fish script."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "completion", "fish"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "completion", "fish"])
 
         assert result.exit_code == 0
         assert "complete" in result.output.lower()
@@ -908,10 +901,9 @@ class TestCompletionCommand:
         bashrc.write_text("# existing config\n")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "completion", "bash", "--install"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "completion", "bash", "--install"]
+        )
 
         assert result.exit_code == 0
         assert "Added completion" in result.output
@@ -921,7 +913,9 @@ class TestCompletionCommand:
         assert "_DOTO_COMPLETE" in content
         assert "bash_source" in content
 
-    def test_completion_install_already_installed(self, cli_runner, cli_project, tmp_path, monkeypatch):
+    def test_completion_install_already_installed(
+        self, cli_runner, cli_project, tmp_path, monkeypatch
+    ):
         """Test completion --install when already installed."""
         from doxtr_doto.cli.main import cli
 
@@ -930,10 +924,9 @@ class TestCompletionCommand:
         bashrc.write_text('eval "$(_DOTO_COMPLETE=bash_source doto)"\n')
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "completion", "bash", "--install"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "completion", "bash", "--install"]
+        )
 
         assert result.exit_code == 0
         assert "already installed" in result.output
@@ -946,55 +939,56 @@ class TestDotoTree:
     def tree_project(self, cli_project):
         """Create a project with dependency chains for tree testing."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "ROOT-001": {
-                    "title": "Root task",
-                    "status": "open",
-                    "priority": "high",
-                    "archived": False,
-                },
-                "CHILD-001": {
-                    "title": "Child task",
-                    "status": "open",
-                    "priority": "medium",
-                    "depends_on": ["ROOT-001"],
-                    "archived": False,
-                },
-                "CHILD-002": {
-                    "title": "Another child",
-                    "status": "open",
-                    "priority": "low",
-                    "depends_on": ["ROOT-001"],
-                    "archived": False,
-                },
-                "GRANDCHILD-001": {
-                    "title": "Grandchild task",
-                    "status": "in-progress",
-                    "priority": "high",
-                    "depends_on": ["CHILD-001"],
-                    "archived": False,
-                },
-                "STANDALONE": {
-                    "title": "Standalone task",
-                    "status": "open",
-                    "priority": "medium",
-                    "archived": False,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "ROOT-001": {
+                            "title": "Root task",
+                            "status": "open",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                        "CHILD-001": {
+                            "title": "Child task",
+                            "status": "open",
+                            "priority": "medium",
+                            "depends_on": ["ROOT-001"],
+                            "archived": False,
+                        },
+                        "CHILD-002": {
+                            "title": "Another child",
+                            "status": "open",
+                            "priority": "low",
+                            "depends_on": ["ROOT-001"],
+                            "archived": False,
+                        },
+                        "GRANDCHILD-001": {
+                            "title": "Grandchild task",
+                            "status": "in-progress",
+                            "priority": "high",
+                            "depends_on": ["CHILD-001"],
+                            "archived": False,
+                        },
+                        "STANDALONE": {
+                            "title": "Standalone task",
+                            "status": "open",
+                            "priority": "medium",
+                            "archived": False,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_tree_shows_all_tasks(self, cli_runner, tree_project):
         """Test tree shows all tasks in hierarchy."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(tree_project), "tree"])
 
         assert result.exit_code == 0
         assert "ROOT-001" in result.output
@@ -1006,10 +1000,7 @@ class TestDotoTree:
         """Test tree for single task shows dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree", "GRANDCHILD-001"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(tree_project), "tree", "GRANDCHILD-001"])
 
         assert result.exit_code == 0
         assert "Dependencies of GRANDCHILD-001" in result.output
@@ -1020,10 +1011,9 @@ class TestDotoTree:
         """Test tree --reverse shows dependents."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree", "ROOT-001", "--reverse"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(tree_project), "tree", "ROOT-001", "--reverse"]
+        )
 
         assert result.exit_code == 0
         assert "Tasks that depend on ROOT-001" in result.output
@@ -1035,10 +1025,7 @@ class TestDotoTree:
         """Test tree --compact shows minimal output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree", "--compact"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(tree_project), "tree", "--compact"])
 
         assert result.exit_code == 0
         # Compact mode shows IDs without titles
@@ -1050,10 +1037,7 @@ class TestDotoTree:
         """Test tree --depth limits output depth."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree", "--depth", "1"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(tree_project), "tree", "--depth", "1"])
 
         assert result.exit_code == 0
         assert "ROOT-001" in result.output
@@ -1065,10 +1049,7 @@ class TestDotoTree:
         """Test tree with nonexistent task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(tree_project),
-            "tree", "NONEXISTENT"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(tree_project), "tree", "NONEXISTENT"])
 
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
@@ -1081,53 +1062,54 @@ class TestDotoNext:
     def next_project(self, cli_project):
         """Create a project with tasks for next testing."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Low priority task",
-                    "status": "open",
-                    "priority": "low",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "High priority task",
-                    "status": "open",
-                    "priority": "high",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "In progress task",
-                    "status": "in-progress",
-                    "priority": "medium",
-                    "archived": False,
-                },
-                "TASK-004": {
-                    "title": "Blocked task",
-                    "status": "open",
-                    "priority": "critical",
-                    "depends_on": ["TASK-001"],
-                    "archived": False,
-                },
-                "TASK-005": {
-                    "title": "Done task",
-                    "status": "done",
-                    "priority": "high",
-                    "archived": False,
-                },
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Low priority task",
+                            "status": "open",
+                            "priority": "low",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "High priority task",
+                            "status": "open",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "In progress task",
+                            "status": "in-progress",
+                            "priority": "medium",
+                            "archived": False,
+                        },
+                        "TASK-004": {
+                            "title": "Blocked task",
+                            "status": "open",
+                            "priority": "critical",
+                            "depends_on": ["TASK-001"],
+                            "archived": False,
+                        },
+                        "TASK-005": {
+                            "title": "Done task",
+                            "status": "done",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_next_shows_top_task(self, cli_runner, next_project):
         """Test next shows the highest priority actionable task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(next_project),
-            "next"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(next_project), "next"])
 
         assert result.exit_code == 0
         # In-progress task should be shown (gets bonus)
@@ -1138,10 +1120,7 @@ class TestDotoNext:
         """Test next excludes tasks with pending dependencies."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(next_project),
-            "next", "--all"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(next_project), "next", "--all"])
 
         assert result.exit_code == 0
         # TASK-004 is blocked by TASK-001, should not appear
@@ -1151,10 +1130,9 @@ class TestDotoNext:
         """Test next --include-blocked shows blocked tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(next_project),
-            "next", "--all", "--include-blocked"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(next_project), "next", "--all", "--include-blocked"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-004" in result.output
@@ -1164,10 +1142,7 @@ class TestDotoNext:
         """Test next excludes done tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(next_project),
-            "next", "--all"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(next_project), "next", "--all"])
 
         assert result.exit_code == 0
         assert "TASK-005" not in result.output
@@ -1176,10 +1151,7 @@ class TestDotoNext:
         """Test next with JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(next_project),
-            "next", "--json"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(next_project), "next", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1190,10 +1162,7 @@ class TestDotoNext:
         """Test next with no tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "next"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "next"])
 
         assert result.exit_code == 0
         assert "No tasks found" in result.output
@@ -1201,48 +1170,48 @@ class TestDotoNext:
 
 class TestDotoDone:
     """Test the doto done command."""
-    
+
     @pytest.fixture
     def open_tasks_project(self, cli_project):
         """Create a project with open tasks."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 2,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {"title": "Task 1", "status": "open", "archived": False},
-                "TASK-002": {"title": "Task 2", "status": "in-progress", "archived": False},
-            }
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {"title": "Task 1", "status": "open", "archived": False},
+                        "TASK-002": {"title": "Task 2", "status": "in-progress", "archived": False},
+                    },
+                }
+            )
+        )
         return cli_project
-    
+
     def test_done_single_task(self, cli_runner, open_tasks_project):
         """Test marking a single task as done."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(open_tasks_project),
-            "done", "TASK-001"
-        ])
-        
+
+        result = cli_runner.invoke(cli, ["--config", str(open_tasks_project), "done", "TASK-001"])
+
         assert result.exit_code == 0
-        
+
         json_file = open_tasks_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
         assert data["tasks"]["TASK-001"]["status"] == "done"
         assert data["tasks"]["TASK-002"]["status"] == "in-progress"
-    
+
     def test_done_multiple_tasks(self, cli_runner, open_tasks_project):
         """Test marking multiple tasks as done."""
         from doxtr_doto.cli.main import cli
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(open_tasks_project),
-            "done", "TASK-001", "TASK-002"
-        ])
-        
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(open_tasks_project), "done", "TASK-001", "TASK-002"]
+        )
+
         assert result.exit_code == 0
-        
+
         json_file = open_tasks_project / ".doto" / "tasks.json"
         data = json.loads(json_file.read_text())
         assert data["tasks"]["TASK-001"]["status"] == "done"
@@ -1256,47 +1225,48 @@ class TestDotoSearch:
     def search_project(self, cli_project):
         """Create a project with searchable tasks."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Fix login bug",
-                    "status": "open",
-                    "priority": "high",
-                    "body": "Authentication failing for some users",
-                    "tags": ["bug", "auth"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Add user profile page",
-                    "status": "in-progress",
-                    "priority": "medium",
-                    "body": "Create profile view component",
-                    "tags": ["feature"],
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Old feature request",
-                    "status": "done",
-                    "priority": "low",
-                    "body": "Some archived content",
-                    "tags": ["feature"],
-                    "archived": True,
-                },
-            },
-            "series": {},
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Fix login bug",
+                            "status": "open",
+                            "priority": "high",
+                            "body": "Authentication failing for some users",
+                            "tags": ["bug", "auth"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Add user profile page",
+                            "status": "in-progress",
+                            "priority": "medium",
+                            "body": "Create profile view component",
+                            "tags": ["feature"],
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Old feature request",
+                            "status": "done",
+                            "priority": "low",
+                            "body": "Some archived content",
+                            "tags": ["feature"],
+                            "archived": True,
+                        },
+                    },
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_search_by_title(self, cli_runner, search_project):
         """Test searching tasks by title."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "login"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(search_project), "search", "login"])
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -1306,10 +1276,9 @@ class TestDotoSearch:
         """Test searching tasks by body content."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "Authentication", "--body"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(search_project), "search", "Authentication", "--body"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -1318,10 +1287,9 @@ class TestDotoSearch:
         """Test searching with regex pattern."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "fix|add", "--regex"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(search_project), "search", "fix|add", "--regex"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -1331,10 +1299,9 @@ class TestDotoSearch:
         """Test searching specific field."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "bug", "--field", "tags"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(search_project), "search", "bug", "--field", "tags"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -1344,10 +1311,9 @@ class TestDotoSearch:
         """Test searching includes archived tasks when flag is set."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "Old", "--archived"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(search_project), "search", "Old", "--archived"]
+        )
 
         assert result.exit_code == 0
         assert "TASK-003" in result.output
@@ -1356,10 +1322,9 @@ class TestDotoSearch:
         """Test search with JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "login", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(search_project), "search", "login", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1370,10 +1335,7 @@ class TestDotoSearch:
         """Test search with no matching results."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(search_project),
-            "search", "nonexistent"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(search_project), "search", "nonexistent"])
 
         assert result.exit_code == 0
         assert "No tasks found" in result.output
@@ -1386,39 +1348,42 @@ class TestDotoExport:
     def export_project(self, cli_project):
         """Create a project with tasks for export."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Task one",
-                    "status": "open",
-                    "priority": "high",
-                    "assignee": "alice",
-                    "tags": ["urgent"],
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Task two",
-                    "status": "done",
-                    "priority": "low",
-                    "assignee": "bob",
-                    "tags": [],
-                    "archived": False,
-                },
-            },
-            "series": {},
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Task one",
+                            "status": "open",
+                            "priority": "high",
+                            "assignee": "alice",
+                            "tags": ["urgent"],
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Task two",
+                            "status": "done",
+                            "priority": "low",
+                            "assignee": "bob",
+                            "tags": [],
+                            "archived": False,
+                        },
+                    },
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_export_json(self, cli_runner, export_project):
         """Test exporting tasks as JSON."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(export_project), "export", "--format", "json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1428,10 +1393,9 @@ class TestDotoExport:
         """Test exporting tasks as CSV."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "csv"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(export_project), "export", "--format", "csv"]
+        )
 
         assert result.exit_code == 0
         assert "id,title" in result.output
@@ -1442,10 +1406,9 @@ class TestDotoExport:
         """Test exporting tasks as Markdown."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "markdown"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(export_project), "export", "--format", "markdown"]
+        )
 
         assert result.exit_code == 0
         assert "# Tasks" in result.output
@@ -1458,10 +1421,18 @@ class TestDotoExport:
         from doxtr_doto.cli.main import cli
 
         output_file = tmp_path / "export.json"
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "json", "--output", str(output_file)
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(export_project),
+                "export",
+                "--format",
+                "json",
+                "--output",
+                str(output_file),
+            ],
+        )
 
         assert result.exit_code == 0
         assert output_file.exists()
@@ -1472,10 +1443,9 @@ class TestDotoExport:
         """Test exporting with status filter."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "json", "--status", "done"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(export_project), "export", "--format", "json", "--status", "done"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1486,10 +1456,10 @@ class TestDotoExport:
         """Test exporting with assignee filter."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(export_project),
-            "export", "--format", "json", "--assignee", "alice"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(export_project), "export", "--format", "json", "--assignee", "alice"],
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1504,41 +1474,44 @@ class TestDotoArchive:
     def archive_project(self, cli_project):
         """Create a project with tasks for archiving."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Task to archive",
-                    "status": "done",
-                    "priority": "low",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Another task",
-                    "status": "open",
-                    "priority": "high",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Already archived",
-                    "status": "done",
-                    "priority": "low",
-                    "archived": True,
-                },
-            },
-            "series": {},
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Task to archive",
+                            "status": "done",
+                            "priority": "low",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Another task",
+                            "status": "open",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Already archived",
+                            "status": "done",
+                            "priority": "low",
+                            "archived": True,
+                        },
+                    },
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_archive_single_task(self, cli_runner, archive_project):
         """Test archiving a single task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "--yes"]
+        )
 
         assert result.exit_code == 0
         assert "Archived task TASK-001" in result.output
@@ -1552,10 +1525,9 @@ class TestDotoArchive:
         """Test archiving multiple tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "TASK-002", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "TASK-002", "--yes"]
+        )
 
         assert result.exit_code == 0
 
@@ -1568,10 +1540,9 @@ class TestDotoArchive:
         """Test archiving an already archived task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-003", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-003", "--yes"]
+        )
 
         assert result.exit_code == 0
         assert "already archived" in result.output
@@ -1580,10 +1551,9 @@ class TestDotoArchive:
         """Test archiving a nonexistent task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "NONEXISTENT"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "NONEXISTENT"]
+        )
 
         assert result.exit_code == 0
         assert "not found" in result.output
@@ -1592,10 +1562,9 @@ class TestDotoArchive:
         """Test archive with JSON output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(archive_project),
-            "archive", "TASK-001", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(archive_project), "archive", "TASK-001", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1609,10 +1578,9 @@ class TestConfigValidators:
         """Test add command accepts valid priority."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--priority", "high"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--priority", "high"]
+        )
 
         assert result.exit_code == 0
 
@@ -1620,10 +1588,9 @@ class TestConfigValidators:
         """Test add command rejects invalid priority."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--priority", "invalid"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--priority", "invalid"]
+        )
 
         assert result.exit_code != 0
         assert "Invalid priority" in result.output
@@ -1632,10 +1599,9 @@ class TestConfigValidators:
         """Test add command accepts valid status."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--status", "in-progress"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--status", "in-progress"]
+        )
 
         assert result.exit_code == 0
 
@@ -1643,10 +1609,9 @@ class TestConfigValidators:
         """Test add command rejects invalid status."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--status", "invalid"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--status", "invalid"]
+        )
 
         assert result.exit_code != 0
         assert "Invalid status" in result.output
@@ -1656,15 +1621,13 @@ class TestConfigValidators:
         from doxtr_doto.cli.main import cli
 
         # First add a task
-        cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--id", "TEST-001"
-        ])
+        cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--id", "TEST-001"]
+        )
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "update", "TEST-001", "--priority", "critical"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "update", "TEST-001", "--priority", "critical"]
+        )
 
         assert result.exit_code == 0
 
@@ -1673,15 +1636,13 @@ class TestConfigValidators:
         from doxtr_doto.cli.main import cli
 
         # First add a task
-        cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "add", "Test task", "--id", "TEST-001"
-        ])
+        cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Test task", "--id", "TEST-001"]
+        )
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "update", "TEST-001", "--status", "badstatus"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "update", "TEST-001", "--status", "badstatus"]
+        )
 
         assert result.exit_code != 0
         assert "Invalid status" in result.output
@@ -1694,61 +1655,62 @@ class TestDotoSeriesList:
     def series_project(self, cli_project):
         """Create a project with series data."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Weekly standup - 2026-07-01",
-                    "status": "done",
-                    "due": "2026-07-01",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Weekly standup - 2026-07-08",
-                    "status": "open",
-                    "due": "2026-07-08",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Monthly report - 2026-07",
-                    "status": "open",
-                    "due": "2026-07-31",
-                    "series_id": "SERIES-002",
-                    "archived": False,
-                },
-            },
-            "series": {
-                "SERIES-001": {
-                    "title_template": "Weekly standup - {date}",
-                    "pattern": {"type": "weekly", "interval": 1, "weekdays": [0]},
-                    "start_date": "2026-07-01",
-                    "end_date": "2026-08-31",
-                    "task_ids": ["TASK-001", "TASK-002"],
-                    "created": "2026-06-25T10:00:00",
-                },
-                "SERIES-002": {
-                    "title_template": "Monthly report - {date}",
-                    "pattern": {"type": "monthly", "interval": 1, "day_of_month": 31},
-                    "start_date": "2026-07-01",
-                    "end_date": "2026-12-31",
-                    "task_ids": ["TASK-003"],
-                    "created": "2026-06-25T10:00:00",
-                },
-            },
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Weekly standup - 2026-07-01",
+                            "status": "done",
+                            "due": "2026-07-01",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Weekly standup - 2026-07-08",
+                            "status": "open",
+                            "due": "2026-07-08",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Monthly report - 2026-07",
+                            "status": "open",
+                            "due": "2026-07-31",
+                            "series_id": "SERIES-002",
+                            "archived": False,
+                        },
+                    },
+                    "series": {
+                        "SERIES-001": {
+                            "title_template": "Weekly standup - {date}",
+                            "pattern": {"type": "weekly", "interval": 1, "weekdays": [0]},
+                            "start_date": "2026-07-01",
+                            "end_date": "2026-08-31",
+                            "task_ids": ["TASK-001", "TASK-002"],
+                            "created": "2026-06-25T10:00:00",
+                        },
+                        "SERIES-002": {
+                            "title_template": "Monthly report - {date}",
+                            "pattern": {"type": "monthly", "interval": 1, "day_of_month": 31},
+                            "start_date": "2026-07-01",
+                            "end_date": "2026-12-31",
+                            "task_ids": ["TASK-003"],
+                            "created": "2026-06-25T10:00:00",
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_series_list_shows_all_series(self, cli_runner, series_project):
         """Test that series list shows all series."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(series_project), "series", "list"])
 
         assert result.exit_code == 0
         assert "SERIES-001" in result.output
@@ -1760,10 +1722,7 @@ class TestDotoSeriesList:
         """Test that series list shows progress (done/total)."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(series_project), "series", "list"])
 
         assert result.exit_code == 0
         # SERIES-001 has 1 done, 1 open = 1/2
@@ -1773,10 +1732,9 @@ class TestDotoSeriesList:
         """Test that series list outputs JSON when --json flag used."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "list", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "list", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1790,10 +1748,7 @@ class TestDotoSeriesList:
         """Test that series list handles no series gracefully."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "series", "list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "series", "list"])
 
         assert result.exit_code == 0
         assert "No series found" in result.output
@@ -1806,53 +1761,56 @@ class TestDotoSeriesShow:
     def series_project(self, cli_project):
         """Create a project with series data."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Daily check - 2026-07-01",
-                    "status": "done",
-                    "due": "2026-07-01",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Daily check - 2026-07-02",
-                    "status": "in-progress",
-                    "due": "2026-07-02",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Daily check - 2026-07-03",
-                    "status": "open",
-                    "due": "2026-07-03",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-            },
-            "series": {
-                "SERIES-001": {
-                    "title_template": "Daily check - {date}",
-                    "pattern": {"type": "daily", "interval": 1},
-                    "start_date": "2026-07-01",
-                    "end_date": "2026-07-31",
-                    "task_ids": ["TASK-001", "TASK-002", "TASK-003"],
-                    "created": "2026-06-25T10:00:00",
-                },
-            },
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Daily check - 2026-07-01",
+                            "status": "done",
+                            "due": "2026-07-01",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Daily check - 2026-07-02",
+                            "status": "in-progress",
+                            "due": "2026-07-02",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Daily check - 2026-07-03",
+                            "status": "open",
+                            "due": "2026-07-03",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                    },
+                    "series": {
+                        "SERIES-001": {
+                            "title_template": "Daily check - {date}",
+                            "pattern": {"type": "daily", "interval": 1},
+                            "start_date": "2026-07-01",
+                            "end_date": "2026-07-31",
+                            "task_ids": ["TASK-001", "TASK-002", "TASK-003"],
+                            "created": "2026-06-25T10:00:00",
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_series_show_displays_details(self, cli_runner, series_project):
         """Test that series show displays series details."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "show", "SERIES-001"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "show", "SERIES-001"]
+        )
 
         assert result.exit_code == 0
         assert "SERIES-001" in result.output
@@ -1864,10 +1822,9 @@ class TestDotoSeriesShow:
         """Test that series show displays task status counts."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "show", "SERIES-001"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "show", "SERIES-001"]
+        )
 
         assert result.exit_code == 0
         assert "done: 1" in result.output
@@ -1878,10 +1835,9 @@ class TestDotoSeriesShow:
         """Test that series show outputs JSON when --json flag used."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "show", "SERIES-001", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "show", "SERIES-001", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1895,10 +1851,9 @@ class TestDotoSeriesShow:
         """Test that series show fails for nonexistent series."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "show", "NONEXISTENT"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "show", "NONEXISTENT"]
+        )
 
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
@@ -1911,49 +1866,52 @@ class TestDotoSeriesDelete:
     def series_project(self, cli_project):
         """Create a project with series data."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Series task 1",
-                    "status": "open",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "Series task 2",
-                    "status": "open",
-                    "series_id": "SERIES-001",
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Independent task",
-                    "status": "open",
-                    "archived": False,
-                },
-            },
-            "series": {
-                "SERIES-001": {
-                    "title_template": "Series task {date}",
-                    "pattern": {"type": "daily", "interval": 1},
-                    "start_date": "2026-07-01",
-                    "end_date": "2026-07-31",
-                    "task_ids": ["TASK-001", "TASK-002"],
-                    "created": "2026-06-25T10:00:00",
-                },
-            },
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Series task 1",
+                            "status": "open",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "Series task 2",
+                            "status": "open",
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Independent task",
+                            "status": "open",
+                            "archived": False,
+                        },
+                    },
+                    "series": {
+                        "SERIES-001": {
+                            "title_template": "Series task {date}",
+                            "pattern": {"type": "daily", "interval": 1},
+                            "start_date": "2026-07-01",
+                            "end_date": "2026-07-31",
+                            "task_ids": ["TASK-001", "TASK-002"],
+                            "created": "2026-06-25T10:00:00",
+                        },
+                    },
+                }
+            )
+        )
         return cli_project
 
     def test_series_delete_removes_series_and_tasks(self, cli_runner, series_project):
         """Test that series delete removes series and its tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "delete", "SERIES-001", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "delete", "SERIES-001", "--force"]
+        )
 
         assert result.exit_code == 0
         assert "Deleted" in result.output
@@ -1971,10 +1929,18 @@ class TestDotoSeriesDelete:
         """Test that series delete --keep-tasks keeps tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "delete", "SERIES-001", "--keep-tasks", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(series_project),
+                "series",
+                "delete",
+                "SERIES-001",
+                "--keep-tasks",
+                "--force",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Deleted" in result.output
@@ -1991,10 +1957,9 @@ class TestDotoSeriesDelete:
         """Test that series delete outputs JSON when --json flag used."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "delete", "SERIES-001", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "delete", "SERIES-001", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -2005,10 +1970,9 @@ class TestDotoSeriesDelete:
         """Test that series delete fails for nonexistent series."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "delete", "NONEXISTENT", "--force"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "delete", "NONEXISTENT", "--force"]
+        )
 
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
@@ -2018,10 +1982,9 @@ class TestDotoSeriesDelete:
         from doxtr_doto.cli.main import cli
 
         # Without --force, should prompt and abort on 'n'
-        result = cli_runner.invoke(cli, [
-            "--config", str(series_project),
-            "series", "delete", "SERIES-001"
-        ], input="n\n")
+        result = cli_runner.invoke(
+            cli, ["--config", str(series_project), "series", "delete", "SERIES-001"], input="n\n"
+        )
 
         assert "Cancelled" in result.output or result.exit_code == 0
 
@@ -2038,57 +2001,58 @@ class TestDotoResolve:
     def conflict_project(self, cli_project):
         """Create a project with conflicts."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Task with conflict",
-                    "status": "open",
-                    "priority": "medium",
-                    "archived": False,
-                    "_sync": {
-                        "snapshot": {
-                            "priority": "low",
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Task with conflict",
                             "status": "open",
-                        }
-                    }
-                },
-                "TASK-002": {
-                    "title": "Another task",
-                    "status": "done",
-                    "priority": "high",
-                    "archived": False,
-                },
-            },
-            "_conflicts": [
-                {
-                    "task_id": "TASK-001",
-                    "field": "priority",
-                    "base": "low",
-                    "rst": "high",
-                    "json": "medium",
-                },
-                {
-                    "task_id": "TASK-001",
-                    "field": "status",
-                    "base": "open",
-                    "rst": "in-progress",
-                    "json": "blocked",
-                },
-            ],
-            "series": {},
-        }))
+                            "priority": "medium",
+                            "archived": False,
+                            "_sync": {
+                                "snapshot": {
+                                    "priority": "low",
+                                    "status": "open",
+                                }
+                            },
+                        },
+                        "TASK-002": {
+                            "title": "Another task",
+                            "status": "done",
+                            "priority": "high",
+                            "archived": False,
+                        },
+                    },
+                    "_conflicts": [
+                        {
+                            "task_id": "TASK-001",
+                            "field": "priority",
+                            "base": "low",
+                            "rst": "high",
+                            "json": "medium",
+                        },
+                        {
+                            "task_id": "TASK-001",
+                            "field": "status",
+                            "base": "open",
+                            "rst": "in-progress",
+                            "json": "blocked",
+                        },
+                    ],
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_resolve_list_shows_conflicts(self, cli_runner, conflict_project):
         """Test doto resolve --list shows conflicts."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "--list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(conflict_project), "resolve", "--list"])
 
         assert result.exit_code == 0
         assert "TASK-001" in result.output
@@ -2098,10 +2062,9 @@ class TestDotoResolve:
         """Test doto resolve TASK-ID --use-rst resolves using RST value."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "TASK-001", "--use-rst"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(conflict_project), "resolve", "TASK-001", "--use-rst"]
+        )
 
         assert result.exit_code == 0
         assert "Resolved" in result.output
@@ -2116,10 +2079,9 @@ class TestDotoResolve:
         """Test doto resolve TASK-ID --use-json resolves using JSON value."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "TASK-001", "--use-json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(conflict_project), "resolve", "TASK-001", "--use-json"]
+        )
 
         assert result.exit_code == 0
         assert "Resolved" in result.output
@@ -2134,10 +2096,18 @@ class TestDotoResolve:
         """Test doto resolve TASK-ID --field priority --use-rst resolves specific field."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "TASK-001", "--field", "priority", "--use-rst"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(conflict_project),
+                "resolve",
+                "TASK-001",
+                "--field",
+                "priority",
+                "--use-rst",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Resolved priority" in result.output
@@ -2156,10 +2126,7 @@ class TestDotoResolve:
         """Test doto resolve with no conflicts shows appropriate message."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(cli_project),
-            "resolve", "--list"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(cli_project), "resolve", "--list"])
 
         assert result.exit_code == 0
         assert "No conflicts found" in result.output
@@ -2168,10 +2135,9 @@ class TestDotoResolve:
         """Test doto resolve NONEXISTENT --use-rst shows error."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "NONEXISTENT", "--use-rst"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(conflict_project), "resolve", "NONEXISTENT", "--use-rst"]
+        )
 
         assert result.exit_code == 0
         assert "No conflicts found for task NONEXISTENT" in result.output
@@ -2180,10 +2146,9 @@ class TestDotoResolve:
         """Test doto resolve --json outputs JSON format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(conflict_project),
-            "resolve", "--list", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(conflict_project), "resolve", "--list", "--json"]
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -2200,41 +2165,42 @@ class TestDotoReopen:
     def reopen_project(self, cli_project):
         """Create a project with archived tasks."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "Archived task",
-                    "status": "done",
-                    "priority": "high",
-                    "archived": True,
-                },
-                "TASK-002": {
-                    "title": "Another archived task",
-                    "status": "done",
-                    "priority": "low",
-                    "archived": True,
-                },
-                "TASK-003": {
-                    "title": "Active task",
-                    "status": "open",
-                    "priority": "medium",
-                    "archived": False,
-                },
-            },
-            "series": {},
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Archived task",
+                            "status": "done",
+                            "priority": "high",
+                            "archived": True,
+                        },
+                        "TASK-002": {
+                            "title": "Another archived task",
+                            "status": "done",
+                            "priority": "low",
+                            "archived": True,
+                        },
+                        "TASK-003": {
+                            "title": "Active task",
+                            "status": "open",
+                            "priority": "medium",
+                            "archived": False,
+                        },
+                    },
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_reopen_single_task(self, cli_runner, reopen_project):
         """Test doto reopen TASK-ID reopens archived task."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-001"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(reopen_project), "reopen", "TASK-001"])
 
         assert result.exit_code == 0
         assert "Reopened TASK-001" in result.output
@@ -2248,10 +2214,9 @@ class TestDotoReopen:
         """Test doto reopen TASK-ID --status in-progress sets custom status."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-001", "--status", "in-progress"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(reopen_project), "reopen", "TASK-001", "--status", "in-progress"]
+        )
 
         assert result.exit_code == 0
         assert "Reopened TASK-001" in result.output
@@ -2266,10 +2231,10 @@ class TestDotoReopen:
         """Test doto reopen TASK-ID --file path.rst sets target file."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-001", "--file", "tasks/backlog.rst"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(reopen_project), "reopen", "TASK-001", "--file", "tasks/backlog.rst"],
+        )
 
         assert result.exit_code == 0
         assert "Reopened TASK-001" in result.output
@@ -2282,10 +2247,9 @@ class TestDotoReopen:
         """Test doto reopen TASK-1 TASK-2 reopens multiple tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-001", "TASK-002"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(reopen_project), "reopen", "TASK-001", "TASK-002"]
+        )
 
         assert result.exit_code == 0
         assert "Reopened TASK-001" in result.output
@@ -2300,10 +2264,7 @@ class TestDotoReopen:
         """Test doto reopen NONEXISTENT shows not found error."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "NONEXISTENT"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(reopen_project), "reopen", "NONEXISTENT"])
 
         assert result.exit_code == 0
         assert "not found" in result.output
@@ -2312,10 +2273,7 @@ class TestDotoReopen:
         """Test doto reopen ACTIVE-TASK shows not archived error."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-003"
-        ])
+        result = cli_runner.invoke(cli, ["--config", str(reopen_project), "reopen", "TASK-003"])
 
         assert result.exit_code == 0
         assert "not archived" in result.output
@@ -2324,10 +2282,9 @@ class TestDotoReopen:
         """Test doto reopen --json outputs JSON format."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(reopen_project),
-            "reopen", "TASK-001", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(reopen_project), "reopen", "TASK-001", "--json"]
+        )
 
         assert result.exit_code == 0
         # Extract JSON from output (may include success messages before JSON)
@@ -2346,63 +2303,77 @@ class TestDotoBulkUpdate:
     def bulk_update_project(self, cli_project):
         """Create a project with multiple tasks for bulk update testing."""
         json_file = cli_project / ".doto" / "tasks.json"
-        json_file.write_text(json.dumps({
-            "version": 3,
-            "updated": "2026-07-26T10:00:00",
-            "tasks": {
-                "TASK-001": {
-                    "title": "High priority open task",
-                    "status": "open",
-                    "priority": "high",
-                    "assignee": "alice",
-                    "tags": ["feature"],
-                    "due": "2025-01-01",
-                    "archived": False,
-                },
-                "TASK-002": {
-                    "title": "High priority in-progress task",
-                    "status": "in-progress",
-                    "priority": "high",
-                    "assignee": "bob",
-                    "tags": ["bug"],
-                    "archived": False,
-                },
-                "TASK-003": {
-                    "title": "Low priority open task",
-                    "status": "open",
-                    "priority": "low",
-                    "assignee": "alice",
-                    "tags": ["feature", "backend"],
-                    "due": "2025-06-01",
-                    "archived": False,
-                },
-                "TASK-004": {
-                    "title": "Done task",
-                    "status": "done",
-                    "priority": "medium",
-                    "assignee": "charlie",
-                    "tags": [],
-                    "archived": False,
-                },
-                "TASK-005": {
-                    "title": "Archived task",
-                    "status": "done",
-                    "priority": "low",
-                    "archived": True,
-                },
-            },
-            "series": {},
-        }))
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "High priority open task",
+                            "status": "open",
+                            "priority": "high",
+                            "assignee": "alice",
+                            "tags": ["feature"],
+                            "due": "2025-01-01",
+                            "archived": False,
+                        },
+                        "TASK-002": {
+                            "title": "High priority in-progress task",
+                            "status": "in-progress",
+                            "priority": "high",
+                            "assignee": "bob",
+                            "tags": ["bug"],
+                            "archived": False,
+                        },
+                        "TASK-003": {
+                            "title": "Low priority open task",
+                            "status": "open",
+                            "priority": "low",
+                            "assignee": "alice",
+                            "tags": ["feature", "backend"],
+                            "due": "2025-06-01",
+                            "archived": False,
+                        },
+                        "TASK-004": {
+                            "title": "Done task",
+                            "status": "done",
+                            "priority": "medium",
+                            "assignee": "charlie",
+                            "tags": [],
+                            "archived": False,
+                        },
+                        "TASK-005": {
+                            "title": "Archived task",
+                            "status": "done",
+                            "priority": "low",
+                            "archived": True,
+                        },
+                    },
+                    "series": {},
+                }
+            )
+        )
         return cli_project
 
     def test_bulk_update_by_priority_filter(self, cli_runner, bulk_update_project):
         """Test bulk update with --filter-priority."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--status", "blocked", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--status",
+                "blocked",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Updated 2 task(s)" in result.output
@@ -2417,10 +2388,20 @@ class TestDotoBulkUpdate:
         """Test bulk update with --filter-status."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-status", "open", "--priority", "critical", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-status",
+                "open",
+                "--priority",
+                "critical",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Updated 2 task(s)" in result.output
@@ -2435,10 +2416,20 @@ class TestDotoBulkUpdate:
         """Test bulk update with --filter-assignee."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-assignee", "alice", "--add-tags", "alice-tasks", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-assignee",
+                "alice",
+                "--add-tags",
+                "alice-tasks",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Updated 2 task(s)" in result.output
@@ -2453,10 +2444,20 @@ class TestDotoBulkUpdate:
         """Test bulk update with --filter-tags."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-tags", "feature", "--assignee", "dave", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-tags",
+                "feature",
+                "--assignee",
+                "dave",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Updated 2 task(s)" in result.output
@@ -2472,10 +2473,19 @@ class TestDotoBulkUpdate:
         from doxtr_doto.cli.main import cli
 
         # TASK-001 has due date 2025-01-01 which should be overdue
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-overdue", "--add-tags", "overdue", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-overdue",
+                "--add-tags",
+                "overdue",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
 
@@ -2488,11 +2498,22 @@ class TestDotoBulkUpdate:
         """Test bulk update with multiple filters (AND logic)."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-status", "open", "--filter-priority", "high",
-            "--status", "in-progress", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-status",
+                "open",
+                "--filter-priority",
+                "high",
+                "--status",
+                "in-progress",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Updated 1 task(s)" in result.output
@@ -2506,10 +2527,20 @@ class TestDotoBulkUpdate:
         """Test bulk update with --dry-run doesn't make changes."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--status", "blocked", "--all", "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--status",
+                "blocked",
+                "--all",
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Dry run" in result.output
@@ -2527,11 +2558,21 @@ class TestDotoBulkUpdate:
         """Test bulk update with --dry-run --json."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--status", "blocked",
-            "--all", "--dry-run", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--status",
+                "blocked",
+                "--all",
+                "--dry-run",
+                "--json",
+            ],
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -2545,10 +2586,18 @@ class TestDotoBulkUpdate:
         """Test bulk update requires --all flag for safety."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--status", "blocked"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--status",
+                "blocked",
+            ],
+        )
 
         assert result.exit_code != 0
         assert "--all flag is required" in result.output
@@ -2557,10 +2606,18 @@ class TestDotoBulkUpdate:
         """Test bulk update rejects --edit flag."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--edit", "--all"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--edit",
+                "--all",
+            ],
+        )
 
         assert result.exit_code != 0
         assert "--edit flag cannot be used with bulk updates" in result.output
@@ -2569,10 +2626,19 @@ class TestDotoBulkUpdate:
         """Test bulk update with no matching tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-assignee", "nonexistent", "--status", "blocked", "--all"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-assignee",
+                "nonexistent",
+                "--status",
+                "blocked",
+                "--all",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "No tasks match the filter criteria" in result.output
@@ -2581,10 +2647,20 @@ class TestDotoBulkUpdate:
         """Test bulk update excludes archived tasks."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "low", "--status", "blocked", "--all", "--yes"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "low",
+                "--status",
+                "blocked",
+                "--all",
+                "--yes",
+            ],
+        )
 
         assert result.exit_code == 0
         # Only TASK-003 should be updated (TASK-005 is archived)
@@ -2600,11 +2676,21 @@ class TestDotoBulkUpdate:
         """Test bulk update with --json output."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--status", "blocked",
-            "--all", "--yes", "--json"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-priority",
+                "high",
+                "--status",
+                "blocked",
+                "--all",
+                "--yes",
+                "--json",
+            ],
+        )
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -2629,10 +2715,20 @@ class TestDotoBulkUpdate:
         json_file.write_text(json.dumps(data))
 
         # Reject the prompt
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-status", "open", "--priority", "critical", "--all"
-        ], input="n\n")
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-status",
+                "open",
+                "--priority",
+                "critical",
+                "--all",
+            ],
+            input="n\n",
+        )
 
         assert result.exit_code == 0
         assert "Aborted" in result.output
@@ -2658,10 +2754,20 @@ class TestDotoBulkUpdate:
         json_file.write_text(json.dumps(data))
 
         # Accept the prompt
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-status", "open", "--priority", "critical", "--all"
-        ], input="y\n")
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "--filter-status",
+                "open",
+                "--priority",
+                "critical",
+                "--all",
+            ],
+            input="y\n",
+        )
 
         assert result.exit_code == 0
         assert "Updated" in result.output
@@ -2670,10 +2776,19 @@ class TestDotoBulkUpdate:
         """Test single task update rejects filter options."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "TASK-001", "--filter-priority", "high", "--status", "done"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(bulk_update_project),
+                "update",
+                "TASK-001",
+                "--filter-priority",
+                "high",
+                "--status",
+                "done",
+            ],
+        )
 
         assert result.exit_code != 0
         assert "Cannot use filter options" in result.output
@@ -2682,10 +2797,9 @@ class TestDotoBulkUpdate:
         """Test single task update still works as before."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "TASK-001", "--status", "done"
-        ])
+        result = cli_runner.invoke(
+            cli, ["--config", str(bulk_update_project), "update", "TASK-001", "--status", "done"]
+        )
 
         assert result.exit_code == 0
         assert "Updated task TASK-001" in result.output
@@ -2700,10 +2814,10 @@ class TestDotoBulkUpdate:
         """Test bulk update requires at least one update option."""
         from doxtr_doto.cli.main import cli
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(bulk_update_project),
-            "update", "--filter-priority", "high", "--all"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(bulk_update_project), "update", "--filter-priority", "high", "--all"],
+        )
 
         assert result.exit_code != 0
         assert "No updates specified" in result.output
@@ -2715,13 +2829,15 @@ class TestParseRelativeDate:
     def test_valid_iso_date(self):
         """Valid YYYY-MM-DD dates are accepted."""
         from doxtr_doto.cli.commands.add import parse_relative_date
+
         assert parse_relative_date("2025-08-15") == "2025-08-15"
         assert parse_relative_date("2024-02-29") == "2024-02-29"  # Leap year
 
     def test_invalid_iso_date_rejected(self):
         """Invalid YYYY-MM-DD dates raise ValueError."""
-        from doxtr_doto.cli.commands.add import parse_relative_date
         import pytest
+
+        from doxtr_doto.cli.commands.add import parse_relative_date
 
         with pytest.raises(ValueError, match="Invalid date"):
             parse_relative_date("2025-13-45")  # Invalid month/day
@@ -2737,8 +2853,9 @@ class TestParseRelativeDate:
 
     def test_relative_dates_work(self):
         """Relative date formats work correctly."""
-        from doxtr_doto.cli.commands.add import parse_relative_date
         from datetime import date, timedelta
+
+        from doxtr_doto.cli.commands.add import parse_relative_date
 
         today = date.today()
 
@@ -2746,3 +2863,30 @@ class TestParseRelativeDate:
         assert parse_relative_date("tomorrow") == (today + timedelta(days=1)).isoformat()
         assert parse_relative_date("+7d") == (today + timedelta(days=7)).isoformat()
         assert parse_relative_date("+2w") == (today + timedelta(weeks=2)).isoformat()
+
+    def test_iso_date_with_time(self):
+        """An ISO date with an appended time keeps the time (canonical form)."""
+        from doxtr_doto.cli.commands.add import parse_relative_date
+
+        assert parse_relative_date("2026-08-15 16:00") == "2026-08-15T16:00"
+        assert parse_relative_date("2026-08-15T16:00") == "2026-08-15T16:00"
+        assert parse_relative_date("2026-08-15 16h") == "2026-08-15T16:00"
+        assert parse_relative_date("2026-08-15 16:00:31") == "2026-08-15T16:00:31"
+
+    def test_relative_date_with_time(self):
+        """A relative date keeps an appended time, resolving the date part."""
+        from datetime import date, timedelta
+
+        from doxtr_doto.cli.commands.add import parse_relative_date
+
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        assert parse_relative_date("tomorrow 16:00") == f"{tomorrow}T16:00"
+        assert parse_relative_date("+1d 16h") == f"{tomorrow}T16:00"
+
+    def test_multiword_relative_date_without_time_unaffected(self):
+        """A hyphenated multi-word relative (no space) is parsed as date-only."""
+        from datetime import date, timedelta
+
+        from doxtr_doto.cli.commands.add import parse_relative_date
+
+        assert parse_relative_date("next-week") == (date.today() + timedelta(weeks=1)).isoformat()

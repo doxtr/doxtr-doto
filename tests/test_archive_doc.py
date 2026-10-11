@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestGenerateArchiveContent:
@@ -14,7 +11,7 @@ class TestGenerateArchiveContent:
     def test_produces_valid_rst(self, doto_srcdir, make_app):
         """Test that generate_archive_content produces valid RST."""
         from doxtr_doto.builders.archive_doc import generate_archive_content
-        from doxtr_doto.collectors import DotoEnvironment, DotoTask, get_doto_env
+        from doxtr_doto.collectors import DotoTask, get_doto_env
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
         env = app.env
@@ -46,13 +43,15 @@ class TestGenerateArchiveContent:
         assert "Archived Tasks" in content
         assert "==============" in content
         assert "Total archived tasks:** 2" in content
-        assert ".. doto-list::" in content
-        assert ":show-archived: true" in content
+        # The archive page now renders from the JSON store via the dedicated
+        # doto-archive directive (sourced from the task store, child-theme
+        # overridable), not a plain doto-list over RST data.
+        assert ".. doto-archive::" in content
 
     def test_produces_empty_message_when_no_archived_tasks(self, doto_srcdir, make_app):
         """Test that generate_archive_content handles no archived tasks."""
         from doxtr_doto.builders.archive_doc import generate_archive_content
-        from doxtr_doto.collectors import DotoEnvironment, get_doto_env
+        from doxtr_doto.collectors import get_doto_env
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
         env = app.env
@@ -66,7 +65,7 @@ class TestGenerateArchiveContent:
         assert "Archived Tasks" in content
         assert "Total archived tasks:** 0" in content
         assert "*No archived tasks.*" in content
-        assert ".. doto-list::" not in content
+        assert ".. doto-archive::" not in content
 
     def test_sorts_by_archived_date(self, doto_srcdir, make_app):
         """Test that archived tasks are sorted by archived_on date."""
@@ -111,9 +110,7 @@ class TestGenerateArchiveContent:
 class TestAddArchiveDoc:
     """Test the add_archive_doc function."""
 
-    def test_returns_archive_docname_when_archived_tasks_exist(
-        self, doto_srcdir, make_app
-    ):
+    def test_returns_archive_docname_when_archived_tasks_exist(self, doto_srcdir, make_app):
         """Test that add_archive_doc returns archive docname when archived tasks exist."""
         from doxtr_doto.builders.archive_doc import add_archive_doc
         from doxtr_doto.collectors import DotoTask, get_doto_env
@@ -153,9 +150,7 @@ class TestAddArchiveDoc:
         # Update config to enable auto_archive
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_auto_archive = True\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_auto_archive = True\n"
         )
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
@@ -181,8 +176,12 @@ class TestAddArchiveDoc:
         from doxtr_doto.builders.archive_doc import add_archive_doc
         from doxtr_doto.collectors import DotoTask, get_doto_env
 
-        # Config with auto_archive disabled (default)
-        app = make_app(srcdir=doto_srcdir, buildername="html")
+        # Explicitly disable auto_archive (now enabled by default).
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": False},
+        )
         env = app.env
 
         # Add an archived task
@@ -267,8 +266,12 @@ class TestInjectArchiveDoc:
         """Test that inject_archive_doc does nothing when auto_archive disabled."""
         from doxtr_doto.builders.archive_doc import inject_archive_doc
 
-        # Config with auto_archive disabled (default)
-        app = make_app(srcdir=doto_srcdir, buildername="html")
+        # Explicitly disable auto_archive (now enabled by default).
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": False},
+        )
         env = app.env
 
         docnames = ["_doto_archive"]
@@ -356,3 +359,199 @@ class TestReadVirtualDoc:
         read_virtual_doc(app, "regular_doc", source)
 
         assert source[0] == "Original content"
+
+
+def _write_json_only_archived_store(doto_srcdir, task_id="JSON-ARCH-001"):
+    """Write a tasks.json containing an archived task that exists ONLY in JSON.
+
+    The task's directive is intentionally NOT present in any RST file, which is
+    the normal steady state after the build that archived it. This exercises
+    the regression where the archive page sourced from ``all_tasks`` showed
+    "No archived tasks" because ``all_tasks`` is populated only from parsed RST
+    directives.
+    """
+    import json
+
+    json_path = doto_srcdir / ".doto" / "tasks.json"
+    json_path.write_text(
+        json.dumps(
+            {
+                "version": 5,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    task_id: {
+                        "title": "JSON-only archived task",
+                        "status": "done",
+                        "priority": "high",
+                        "assignee": "alice",
+                        "tags": [],
+                        "depends_on": [],
+                        "body": "This task lives only in the JSON store.",
+                        "created": "2026-07-01T09:00:00",
+                        "updated": "2026-07-10T10:00:00",
+                        "archived": True,
+                        "archived_on": "2026-07-15T10:00:00",
+                        "_sync": {
+                            "rst_file": "tasks",
+                            "rst_line": 5,
+                            "rst_hash": None,
+                            "snapshot": None,
+                            "_archive": {
+                                "version": 1,
+                                "original_rst_file": "tasks",
+                                "page_title": "Project Tasks",
+                                "preceding_lines": ["Intro paragraph."],
+                                "directive_line": 5,
+                            },
+                        },
+                    }
+                },
+                "series": {},
+            },
+            indent=2,
+        )
+    )
+    return json_path, task_id
+
+
+class TestArchivePageSourcedFromJsonStore:
+    """Regression tests: the archive page must source archived tasks from the
+    JSON store, not from ``all_tasks`` (which only holds RST-parsed tasks).
+    """
+
+    def test_generate_archive_content_emits_directive_for_json_only_task(
+        self, doto_srcdir, make_app
+    ):
+        """generate_archive_content must emit the ``.. doto-archive::`` directive
+        (not the empty-state prose) when the JSON store has an archived task
+        absent from ``all_tasks``."""
+        from doxtr_doto.builders.archive_doc import generate_archive_content
+        from doxtr_doto.collectors import get_doto_env
+
+        _write_json_only_archived_store(doto_srcdir)
+
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": True},
+        )
+        env = app.env
+
+        # all_tasks is empty: the task exists ONLY in the JSON store.
+        doto_env = get_doto_env(env)
+        doto_env.all_tasks = {}
+
+        content = generate_archive_content(app, env)
+
+        assert "Total archived tasks:** 1" in content
+        assert ".. doto-archive::" in content
+        assert "*No archived tasks.*" not in content
+
+    def test_add_archive_doc_true_for_json_only_task(self, doto_srcdir, make_app):
+        """add_archive_doc must add the archive doc when the JSON store has an
+        archived task even though ``all_tasks`` is empty."""
+        from doxtr_doto.builders.archive_doc import add_archive_doc
+        from doxtr_doto.collectors import get_doto_env
+
+        _write_json_only_archived_store(doto_srcdir)
+
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={
+                "doto_auto_archive": True,
+                "doto_archive_doc": "_archived_tasks",
+            },
+        )
+        env = app.env
+        get_doto_env(env).all_tasks = {}
+
+        result = add_archive_doc(app, env, set(), set(), set())
+
+        assert result == ["_archived_tasks"]
+
+    def test_add_archive_doc_respects_auto_archive_off(self, doto_srcdir, make_app):
+        """With auto-archive disabled, no archive doc is added even if the JSON
+        store has archived tasks."""
+        from doxtr_doto.builders.archive_doc import add_archive_doc
+        from doxtr_doto.collectors import get_doto_env
+
+        _write_json_only_archived_store(doto_srcdir)
+
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": False},
+        )
+        env = app.env
+        get_doto_env(env).all_tasks = {}
+
+        result = add_archive_doc(app, env, set(), set(), set())
+
+        assert result == []
+
+    def test_collect_archived_tasks_returns_json_only_tasks(self, doto_srcdir, make_app):
+        """_collect_archived_tasks must return archived tasks sourced from the
+        JSON store when they are absent from ``all_tasks``."""
+        from doxtr_doto.collectors import get_doto_env
+        from doxtr_doto.nodes import _collect_archived_tasks
+
+        _, task_id = _write_json_only_archived_store(doto_srcdir)
+
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": True},
+        )
+        env = app.env
+        get_doto_env(env).all_tasks = {}
+
+        # Minimal translator stand-in exposing the .builder used by the collector.
+        class _Translator:
+            def __init__(self, builder):
+                self.builder = builder
+
+        class _Builder:
+            def __init__(self, app, env):
+                self.app = app
+                self.env = env
+                self.srcdir = app.srcdir
+
+        translator = _Translator(_Builder(app, env))
+        tasks = _collect_archived_tasks(translator)
+
+        assert [t.id for t in tasks] == [task_id]
+        assert tasks[0].title == "JSON-only archived task"
+        assert tasks[0].archived is True
+
+    def test_archive_rows_show_captured_page_title_for_json_only_task(self, doto_srcdir, make_app):
+        """The 'Original page' column must show the captured page_title for a
+        JSON-only archived task (whose docname is just the removed-from file)."""
+        from doxtr_doto.collectors import get_doto_env
+        from doxtr_doto.nodes import _archive_task_rows, _collect_archived_tasks
+
+        _write_json_only_archived_store(doto_srcdir)
+
+        app = make_app(
+            srcdir=doto_srcdir,
+            buildername="html",
+            confoverrides={"doto_auto_archive": True},
+        )
+        env = app.env
+        get_doto_env(env).all_tasks = {}
+
+        class _Translator:
+            def __init__(self, builder):
+                self.builder = builder
+
+        class _Builder:
+            def __init__(self, app, env):
+                self.app = app
+                self.env = env
+                self.srcdir = app.srcdir
+
+        translator = _Translator(_Builder(app, env))
+        rows = _archive_task_rows(_collect_archived_tasks(translator))
+
+        assert len(rows) == 1
+        assert rows[0]["original_page"] == "Project Tasks"

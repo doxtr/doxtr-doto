@@ -24,6 +24,14 @@
 \newenvironment{dotoboxhigh}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
 \newenvironment{dotoboxcritical}[1][]{\begin{dotobox}[#1]}{\end{dotobox}}
 
+% Compact layout (Feature D): minimal keeps the same quote-based box for the
+% compact variants; the compact body macros below provide the dense layout.
+\newenvironment{dotoboxcompact}[1][]{\begin{quote}}{\end{quote}}
+\newenvironment{dotoboxcompactlow}[1][]{\begin{dotoboxcompact}[#1]}{\end{dotoboxcompact}}
+\newenvironment{dotoboxcompactmedium}[1][]{\begin{dotoboxcompact}[#1]}{\end{dotoboxcompact}}
+\newenvironment{dotoboxcompacthigh}[1][]{\begin{dotoboxcompact}[#1]}{\end{dotoboxcompact}}
+\newenvironment{dotoboxcompactcritical}[1][]{\begin{dotoboxcompact}[#1]}{\end{dotoboxcompact}}
+
 % List environment
 \newenvironment{dotolist}{%
   \begin{itemize}
@@ -47,5 +55,12 @@
 \newcommand{\dototag}[1]{\##1}
 \newcommand{\dotooverdue}[1]{\textbf{#1 -- OVERDUE}}
 \newcommand{\dotoref}[1]{\hyperref[#1]{\texttt{#1}}}
+
+% Compact-layout body macros (Feature D). Minimal renders them as plain text
+% so the same compact fields appear without the tcolorbox styling.
+\newcommand{\dotocompactheader}[4]{\textbf{#1} [#2] [#3] (#4)\\}
+\newcommand{\dotocompactrule}{}
+\newcommand{\dotocompactfield}[2]{#1 #2}
+\newcommand{\dotocompactsep}{ \textbar\ }
 
 \endinput

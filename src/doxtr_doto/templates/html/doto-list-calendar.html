@@ -1,0 +1,85 @@
+{# doto-list-calendar.html - Template for doto task list as a month calendar #}
+{#
+  Context variables:
+    - calendar:   Dict describing the month grid (built by
+                  nodes._calendar_month_grid):
+                    * year / month    — ints for the displayed month.
+                    * month_label     — e.g. "August 2026".
+                    * weekday_labels  — ordered short weekday names (Mon..Sun).
+                    * weeks           — list of weeks; each week is a list of 7
+                                        day dicts with:
+                                          - day      (int day-of-month)
+                                          - iso      (YYYY-MM-DD)
+                                          - in_month (bool; False for padding
+                                                      days of adjacent months)
+                                          - tasks    (list of DotoTask due that
+                                                      day)
+                    * unscheduled     — tasks without a parseable due date.
+    - task_links: Dict mapping task.id -> href of the task box (Feature 5).
+    - icon_mode:  Effective icon mode ("icon" | "icon-text" | "text").
+
+  Available filters:
+    - row_classes: Get CSS classes for a task.
+
+  Client-side nature:
+    Clicking a day reveals that day's task panel via the vendored,
+    dependency-free doto-views.js. When JS is unavailable the markup degrades
+    gracefully: every day's tasks are present in the DOM (visually collapsed by
+    CSS, but still accessible). A child theme can fully re-author this file via
+    <srcdir>/_doto/templates/html/.
+#}
+<div class="doto-calendar doto-list-icon-mode-{{ icon_mode | default('icon-text') }}" data-doto-view="calendar">
+  <div class="doto-calendar-header">
+    <span class="doto-calendar-month">{{ calendar.month_label }}</span>
+  </div>
+  <table class="doto-calendar-grid">
+    <thead>
+      <tr>
+        {%- for weekday in calendar.weekday_labels %}
+        <th class="doto-calendar-weekday">{{ weekday }}</th>
+        {%- endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {%- for week in calendar.weeks %}
+      <tr class="doto-calendar-week">
+        {%- for cell in week %}
+        <td class="doto-calendar-day{% if not cell.in_month %} doto-calendar-day-other{% endif %}{% if cell.tasks %} doto-calendar-day-has-tasks{% endif %}"
+            data-doto-day="{{ cell.iso }}">
+          <button type="button" class="doto-calendar-day-number" data-doto-day-toggle="{{ cell.iso }}"
+                  {% if not cell.tasks %}disabled{% endif %}>
+            {{ cell.day }}
+            {%- if cell.tasks %}
+            <span class="doto-calendar-day-count">{{ cell.tasks | length }}</span>
+            {%- endif %}
+          </button>
+          {%- if cell.tasks %}
+          <ul class="doto-calendar-day-tasks" data-doto-day-panel="{{ cell.iso }}">
+            {%- for task in cell.tasks %}
+            {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+            <li class="doto-calendar-task {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}">
+              <a class="doto-list-link doto-calendar-task-link" href="{{ href }}">{{ task.id }}: {{ task.title }}</a>
+            </li>
+            {%- endfor %}
+          </ul>
+          {%- endif %}
+        </td>
+        {%- endfor %}
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+  {%- if calendar.unscheduled %}
+  <div class="doto-calendar-unscheduled">
+    <span class="doto-calendar-unscheduled-title">No due date</span>
+    <ul class="doto-calendar-day-tasks">
+      {%- for task in calendar.unscheduled %}
+      {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+      <li class="doto-calendar-task {{ task | row_classes }}">
+        <a class="doto-list-link doto-calendar-task-link" href="{{ href }}">{{ task.id }}: {{ task.title }}</a>
+      </li>
+      {%- endfor %}
+    </ul>
+  </div>
+  {%- endif %}
+</div>

@@ -146,7 +146,7 @@ def search(
         try:
             re.compile(query)
         except re.error as e:
-            raise click.ClickException(f"Invalid regex pattern: {e}")
+            raise click.ClickException(f"Invalid regex pattern: {e}") from e
 
     # Search tasks
     matching_tasks = []

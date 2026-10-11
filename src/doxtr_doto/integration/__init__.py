@@ -6,6 +6,8 @@ This package contains integration with external tools and extensions.
 from __future__ import annotations
 
 from doxtr_doto.integration.doxtr import (
+    _core_light_palette_defaults,
+    _merged_semantic_palette,
     _register_doxtr_containers,
     apply_doxtr_semantic_colors,
     build_doto_color_preamble,
@@ -21,6 +23,8 @@ __all__ = [
     "detect_doxtr_features",
     "get_doxtr_color",
     "setup_doxtr_integration",
+    "_core_light_palette_defaults",
+    "_merged_semantic_palette",
     "_register_doxtr_containers",
     "apply_doxtr_semantic_colors",
     "build_doto_color_preamble",

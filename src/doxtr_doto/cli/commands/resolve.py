@@ -10,9 +10,10 @@ from doxtr_doto.cli.completion import complete_task_id
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.sync.json_store import JsonTaskStore
 
 
-def get_conflicts(store) -> list[dict[str, Any]]:
+def get_conflicts(store: JsonTaskStore) -> list[dict[str, Any]]:
     """Get list of current conflicts from the store.
 
     Conflicts are detected when _sync.snapshot exists and the current
@@ -26,10 +27,11 @@ def get_conflicts(store) -> list[dict[str, Any]]:
     """
     # In practice, conflicts would be stored during Sphinx build
     # For now, we read from a conflicts key in the JSON
-    return store.data.get("_conflicts", [])
+    conflicts: list[dict[str, Any]] = store.data.get("_conflicts", [])
+    return conflicts
 
 
-def clear_conflict(store, task_id: str, field: str | None = None) -> None:
+def clear_conflict(store: JsonTaskStore, task_id: str, field: str | None = None) -> None:
     """Clear a conflict from the store.
 
     Args:
@@ -40,8 +42,7 @@ def clear_conflict(store, task_id: str, field: str | None = None) -> None:
     conflicts = store.data.get("_conflicts", [])
     if field:
         conflicts = [
-            c for c in conflicts
-            if not (c.get("task_id") == task_id and c.get("field") == field)
+            c for c in conflicts if not (c.get("task_id") == task_id and c.get("field") == field)
         ]
     else:
         conflicts = [c for c in conflicts if c.get("task_id") != task_id]
@@ -119,9 +120,7 @@ def resolve(
 
     # Check resolution method
     if not use_rst and not use_json and not interactive:
-        raise click.UsageError(
-            "Specify resolution method: --use-rst, --use-json, or --interactive"
-        )
+        raise click.UsageError("Specify resolution method: --use-rst, --use-json, or --interactive")
 
     if use_rst and use_json:
         raise click.UsageError("Cannot use both --use-rst and --use-json")
@@ -135,6 +134,8 @@ def resolve(
     resolved = []
     for conflict in task_conflicts:
         conflict_field = conflict.get("field")
+        if conflict_field is None:
+            continue
         rst_value = conflict.get("rst")
         json_value = conflict.get("json")
 
@@ -174,7 +175,10 @@ def resolve(
         task = store.get_task(task_id)
         if task is not None:
             sync_meta = task.setdefault("_sync", {})
-            snapshot = sync_meta.setdefault("snapshot", {})
+            snapshot = sync_meta.get("snapshot")
+            if snapshot is None:
+                snapshot = {}
+                sync_meta["snapshot"] = snapshot
             snapshot[conflict_field] = chosen_value
             store.update_task(task_id, {"_sync": sync_meta})
 

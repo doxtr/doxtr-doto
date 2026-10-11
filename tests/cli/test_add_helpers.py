@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from doxtr_doto.cli.commands.add import (
     _build_task_data,
@@ -39,6 +37,7 @@ class MockConfig:
     default_priority: str = "medium"
     default_status: str = "open"
     default_assignee: str | None = None
+    user: str = ""
 
     def __post_init__(self):
         if self.priorities is None:
@@ -221,9 +220,9 @@ class TestResolveTitleFromEditor:
     def test_extracts_title_from_first_line(self, mock_editor):
         """Title is extracted from first line of editor content."""
         mock_editor.return_value = "My task title\n\nTask body here"
-        
+
         title, body = _resolve_title_from_editor(None)
-        
+
         assert title == "My task title"
         assert body == "Task body here"
 
@@ -231,18 +230,18 @@ class TestResolveTitleFromEditor:
     def test_strips_hash_from_title(self, mock_editor):
         """Leading hash is stripped from title."""
         mock_editor.return_value = "# My task title\n\nTask body"
-        
+
         title, body = _resolve_title_from_editor(None)
-        
+
         assert title == "My task title"
 
     @patch.object(add_module, "open_editor")
     def test_preserves_existing_body_if_no_new_body(self, mock_editor):
         """Existing body is preserved if editor content has no body."""
         mock_editor.return_value = "My task title\n"
-        
+
         title, body = _resolve_title_from_editor("Existing body")
-        
+
         assert title == "My task title"
         assert body == "Existing body"
 
@@ -250,9 +249,9 @@ class TestResolveTitleFromEditor:
     def test_new_body_replaces_existing(self, mock_editor):
         """New body from editor replaces existing body."""
         mock_editor.return_value = "My task title\n\nNew body content"
-        
+
         title, body = _resolve_title_from_editor("Old body")
-        
+
         assert title == "My task title"
         assert body == "New body content"
 
@@ -260,9 +259,9 @@ class TestResolveTitleFromEditor:
     def test_multiline_body(self, mock_editor):
         """Multi-line body is preserved."""
         mock_editor.return_value = "Task title\n\nLine 1\nLine 2\nLine 3"
-        
+
         title, body = _resolve_title_from_editor(None)
-        
+
         assert title == "Task title"
         assert body == "Line 1\nLine 2\nLine 3"
 
@@ -277,11 +276,9 @@ class TestPromptMissingFields:
         mock_prompt.side_effect = ["New title", "", "medium", "open", "", ""]
         mock_confirm.return_value = False
         config = MockConfig()
-        
-        result = _prompt_missing_fields(
-            config, None, None, None, None, None, None, None
-        )
-        
+
+        result = _prompt_missing_fields(config, None, None, None, None, None, None, None)
+
         assert result[0] == "New title"  # title
         mock_prompt.assert_any_call("Title")
 
@@ -292,11 +289,11 @@ class TestPromptMissingFields:
         mock_prompt.side_effect = ["", "medium", "open", "", ""]
         mock_confirm.return_value = False
         config = MockConfig()
-        
+
         result = _prompt_missing_fields(
             config, "Existing title", None, None, None, None, None, None
         )
-        
+
         assert result[0] == "Existing title"
 
     @patch.object(add_module.click, "prompt")
@@ -313,11 +310,9 @@ class TestPromptMissingFields:
         ]
         mock_confirm.return_value = False
         config = MockConfig()
-        
-        result = _prompt_missing_fields(
-            config, None, None, None, None, None, None, None
-        )
-        
+
+        result = _prompt_missing_fields(config, None, None, None, None, None, None, None)
+
         assert len(result) == 7  # title, assignee, priority, status, due, tags, body
         title, assignee, priority, status, due, tags, body = result
         assert title == "Title"
@@ -337,11 +332,9 @@ class TestPromptMissingFields:
         mock_confirm.return_value = True
         mock_editor.return_value = "Task description"
         config = MockConfig()
-        
-        result = _prompt_missing_fields(
-            config, None, None, None, None, None, None, None
-        )
-        
+
+        result = _prompt_missing_fields(config, None, None, None, None, None, None, None)
+
         assert result[6] == "Task description"  # body
         mock_editor.assert_called_once()
 
@@ -351,12 +344,12 @@ class TestPromptMissingFields:
         """Does not prompt for already-provided values."""
         mock_confirm.return_value = False
         config = MockConfig()
-        
+
         # Provide all values except body
         result = _prompt_missing_fields(
             config, "Title", "alice", "high", "open", "2025-12-31", "bug", None
         )
-        
+
         # Should not prompt at all (except for body confirmation)
         assert mock_prompt.call_count == 0
         assert result == ("Title", "alice", "high", "open", "2025-12-31", "bug", None)
@@ -368,14 +361,14 @@ class TestListRenderersDispatchTable:
     def test_dispatch_table_exists(self):
         """Dispatch table is defined and accessible."""
         from doxtr_doto.nodes import _LIST_RENDERERS
-        
+
         assert _LIST_RENDERERS is not None
         assert isinstance(_LIST_RENDERERS, dict)
 
     def test_dispatch_table_contains_all_formats(self):
         """Dispatch table contains all expected format types."""
         from doxtr_doto.nodes import _LIST_RENDERERS
-        
+
         assert "table" in _LIST_RENDERERS
         assert "cards" in _LIST_RENDERERS
         assert "list" in _LIST_RENDERERS
@@ -383,7 +376,7 @@ class TestListRenderersDispatchTable:
     def test_dispatch_table_functions_are_callable(self):
         """All functions in dispatch table are callable."""
         from doxtr_doto.nodes import _LIST_RENDERERS
-        
+
         for format_type, renderer in _LIST_RENDERERS.items():
             assert callable(renderer), f"Renderer for '{format_type}' is not callable"
 
@@ -391,11 +384,11 @@ class TestListRenderersDispatchTable:
         """Dispatch table maps to the correct functions."""
         from doxtr_doto.nodes import (
             _LIST_RENDERERS,
-            _render_task_table,
             _render_task_cards,
             _render_task_list,
+            _render_task_table,
         )
-        
+
         assert _LIST_RENDERERS["table"] is _render_task_table
         assert _LIST_RENDERERS["cards"] is _render_task_cards
         assert _LIST_RENDERERS["list"] is _render_task_list

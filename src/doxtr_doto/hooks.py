@@ -22,8 +22,9 @@ in hooks are caught and logged; they never abort the Sphinx build.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from doxtr_doto.collectors import DotoTask
@@ -40,10 +41,11 @@ OnTaskReopened = Callable[["DotoTask"], None]
 OnConflictRaised = Callable[["DotoTask", list[Any]], None]
 
 
-def _get_logger() -> logging.Logger:
+def _get_logger() -> logging.Logger | logging.LoggerAdapter[logging.Logger]:
     """Get logger, preferring Sphinx's logger if available."""
     try:
         from sphinx.util import logging as sphinx_logging
+
         return sphinx_logging.getLogger("doxtr_doto.hooks")
     except ImportError:
         return logging.getLogger("doxtr_doto.hooks")
@@ -57,11 +59,11 @@ class TaskHookRegistry:
     Hooks are called synchronously in registration order.
     Exceptions in hooks are caught and logged; they never
     abort the build.
-    
+
     Example usage::
-    
+
         from doxtr_doto.hooks import task_hooks
-        
+
         @task_hooks.on_task_created
         def my_hook(task):
             print(f"Task created: {task.id}")
@@ -78,12 +80,12 @@ class TaskHookRegistry:
 
     def on_task_created(self, fn: OnTaskCreated) -> OnTaskCreated:
         """Register a hook called when a task is first added to the store.
-        
+
         The callback receives a single argument: the DotoTask that was created.
-        
+
         Args:
             fn: Callback function accepting a DotoTask.
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -92,12 +94,12 @@ class TaskHookRegistry:
 
     def on_task_updated(self, fn: OnTaskUpdated) -> OnTaskUpdated:
         """Register a hook called when any task field changes.
-        
+
         The callback receives a single argument: the DotoTask after the update.
-        
+
         Args:
             fn: Callback function accepting a DotoTask.
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -111,10 +113,10 @@ class TaskHookRegistry:
         - task: The DotoTask after the status change
         - old_status: The previous status string
         - new_status: The new status string
-        
+
         Args:
             fn: Callback function accepting (task, old_status, new_status).
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -123,12 +125,12 @@ class TaskHookRegistry:
 
     def on_task_archived(self, fn: OnTaskArchived) -> OnTaskArchived:
         """Register a hook called when a task is archived.
-        
+
         The callback receives a single argument: the DotoTask that was archived.
-        
+
         Args:
             fn: Callback function accepting a DotoTask.
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -137,12 +139,12 @@ class TaskHookRegistry:
 
     def on_task_reopened(self, fn: OnTaskReopened) -> OnTaskReopened:
         """Register a hook called when a task is reopened from archive.
-        
+
         The callback receives a single argument: the DotoTask that was reopened.
-        
+
         Args:
             fn: Callback function accepting a DotoTask.
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -151,14 +153,14 @@ class TaskHookRegistry:
 
     def on_conflict(self, fn: OnConflictRaised) -> OnConflictRaised:
         """Register a hook called when a merge conflict is detected.
-        
+
         The callback receives two arguments:
         - task: The DotoTask involved in the conflict
         - conflicts: List of conflict information dictionaries
-        
+
         Args:
             fn: Callback function accepting (task, conflicts).
-            
+
         Returns:
             The original function (allowing use as a decorator).
         """
@@ -167,27 +169,25 @@ class TaskHookRegistry:
 
     # --- Dispatch methods (called internally) ---
 
-    def fire_task_created(self, task: "DotoTask") -> None:
+    def fire_task_created(self, task: DotoTask) -> None:
         """Fire all registered on_task_created hooks.
-        
+
         Args:
             task: The DotoTask that was created.
         """
         self._fire(self._on_task_created, task)
 
-    def fire_task_updated(self, task: "DotoTask") -> None:
+    def fire_task_updated(self, task: DotoTask) -> None:
         """Fire all registered on_task_updated hooks.
-        
+
         Args:
             task: The DotoTask that was updated.
         """
         self._fire(self._on_task_updated, task)
 
-    def fire_status_changed(
-        self, task: "DotoTask", old_status: str, new_status: str
-    ) -> None:
+    def fire_status_changed(self, task: DotoTask, old_status: str, new_status: str) -> None:
         """Fire all registered on_status_changed hooks.
-        
+
         Args:
             task: The DotoTask after the status change.
             old_status: The previous status string.
@@ -195,25 +195,25 @@ class TaskHookRegistry:
         """
         self._fire(self._on_status_changed, task, old_status, new_status)
 
-    def fire_task_archived(self, task: "DotoTask") -> None:
+    def fire_task_archived(self, task: DotoTask) -> None:
         """Fire all registered on_task_archived hooks.
-        
+
         Args:
             task: The DotoTask that was archived.
         """
         self._fire(self._on_task_archived, task)
 
-    def fire_task_reopened(self, task: "DotoTask") -> None:
+    def fire_task_reopened(self, task: DotoTask) -> None:
         """Fire all registered on_task_reopened hooks.
-        
+
         Args:
             task: The DotoTask that was reopened.
         """
         self._fire(self._on_task_reopened, task)
 
-    def fire_conflict(self, task: "DotoTask", conflicts: list[Any]) -> None:
+    def fire_conflict(self, task: DotoTask, conflicts: list[Any]) -> None:
         """Fire all registered on_conflict hooks.
-        
+
         Args:
             task: The DotoTask involved in the conflict.
             conflicts: List of conflict information.
@@ -222,10 +222,10 @@ class TaskHookRegistry:
 
     def _fire(self, hooks: list[Callable[..., None]], *args: Any) -> None:
         """Fire all hooks in a list, catching and logging exceptions.
-        
+
         Exceptions in hooks are caught and logged but never re-raised,
         ensuring hooks cannot abort a Sphinx build.
-        
+
         Args:
             hooks: List of callback functions to invoke.
             *args: Arguments to pass to each callback.
@@ -244,7 +244,7 @@ class TaskHookRegistry:
 
     def clear(self) -> None:
         """Clear all registered hooks.
-        
+
         Primarily useful for testing to ensure hook state doesn't
         leak between tests.
         """
@@ -258,9 +258,9 @@ class TaskHookRegistry:
     @property
     def hook_counts(self) -> dict[str, int]:
         """Return counts of registered hooks by type.
-        
+
         Useful for debugging and testing.
-        
+
         Returns:
             Dictionary mapping hook type names to counts.
         """

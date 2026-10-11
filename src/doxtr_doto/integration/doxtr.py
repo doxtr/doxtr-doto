@@ -6,15 +6,20 @@ doxtr tools when available.
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sphinx.application import Sphinx
 
 __all__ = [
     "detect_doxtr_features",
     "setup_doxtr_integration",
     "get_doxtr_color",
+    "_core_light_palette_defaults",
+    "_merged_semantic_palette",
     "resolve_doto_palette_colors",
     "build_doto_color_preamble",
     "get_landscape_min_columns",
@@ -60,12 +65,12 @@ DOTO_COLOR_EXPRESSIONS: dict[str, str] = {
 def detect_doxtr_features(app: Sphinx) -> dict[str, bool]:
     """
     Detect available doxtr features without hard dependencies.
-    
+
     Checks for doxtr-pdf-theme-core extension which provides:
     - LaTeX/PDF theming via preamble.tex_t templates
     - Config values: doxtr_theme_defaults, doxtr_containers, etc.
     - AST processing for containers, tables, needs, epigraphs, sidebars
-    
+
     Returns:
         Dictionary of available features
     """
@@ -82,20 +87,20 @@ def detect_doxtr_features(app: Sphinx) -> dict[str, bool]:
 def setup_doxtr_integration(app: Sphinx) -> None:
     """
     Set up doxtr integration if available.
-    
+
     This configures doto to use doxtr's theming system when available,
     falling back to standalone CSS/LaTeX when not.
     """
     from doxtr_doto.config import get_config
     from doxtr_doto.enums import DotoIntegration
-    
+
     integration_mode = get_config(app, "doxtr_integration")
-    
+
     if integration_mode == DotoIntegration.DISABLED:
         return
-    
+
     features = detect_doxtr_features(app)
-    
+
     if integration_mode == DotoIntegration.AUTO:
         # Auto-detect and integrate if available
         if features["pdf_backend"]:
@@ -104,6 +109,7 @@ def setup_doxtr_integration(app: Sphinx) -> None:
         # Force integration - warn if not available
         if not features["pdf_backend"]:
             from sphinx.util import logging
+
             logger = logging.getLogger(__name__)
             logger.warning(
                 "doto_doxtr_integration is 'enabled' but doxtr-pdf-theme-core "
@@ -179,13 +185,131 @@ def _apply_semantic_colors(app: Sphinx) -> None:
     config.latex_elements = latex_elements
 
 
+def _core_light_palette_defaults(
+    app: Sphinx,
+) -> tuple[dict[str, str], Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]] | None:
+    r"""Seam: source the core's light-palette base + merge primitive.
+
+    This is the SINGLE place doto reaches into ``doxtr-pdf-theme-core``'s
+    (currently unexported) light-palette internals. It isolates both core
+    internals the merge needs:
+
+    1. ``doxtr_pdf_theme_core.core_config.DOXTR_SEMANTIC_PALETTE`` (the core
+       tier the merge starts from), and
+    2. ``doxtr_pdf_theme_core.utils.deep_update`` (the recursive-merge
+       primitive the core engine uses to layer the theme/user tiers).
+
+    It returns a *fresh* deep copy of the core palette so callers can never
+    mutate the core's module-level constant, paired with the ``deep_update``
+    callable so :func:`_merged_semantic_palette` can apply the remaining tiers
+    the same way the core engine does.
+
+    Override point
+    --------------
+    A child theme (or a future public-core accessor) can redirect where doto's
+    merged light palette comes from by overriding *only this function*:
+
+    * To swap in a public merged-light-palette accessor once the core exposes
+      one, return that palette as the base here (with a no-op/identity
+      ``deep_update`` if the core has already merged every tier); the
+      orchestration in :func:`_merged_semantic_palette` stays unchanged.
+    * To point doto at a different base palette entirely, return it here.
+
+    Keeping this the lone seam means swapping to a public accessor is a
+    one-function change and child themes have exactly one hook.
+
+    Args:
+        app: Sphinx application instance (reserved for overrides that need to
+            consult config; the default implementation does not read it).
+
+    Returns:
+        A ``(base_palette, deep_update)`` tuple, or ``None`` when the core is
+        not importable (standalone build) so callers can skip resolution and
+        keep the ``doto.sty`` defaults.
+    """
+    try:
+        from doxtr_pdf_theme_core.core_config import DOXTR_SEMANTIC_PALETTE
+        from doxtr_pdf_theme_core.utils import deep_update
+    except ImportError:
+        return None
+
+    return copy.deepcopy(DOXTR_SEMANTIC_PALETTE), deep_update
+
+
+def _merged_semantic_palette(app: Sphinx) -> dict[str, str] | None:
+    r"""Reconstruct the core's three-tier merged light semantic palette.
+
+    ``doxtr-pdf-theme-core`` resolves ``dd:`` expressions against a palette
+    merged from three tiers (core defaults -> theme defaults -> user config),
+    but it only publishes the merged *dark* palette on
+    ``config.doxtr_dark_semantic_palette``; the merged light palette is kept
+    internal. doto's ``dd:primary``/``dd:danger``/... expressions therefore
+    cannot be resolved against ``config.doxtr_semantic_palette`` alone, because
+    that dict holds only the user tier and omits the brand keys supplied by the
+    core and the active theme (e.g. ``primary``, ``secondary``, ``danger``).
+
+    This is the orchestration layer: it sources the core-tier base palette and
+    the merge primitive from the :func:`_core_light_palette_defaults` seam
+    (the single core-internal access point), then layers the remaining tiers
+    so doto resolves the same colors the rest of the PDF uses:
+
+    1. ``_core_light_palette_defaults(app)`` base (core tier)
+    2. ``config.doxtr_theme_defaults['semantic_palette']`` (theme tier)
+    3. ``config.doxtr_semantic_palette`` (user tier)
+
+    The ``dark`` sub-key is stripped from the theme and user tiers to match the
+    core's light-palette merge (dark overrides live under a nested ``dark``
+    key).
+
+    Args:
+        app: Sphinx application instance.
+
+    Returns:
+        The merged light palette, or ``None`` when the core is not importable
+        (standalone build) so callers can skip resolution and keep the
+        ``doto.sty`` defaults.
+    """
+    defaults = _core_light_palette_defaults(app)
+    if defaults is None:
+        return None
+    base_palette, deep_update = defaults
+
+    config = app.config
+    theme_raw = getattr(config, "doxtr_theme_defaults", None) or {}
+    user_raw = getattr(config, "doxtr_semantic_palette", None) or {}
+
+    palette_theme = {
+        k: v for k, v in (theme_raw.get("semantic_palette", {}) or {}).items() if k != "dark"
+    }
+    palette_user = {k: v for k, v in user_raw.items() if k != "dark"}
+
+    # This reconstruction intentionally omits the core's v1.1.0-deprecated
+    # ``page_background`` -> ``page`` shims (user ``doxtr_page_background`` and
+    # theme ``doxtr_theme_defaults['page_background']``); doto only uses the
+    # ``page`` key as a contrast background and those shims are slated for
+    # removal in core v1.1.0, so a future maintainer diffing against the core
+    # should not treat their absence as a missing merge step.
+    # Three-tier merge: core -> theme -> user (same order as the core engine).
+    # ``base_palette`` is already a deep copy from the seam, so the merge never
+    # mutates the core's module-level constant.
+    merged = deep_update(
+        deep_update(base_palette, copy.deepcopy(palette_theme)),
+        copy.deepcopy(palette_user),
+    )
+    return merged
+
+
 def resolve_doto_palette_colors(app: Sphinx) -> dict[str, str]:
     r"""Resolve doto's ``dd:`` color expressions against the semantic palette.
 
     Uses ``doxtr_pdf_theme_core.utils.resolve_color`` (the ``dd:`` expression
     system) to turn each entry of :data:`DOTO_COLOR_EXPRESSIONS` into a static
-    hex color. Degrades gracefully: returns an empty dict when the core is not
-    importable or no ``doxtr_semantic_palette`` is configured.
+    hex color. Resolution runs against the core's three-tier merged light
+    palette (core defaults -> theme defaults -> user config, see
+    :func:`_merged_semantic_palette`), not ``config.doxtr_semantic_palette``
+    alone, so brand keys such as ``primary`` and ``danger`` supplied by the
+    core/theme are available even when the user only overrides a few keys.
+    Degrades gracefully: returns an empty dict when the core is not importable.
 
     Args:
         app: Sphinx application instance.
@@ -194,7 +318,7 @@ def resolve_doto_palette_colors(app: Sphinx) -> dict[str, str]:
         Mapping of doto color macro name (e.g. ``doto@critical``) to a resolved
         hex color string (e.g. ``#E74C3C``). Empty when unavailable.
     """
-    palette = getattr(app.config, "doxtr_semantic_palette", None)
+    palette = _merged_semantic_palette(app)
     if not palette:
         return {}
 
@@ -208,9 +332,7 @@ def resolve_doto_palette_colors(app: Sphinx) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for macro_name, expr in DOTO_COLOR_EXPRESSIONS.items():
         try:
-            color = resolve_color(
-                expr, palette, page_bg, "", {}, {}, {}, {}
-            )
+            color = resolve_color(expr, palette, page_bg, "", {}, {}, {}, {})
         except Exception:
             # Never let a color-resolution edge case break the build; the
             # doto.sty default for this macro remains in effect.
@@ -269,6 +391,7 @@ def get_landscape_min_columns(app: Sphinx) -> int:
         from doxtr_pdf_theme_core.ast_processors.landscape import (
             DEFAULT_MIN_COLUMNS,
         )
+
         default_min = DEFAULT_MIN_COLUMNS
     except ImportError:
         pass
@@ -305,78 +428,97 @@ def wrap_longtable_in_landscape(body: str, col_count: int) -> str:
     """
     n = col_count if isinstance(col_count, int) and col_count > 0 else 1
     return (
-        f"\n\\begin{{doxtradaptivelandscape}}[{n}]\n"
-        + body
-        + "\n\\end{doxtradaptivelandscape}\n"
+        f"\n\\begin{{doxtradaptivelandscape}}[{n}]\n" + body + "\n\\end{doxtradaptivelandscape}\n"
     )
 
 
 def _register_doxtr_containers(app: Sphinx) -> None:
     """
     Register doto as a custom container type in doxtr's system.
-    
+
     Uses ThemeRegistry if available (doxtr-pdf-theme-core >= 2.0),
     falls back to config-based registration for older versions.
     """
     # Try new registry pattern first
     try:
         from doxtr.pdf_theme_core import ThemeRegistry
-        
-        ThemeRegistry.register_element("doto", {
-            "template": "doto/task.tex.jinja",
-            "styles": {
-                "default": "doto/styles/default.yaml",
-                "minimal": "doto/styles/minimal.yaml",
+
+        ThemeRegistry.register_element(
+            "doto",
+            {
+                "template": "doto/task.tex.jinja",
+                "styles": {
+                    "default": "doto/styles/default.yaml",
+                    "minimal": "doto/styles/minimal.yaml",
+                },
             },
-        })
-        
+        )
+
         # Register priority variants
         for priority in ["low", "medium", "high", "critical"]:
-            ThemeRegistry.register_element(f"doto-task-{priority}", {
-                "parent": "doto",
-                "style_overrides": f"doto/styles/{priority}.yaml",
-            })
-        
+            ThemeRegistry.register_element(
+                f"doto-task-{priority}",
+                {
+                    "parent": "doto",
+                    "style_overrides": f"doto/styles/{priority}.yaml",
+                },
+            )
+
         return
     except (ImportError, AttributeError):
         pass  # Fall back to config-based registration
-    
+
     # Fallback: config-based registration (existing code)
     # Get or initialize doxtr_containers config
     if not hasattr(app.config, "doxtr_containers"):
         return
-    
+
     containers = getattr(app.config, "doxtr_containers", {})
-    
+
     # Register doto task container styles
-    containers.setdefault("doto-task", {
-        "title_style": "classic",
-        "title_icon": r"\faListCheck",
-        "title_color": "#3B82F6",
-    })
-    
+    containers.setdefault(
+        "doto-task",
+        {
+            "title_style": "classic",
+            "title_icon": r"\faListCheck",
+            "title_color": "#3B82F6",
+        },
+    )
+
     # Priority-specific overrides.
     #
     # These hex literals mirror PRIORITY_COLORS in src/doxtr_doto/constants.py
     # (the SINGLE SOURCE OF TRUTH for the doto palette). Keep them in sync with
     # that module; do not edit the doxtr color-resolution logic here — only the
     # fallback values. See PHASE F2 in the fix brief.
-    containers.setdefault("doto-task-low", {
-        "title_color": "#6c757d",
-        "border_color": "#6c757d",
-    })
-    containers.setdefault("doto-task-medium", {
-        "title_color": "#0d6efd",
-        "border_color": "#0d6efd",
-    })
-    containers.setdefault("doto-task-high", {
-        "title_color": "#fd7e14",
-        "border_color": "#fd7e14",
-    })
-    containers.setdefault("doto-task-critical", {
-        "title_color": "#dc3545",
-        "border_color": "#dc3545",
-    })
+    containers.setdefault(
+        "doto-task-low",
+        {
+            "title_color": "#6c757d",
+            "border_color": "#6c757d",
+        },
+    )
+    containers.setdefault(
+        "doto-task-medium",
+        {
+            "title_color": "#0d6efd",
+            "border_color": "#0d6efd",
+        },
+    )
+    containers.setdefault(
+        "doto-task-high",
+        {
+            "title_color": "#fd7e14",
+            "border_color": "#fd7e14",
+        },
+    )
+    containers.setdefault(
+        "doto-task-critical",
+        {
+            "title_color": "#dc3545",
+            "border_color": "#dc3545",
+        },
+    )
 
 
 def get_doxtr_color(
@@ -386,17 +528,18 @@ def get_doxtr_color(
 ) -> str:
     """
     Get a color from doxtr's semantic palette if available.
-    
+
     Args:
         app: Sphinx application
         color_name: Name of the color in doxtr palette
         fallback: Fallback color if not available
-    
+
     Returns:
         Color value (hex string)
     """
     if not hasattr(app.config, "doxtr_semantic_palette"):
         return fallback
-    
+
     palette = getattr(app.config, "doxtr_semantic_palette", {})
-    return palette.get(color_name, fallback)
+    color: str = palette.get(color_name, fallback)
+    return color

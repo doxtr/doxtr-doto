@@ -3,6 +3,7 @@
 Section 12 tests: Ensures conflicts are properly detected, stored in JSON,
 and cleared when sync completes cleanly.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from doxtr_doto.sync.json_store import JsonTaskStore
-from doxtr_doto.sync.merge import sync_task, create_snapshot
 from doxtr_doto.sync.conflict import FieldConflict
+from doxtr_doto.sync.json_store import JsonTaskStore
+from doxtr_doto.sync.merge import create_snapshot, sync_task
 
 
 @pytest.fixture
@@ -68,7 +69,7 @@ class TestConflictStorage:
                 rst_file="index.rst",
             )
         ]
-        
+
         # Serialize conflicts to store
         serialized = [
             {
@@ -83,7 +84,7 @@ class TestConflictStorage:
         ]
         store_with_snapshot.data["_conflicts"] = serialized
         store_with_snapshot.save()
-        
+
         # Reload and verify
         store_with_snapshot.load()
         assert "_conflicts" in store_with_snapshot.data
@@ -93,15 +94,13 @@ class TestConflictStorage:
     def test_conflicts_cleared_when_removed(self, store_with_snapshot: JsonTaskStore):
         """Conflicts key can be removed from store after resolution."""
         # Pre-populate conflicts
-        store_with_snapshot.data["_conflicts"] = [
-            {"task_id": "TASK-001", "field": "title"}
-        ]
+        store_with_snapshot.data["_conflicts"] = [{"task_id": "TASK-001", "field": "title"}]
         store_with_snapshot.save()
-        
+
         # Clear conflicts
         store_with_snapshot.data.pop("_conflicts", None)
         store_with_snapshot.save()
-        
+
         # Reload and verify
         store_with_snapshot.load()
         assert "_conflicts" not in store_with_snapshot.data
@@ -116,7 +115,7 @@ class TestConflictStorage:
             json="in-progress",
             rst_file="tasks.rst",
         )
-        
+
         assert conflict.task_id == "TASK-001"
         assert conflict.field == "status"
         assert conflict.base == "open"
@@ -151,9 +150,9 @@ class TestConflictDetectionInMerge:
             "status": "open",
             "priority": "medium",
         }
-        
+
         result = sync_task("TASK-001", rst_current, json_task, "tasks.rst", 10)
-        
+
         assert result.has_conflicts
         assert len(result.conflicts) == 1
         assert result.conflicts[0].field == "title"
@@ -184,9 +183,9 @@ class TestConflictDetectionInMerge:
             "status": "open",
             "priority": "medium",
         }
-        
+
         result = sync_task("TASK-001", rst_current, json_task, "tasks.rst", 10)
-        
+
         assert not result.has_conflicts
         assert result.merged["title"] == "Same new title"
 
@@ -213,9 +212,9 @@ class TestConflictDetectionInMerge:
             "status": "open",
             "priority": "medium",
         }
-        
+
         result = sync_task("TASK-001", rst_current, json_task, "tasks.rst", 10)
-        
+
         assert not result.has_conflicts
         assert result.merged["title"] == "RST changed"
         assert result.update_json is True
@@ -243,9 +242,9 @@ class TestConflictDetectionInMerge:
             "status": "open",
             "priority": "medium",
         }
-        
+
         result = sync_task("TASK-001", rst_current, json_task, "tasks.rst", 10)
-        
+
         assert not result.has_conflicts
         assert result.merged["title"] == "JSON changed"
         assert result.write_rst is True
@@ -275,9 +274,9 @@ class TestConflictDetectionInMerge:
             "priority": "critical",
             "assignee": "alice",
         }
-        
+
         result = sync_task("TASK-001", rst_current, json_task, "tasks.rst", 10)
-        
+
         assert result.has_conflicts
         assert len(result.conflicts) == 3
         conflict_fields = {c.field for c in result.conflicts}
@@ -290,7 +289,7 @@ class TestConflictSerialization:
     def test_date_values_serialized(self):
         """Date values in conflicts are properly serialized."""
         from datetime import date
-        
+
         # Create a conflict with date values
         conflict = FieldConflict(
             task_id="TASK-001",
@@ -300,13 +299,13 @@ class TestConflictSerialization:
             json=date(2025, 3, 1),
             rst_file="tasks.rst",
         )
-        
+
         # Serialize using the helper pattern
         def _serialize_value(v: Any) -> Any:
             if hasattr(v, "isoformat"):
                 return v.isoformat()
             return v
-        
+
         serialized = {
             "task_id": conflict.task_id,
             "field": conflict.field,
@@ -315,11 +314,11 @@ class TestConflictSerialization:
             "json": _serialize_value(conflict.json),
             "rst_file": conflict.rst_file,
         }
-        
+
         assert serialized["base"] == "2025-01-01"
         assert serialized["rst"] == "2025-02-01"
         assert serialized["json"] == "2025-03-01"
-        
+
         # Verify JSON serializable
         json_str = json.dumps(serialized)
         assert "2025-01-01" in json_str
@@ -334,7 +333,7 @@ class TestConflictSerialization:
             json=["tag1", "tag4"],
             rst_file="tasks.rst",
         )
-        
+
         serialized = {
             "task_id": conflict.task_id,
             "field": conflict.field,
@@ -342,7 +341,7 @@ class TestConflictSerialization:
             "rst": conflict.rst,
             "json": conflict.json,
         }
-        
+
         # Verify JSON serializable
         json_str = json.dumps(serialized)
         assert "tag1" in json_str
@@ -359,7 +358,7 @@ class TestConflictSerialization:
             json="bob",
             rst_file="tasks.rst",
         )
-        
+
         serialized = {
             "task_id": conflict.task_id,
             "field": conflict.field,
@@ -367,7 +366,7 @@ class TestConflictSerialization:
             "rst": conflict.rst,
             "json": conflict.json,
         }
-        
+
         # Verify JSON serializable
         json_str = json.dumps(serialized)
         parsed = json.loads(json_str)
@@ -381,16 +380,16 @@ class TestConflictResolutionSnapshot:
         """Snapshot is updated when RST value is chosen during resolution."""
         task = store_with_snapshot.get_task("TASK-001")
         assert task is not None
-        
+
         # Simulate choosing RST value
         task["title"] = "RST title wins"
         snapshot = create_snapshot(task)
-        
+
         # Update the task's sync snapshot
         task["_sync"]["snapshot"] = snapshot
         store_with_snapshot.update_task("TASK-001", task)
         store_with_snapshot.save()
-        
+
         # Verify snapshot updated
         store_with_snapshot.load()
         updated_task = store_with_snapshot.get_task("TASK-001")
@@ -401,16 +400,16 @@ class TestConflictResolutionSnapshot:
         """Snapshot is updated when JSON value is chosen during resolution."""
         task = store_with_snapshot.get_task("TASK-001")
         assert task is not None
-        
+
         # Simulate choosing JSON value (keeping current JSON value)
         task["title"] = "JSON title wins"
         snapshot = create_snapshot(task)
-        
+
         # Update the task's sync snapshot
         task["_sync"]["snapshot"] = snapshot
         store_with_snapshot.update_task("TASK-001", task)
         store_with_snapshot.save()
-        
+
         # Verify snapshot updated
         store_with_snapshot.load()
         updated_task = store_with_snapshot.get_task("TASK-001")

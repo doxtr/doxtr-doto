@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from collections.abc import Mapping
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -11,10 +12,29 @@ if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
 
 
+def _due_date(due: str | None) -> date | None:
+    """Parse a due value's calendar date via date_utils.
+
+    Routes through :mod:`doxtr_doto.date_utils` so a time-bearing due
+    (``YYYY-MM-DDTHH:MM``) yields its calendar date instead of raising, and
+    date-only values behave exactly as a direct ``date.fromisoformat`` did.
+
+    Args:
+        due: The due string (date-only or date+time), or None/empty.
+
+    Returns:
+        The calendar :class:`datetime.date`, or None when unset/invalid.
+    """
+    from doxtr_doto.date_utils import parse_date_safe
+
+    parsed = parse_date_safe(due)
+    return parsed.date if parsed is not None else None
+
+
 def calculate_task_score(
     task_id: str,
-    task: dict[str, Any],
-    all_tasks: dict[str, dict[str, Any]],
+    task: Mapping[str, Any],
+    all_tasks: Mapping[str, Mapping[str, Any]],
 ) -> tuple[int, str, str]:
     """Calculate a priority score for a task.
 
@@ -62,8 +82,8 @@ def calculate_task_score(
     due_sort = "9999-99-99"  # Default for no due date
     if due:
         due_sort = due
-        try:
-            due_date = date.fromisoformat(due)
+        due_date = _due_date(due)
+        if due_date is not None:
             today = date.today()
             days_until = (due_date - today).days
 
@@ -82,16 +102,14 @@ def calculate_task_score(
             elif days_until <= 14:
                 # Due in two weeks
                 score += 500
-        except ValueError:
-            pass
 
     return (score, due_sort, task_id)
 
 
 def get_ready_tasks(
-    all_tasks: dict[str, dict[str, Any]],
+    all_tasks: Mapping[str, Mapping[str, Any]],
     assignee: str | None = None,
-) -> list[tuple[str, dict[str, Any], tuple]]:
+) -> list[tuple[str, Mapping[str, Any], tuple[int, str, str]]]:
     """Get tasks that are ready to be worked on.
 
     Returns list of (task_id, task, score_tuple) sorted by priority.
@@ -123,8 +141,8 @@ def get_ready_tasks(
 
 
 def has_pending_deps(
-    task: dict[str, Any],
-    all_tasks: dict[str, dict[str, Any]],
+    task: Mapping[str, Any],
+    all_tasks: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
     """Get list of pending dependency IDs."""
     pending = []
@@ -137,9 +155,13 @@ def has_pending_deps(
 
 @click.command("next")
 @click.option("--assignee", "-a", help="Filter by assignee.")
-@click.option("--all", "-A", "show_all", is_flag=True, help="Show all ready tasks, not just the top one.")
+@click.option(
+    "--all", "-A", "show_all", is_flag=True, help="Show all ready tasks, not just the top one."
+)
 @click.option("--limit", "-l", type=int, default=5, help="Number of tasks to show with --all.")
-@click.option("--include-blocked", "-b", is_flag=True, help="Include tasks with pending dependencies.")
+@click.option(
+    "--include-blocked", "-b", is_flag=True, help="Include tasks with pending dependencies."
+)
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
 @click.pass_obj
 def next_task(
@@ -182,10 +204,7 @@ def next_task(
 
     # Filter out tasks with pending dependencies unless requested
     if not include_blocked:
-        ready = [
-            (tid, t, s) for tid, t, s in ready
-            if not has_pending_deps(t, all_tasks)
-        ]
+        ready = [(tid, t, s) for tid, t, s in ready if not has_pending_deps(t, all_tasks)]
 
     if not ready:
         if assignee:
@@ -193,20 +212,24 @@ def next_task(
         else:
             formatter.print("No actionable tasks found.")
         formatter.print("\nAll tasks may be done, blocked, or waiting on dependencies.")
-        formatter.print("Use 'doto list' to see all tasks or 'doto next --include-blocked' to see blocked tasks.")
+        formatter.print(
+            "Use 'doto list' to see all tasks or 'doto next --include-blocked' to see blocked tasks."
+        )
         return
 
     # JSON output
     if json_output:
         tasks_out = []
-        for task_id, task, (score, _, _) in ready[:limit if show_all else 1]:
+        for task_id, task, (score, _, _) in ready[: limit if show_all else 1]:
             pending = has_pending_deps(task, all_tasks)
-            tasks_out.append({
-                "id": task_id,
-                "score": score,
-                "pending_dependencies": pending,
-                **task,
-            })
+            tasks_out.append(
+                {
+                    "id": task_id,
+                    "score": score,
+                    "pending_dependencies": pending,
+                    **task,
+                }
+            )
         formatter.print_json(tasks_out if show_all else tasks_out[0])
         return
 
@@ -233,8 +256,8 @@ def next_task(
             reasons.append("High priority")
 
         if due:
-            try:
-                due_date = date.fromisoformat(due)
+            due_date = _due_date(due)
+            if due_date is not None:
                 days = (due_date - date.today()).days
                 if days < 0:
                     reasons.append(f"Overdue by {abs(days)} day(s)")
@@ -242,8 +265,6 @@ def next_task(
                     reasons.append("Due today")
                 elif days <= 2:
                     reasons.append(f"Due in {days} day(s)")
-            except ValueError:
-                pass
 
         if pending:
             reasons.append(f"Waiting on: {', '.join(pending)}")
@@ -255,7 +276,9 @@ def next_task(
 
         # Show count of other ready tasks
         if len(ready) > 1:
-            formatter.print(f"\n{len(ready) - 1} other task(s) ready. Use 'doto next --all' to see more.")
+            formatter.print(
+                f"\n{len(ready) - 1} other task(s) ready. Use 'doto next --all' to see more."
+            )
         return
 
     # Show multiple tasks
@@ -263,7 +286,7 @@ def next_task(
     formatter.print("")
 
     tasks_for_table = []
-    for task_id, task, (score, _, _) in ready[:limit]:
+    for task_id, task, (_score, _, _) in ready[:limit]:
         pending = has_pending_deps(task, all_tasks)
         status = task.get("status", "open")
         priority = task.get("priority", "medium")
@@ -274,27 +297,28 @@ def next_task(
         if status == "in-progress":
             hints.append("in-progress")
         if due:
-            try:
-                days = (date.fromisoformat(due) - date.today()).days
+            due_date = _due_date(due)
+            if due_date is not None:
+                days = (due_date - date.today()).days
                 if days < 0:
-                    hints.append(f"overdue")
+                    hints.append("overdue")
                 elif days == 0:
                     hints.append("due today")
                 elif days <= 2:
-                    hints.append(f"due soon")
-            except ValueError:
-                pass
+                    hints.append("due soon")
         if pending:
             hints.append(f"blocked by {len(pending)}")
 
-        tasks_for_table.append({
-            "id": task_id,
-            "priority": priority,
-            "status": status,
-            "due": due if due else "",
-            "title": task.get("title", ""),
-            "hint": ", ".join(hints) if hints else "",
-        })
+        tasks_for_table.append(
+            {
+                "id": task_id,
+                "priority": priority,
+                "status": status,
+                "due": due if due else "",
+                "title": task.get("title", ""),
+                "hint": ", ".join(hints) if hints else "",
+            }
+        )
 
     formatter.format_task_table(
         tasks_for_table,

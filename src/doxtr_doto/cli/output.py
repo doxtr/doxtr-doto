@@ -4,22 +4,161 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
+from doxtr_doto.date_utils import format_date_display, is_overdue
+
 try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-    from rich.text import Text
     from rich import box
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
 
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
 
+
+def _rich_escape(markup: str) -> str:
+    """Return ``markup`` with every ``[`` backslash-escaped.
+
+    Both rich and Textual consume a leading backslash and render ``\\[`` as a
+    literal ``[``, so this one escape makes free text render literally in both.
+    It is deliberately stricter than :func:`rich.markup.escape`, which only
+    escapes brackets it recognises as a tag and so leaves a bare ``"[WIP]"``
+    untouched - fine for rich, but Textual's parser *does* treat ``"[WIP]"`` as
+    a style tag and would drop it. Escaping every ``[`` is correct for both
+    renderers and keeps the detail lines (shared by the CLI card and the TUI
+    card viewer) consistent.
+
+    Args:
+        markup: The text to escape.
+
+    Returns:
+        The text with each ``[`` replaced by ``\\[``.
+    """
+    return markup.replace("[", r"\[")
+
+
+def escape_markup(value: object) -> str:
+    """Return ``value`` as a markup-safe string for rich/Textual rendering.
+
+    Free-text task fields (title, tags, ids, ...) may contain ``[`` / ``]``
+    characters - e.g. a title like ``"[WIP] fix"`` or ``"[] cleanup"``. When
+    such a value is interpolated into a rich/Textual markup string it is
+    otherwise parsed as a *style tag*, which silently drops the bracketed text
+    (``"[red] oops"`` renders as ``" oops"``), throws off visible-width
+    measurement so framed cards misalign, or - for a bare ``"[/]"`` - raises a
+    ``MarkupError``. Escaping backslash-escapes each ``[`` so the brackets
+    render literally and occupy their true width in both renderers (see
+    :func:`_rich_escape` for why a plain ``rich.markup.escape`` is not enough
+    for Textual).
+
+    This is the single escaper shared by the CLI card builder and the TUI
+    widgets (re-exported via :mod:`doxtr_doto.cli.tui.theme`) so both surfaces
+    treat free text identically.
+
+    Args:
+        value: The value to escape; coerced to ``str`` first.
+
+    Returns:
+        The stringified, markup-escaped value.
+    """
+    return _rich_escape(str(value))
+
+
 if TYPE_CHECKING:
     from doxtr_doto.cli.config import DotoConfig
+
+
+def _wrap_style(text: str, style: str) -> str:
+    """Wrap ``text`` in rich/Textual markup for ``style`` (empty = unchanged).
+
+    The ``[style]text[/style]`` form is understood by both rich (CLI card
+    panels) and Textual (TUI card viewer), so this single helper feeds both
+    renderers.
+
+    Args:
+        text: The (already markup-escaped) text to style.
+        style: A style string such as ``"red bold"``; empty means no styling.
+
+    Returns:
+        The styled markup, or ``text`` unchanged when ``style`` is empty.
+    """
+    if not style:
+        return text
+    return f"[{style}]{text}[/{style}]"
+
+
+def build_task_detail_lines(task: dict[str, Any]) -> list[str]:
+    """Return the full-detail markup lines for a task (pure, single source).
+
+    This is the one place the task "detail card" field set, order, labels and
+    conditional-emit / styling rules live. Both the CLI reference card
+    (:meth:`OutputFormatter.format_task_detail`, i.e. ``doto list -f cards``)
+    and the TUI card viewer
+    (:meth:`doxtr_doto.cli.tui.app.CardViewerScreen.build_detail_lines`)
+    consume these lines, so a change to the detail layout happens in exactly
+    one place and the two surfaces cannot drift.
+
+    The lines use ``[style]...[/style]`` markup understood by both rich and
+    Textual. Free-text values (title, assignee, tags, body, series) are
+    markup-escaped so a value such as ``"[WIP] fix"`` is not misparsed as a
+    style tag. Only fields the task actually has are emitted; the body is
+    always last, separated by a blank line. Priority and status are always
+    shown (with a ``-`` placeholder when empty); an overdue, non-done due date
+    is styled ``red bold`` to match the CLI card.
+
+    Args:
+        task: The task dict to render (carrying its display ``id``).
+
+    Returns:
+        The detail lines (rich/Textual markup) including the ``id - title``
+        header line and a trailing blank line before the body.
+    """
+    task_id = _rich_escape(str(task.get("id", "?")))
+    title = _rich_escape(str(task.get("title", "Untitled")))
+    lines: list[str] = [f"[bold]{task_id}[/bold] - {title}", ""]
+    if task.get("assignee"):
+        lines.append(f"[bold]Assignee:[/bold] {_rich_escape(str(task['assignee']))}")
+    priority = task.get("priority") or ""
+    lines.append(
+        f"[bold]Priority:[/bold] "
+        f"{_wrap_style(_rich_escape(priority) or '-', PRIORITY_COLORS.get(priority, ''))}"
+    )
+    status = task.get("status") or ""
+    lines.append(
+        f"[bold]Status:[/bold] "
+        f"{_wrap_style(_rich_escape(status) or '-', STATUS_COLORS.get(status, ''))}"
+    )
+    if task.get("due"):
+        due_style = ""
+        if task.get("status") != "done" and is_overdue(task["due"]):
+            due_style = "red bold"
+        due_display = format_date_display(task["due"])
+        lines.append(f"[bold]Due:[/bold] {_wrap_style(_rich_escape(due_display), due_style)}")
+    if task.get("tags"):
+        tags = ", ".join(_rich_escape(str(t)) for t in task["tags"])
+        lines.append(f"[bold]Tags:[/bold] {tags}")
+    if task.get("depends_on"):
+        deps = ", ".join(_rich_escape(str(d)) for d in task["depends_on"])
+        lines.append(f"[bold]Depends on:[/bold] {deps}")
+    series_info = task.get("_series_info")
+    if series_info:
+        lines.append(
+            f"[bold]Series:[/bold] {_rich_escape(str(series_info['series_id']))} "
+            f"({_rich_escape(str(series_info['pattern']))}, "
+            f"until {_rich_escape(str(series_info['until']))})"
+        )
+    if task.get("created"):
+        lines.append(f"[bold]Created:[/bold] {_rich_escape(str(task['created']))}")
+    if task.get("updated"):
+        lines.append(f"[bold]Updated:[/bold] {_rich_escape(str(task['updated']))}")
+    if task.get("body"):
+        lines.append("")
+        lines.append(_rich_escape(str(task["body"])))
+    return lines
 
 
 # Priority colors
@@ -173,9 +312,8 @@ class OutputFormatter:
             table.add_column(column_headers.get(col, col.title()))
 
         # Add rows
-        today = date.today()
         for task in tasks:
-            row = []
+            row: list[str | Text] = []
             for col in columns:
                 value = task.get(col, "")
                 if col == "priority":
@@ -186,14 +324,10 @@ class OutputFormatter:
                     row.append(Text(str(value or "-"), style=style))
                 elif col == "due":
                     if value:
-                        due_date = (
-                            datetime.fromisoformat(value).date()
-                            if isinstance(value, str)
-                            else value
-                        )
-                        style = "red bold" if due_date < today else ""
-                        display = str(value)
-                        if due_date < today:
+                        overdue = is_overdue(value)
+                        style = "red bold" if overdue else ""
+                        display = format_date_display(value)
+                        if overdue:
                             display += " [OVERDUE]"
                         row.append(Text(display, style=style))
                     else:
@@ -227,24 +361,18 @@ class OutputFormatter:
         self.console.print(table)
 
         # Summary
-        overdue = sum(
-            1
-            for t in tasks
-            if t.get("due")
-            and datetime.fromisoformat(t["due"]).date() < today
-            and t.get("status") != "done"
+        overdue_count = sum(
+            1 for t in tasks if t.get("due") and is_overdue(t["due"]) and t.get("status") != "done"
         )
         blocked = sum(1 for t in tasks if t.get("status") == "blocked")
         summary_parts = [f"{len(tasks)} task{'s' if len(tasks) != 1 else ''}"]
-        if overdue:
-            summary_parts.append(f"{overdue} overdue")
+        if overdue_count:
+            summary_parts.append(f"{overdue_count} overdue")
         if blocked:
             summary_parts.append(f"{blocked} blocked")
-        self.print(f"\n{' ('.join(summary_parts)}{')'if len(summary_parts) > 1 else ''}")
+        self.print(f"\n{' ('.join(summary_parts)}{')' if len(summary_parts) > 1 else ''}")
 
-    def _format_task_table_plain(
-        self, tasks: list[dict[str, Any]], columns: list[str]
-    ) -> None:
+    def _format_task_table_plain(self, tasks: list[dict[str, Any]], columns: list[str]) -> None:
         """Format tasks as plain text table."""
         # Calculate column widths
         widths = {col: len(col) for col in columns}
@@ -338,48 +466,15 @@ class OutputFormatter:
         priority = task.get("priority", "")
 
         if RICH_AVAILABLE:
-            # Build content
-            lines = []
-            if task.get("assignee"):
-                lines.append(f"[bold]Assignee:[/bold] {task['assignee']}")
-            priority_style = PRIORITY_COLORS.get(priority, "")
-            if priority_style:
-                lines.append(f"[bold]Priority:[/bold] [{priority_style}]{priority}[/{priority_style}]")
-            else:
-                lines.append(f"[bold]Priority:[/bold] {priority}")
-            status_style = STATUS_COLORS.get(status, "")
-            if status_style:
-                lines.append(f"[bold]Status:[/bold] [{status_style}]{status}[/{status_style}]")
-            else:
-                lines.append(f"[bold]Status:[/bold] {status}")
-            if task.get("due"):
-                due_style = ""
-                if task.get("status") != "done":
-                    due_date = datetime.fromisoformat(task["due"]).date()
-                    if due_date < date.today():
-                        due_style = "red bold"
-                if due_style:
-                    lines.append(f"[bold]Due:[/bold] [{due_style}]{task['due']}[/{due_style}]")
-                else:
-                    lines.append(f"[bold]Due:[/bold] {task['due']}")
-            if task.get("tags"):
-                lines.append(f"[bold]Tags:[/bold] {', '.join(task['tags'])}")
-            if task.get("depends_on"):
-                lines.append(f"[bold]Depends on:[/bold] {', '.join(task['depends_on'])}")
-            if task.get("_series_info"):
-                series_info = task["_series_info"]
-                lines.append(f"[bold]Series:[/bold] {series_info['series_id']} ({series_info['pattern']}, until {series_info['until']})")
-            if task.get("created"):
-                lines.append(f"[bold]Created:[/bold] {task['created']}")
-            if task.get("updated"):
-                lines.append(f"[bold]Updated:[/bold] {task['updated']}")
-            if task.get("body"):
-                lines.append("")
-                lines.append(task["body"])
+            # Body = the shared detail lines minus the id/title header line
+            # (and its trailing blank), since the Panel renders the title
+            # itself. build_task_detail_lines is the single source of truth
+            # for the field set/order/styling shared with the TUI card viewer.
+            lines = build_task_detail_lines(task)[2:]
 
             panel = Panel(
                 "\n".join(lines),
-                title=f"[bold]{task_id}[/bold] - {title}",
+                title=f"[bold]{_rich_escape(str(task_id))}[/bold] - {_rich_escape(str(title))}",
                 title_align="left",
                 border_style=PRIORITY_COLORS.get(priority, ""),
             )
@@ -400,7 +495,9 @@ class OutputFormatter:
                 print(f"Depends on: {', '.join(task['depends_on'])}")
             if task.get("_series_info"):
                 series_info = task["_series_info"]
-                print(f"Series: {series_info['series_id']} ({series_info['pattern']}, until {series_info['until']})")
+                print(
+                    f"Series: {series_info['series_id']} ({series_info['pattern']}, until {series_info['until']})"
+                )
             if task.get("created"):
                 print(f"Created: {task['created']}")
             if task.get("updated"):
@@ -435,9 +532,7 @@ class OutputFormatter:
             if RICH_AVAILABLE:
                 self.console.print(f"\n[bold red]Conflict in {task_id}: {field}[/]")
                 self.console.print(f"  Base (last sync):  [dim]{base}[/]")
-                self.console.print(
-                    f"  RST file value:    [cyan]{rst}[/]  ({rst_file}:{rst_line})"
-                )
+                self.console.print(f"  RST file value:    [cyan]{rst}[/]  ({rst_file}:{rst_line})")
                 self.console.print(f"  JSON file value:   [yellow]{json_val}[/]")
             else:
                 print(f"\nConflict in {task_id}: {field}")
@@ -446,7 +541,9 @@ class OutputFormatter:
                 print(f"  JSON file value:   {json_val}")
 
 
-def get_formatter(config: DotoConfig, json_output: bool = False, quiet: bool = False) -> OutputFormatter:
+def get_formatter(
+    config: DotoConfig, json_output: bool = False, quiet: bool = False
+) -> OutputFormatter:
     """Get an output formatter based on config.
 
     Args:

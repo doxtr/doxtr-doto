@@ -27,18 +27,26 @@ from doxtr_doto.constants import (
 )
 
 if TYPE_CHECKING:
+    from datetime import date
+
     from doxtr_doto.collectors import DotoTask
 
 # Valid chart types across both engines.
-VALID_CHART_TYPES: frozenset[str] = frozenset(
-    {"bar", "pie", "stacked-bar", "progress", "burndown"}
-)
+VALID_CHART_TYPES: frozenset[str] = frozenset({"bar", "pie", "stacked-bar", "progress", "burndown"})
 
 # Default colors for unknown values. Single source for the chart palette used
 # by the SVG, plotly and native-LaTeX engines so they stay visually in sync.
 DEFAULT_COLORS = [
-    "#0d6efd", "#198754", "#fd7e14", "#dc3545", "#6c757d",
-    "#6610f2", "#d63384", "#20c997", "#ffc107", "#0dcaf0",
+    "#0d6efd",
+    "#198754",
+    "#fd7e14",
+    "#dc3545",
+    "#6c757d",
+    "#6610f2",
+    "#d63384",
+    "#20c997",
+    "#ffc107",
+    "#0dcaf0",
 ]
 
 # Recurring chart brand/axis colors, centralized so SVG and native-LaTeX share
@@ -64,12 +72,12 @@ def _color_for(label: str, index: int, color_map: dict[str, str] | None) -> str:
 
 def _get_task_attr(task: Any, attr: str, default: Any = None) -> Any:
     """Get attribute from task, supporting both objects and dicts.
-    
+
     Args:
         task: DotoTask object or dict.
         attr: Attribute name to get.
         default: Default value if attribute not found.
-        
+
     Returns:
         Attribute value or default.
     """
@@ -97,22 +105,22 @@ def generate_bar_chart(
     color_map: dict[str, str] | None = None,
 ) -> str:
     """Generate an SVG bar chart from data.
-    
+
     Args:
         data: Dictionary mapping labels to values.
         title: Optional chart title.
         width: Chart width in pixels.
         height: Chart height in pixels.
         color_map: Optional mapping of labels to colors.
-        
+
     Returns:
         SVG string for the bar chart.
     """
     if not data:
         return ""
-    
+
     color_map = color_map or {}
-    
+
     # Chart dimensions
     margin_top = 40 if title else 20
     margin_bottom = 60
@@ -120,54 +128,56 @@ def generate_bar_chart(
     margin_right = 20
     chart_width = width - margin_left - margin_right
     chart_height = height - margin_top - margin_bottom
-    
+
     # Calculate bar dimensions
     num_bars = len(data)
     bar_gap = 10
     bar_width = max(20, (chart_width - (num_bars - 1) * bar_gap) / num_bars)
-    
+
     # Find max value for scaling
     max_value = max(data.values()) if data.values() else 1
-    
+
     # Start building SVG
     svg_parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'class="doto-chart doto-bar-chart" '
-        f'viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}">'
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'class="doto-chart doto-bar-chart" '
+            f'viewBox="0 0 {width} {height}" '
+            f'width="{width}" height="{height}">'
+        )
     ]
-    
+
     # Add title
     if title:
         svg_parts.append(
             f'<text x="{width / 2}" y="20" '
             f'text-anchor="middle" class="doto-chart-title" '
             f'font-size="14" font-weight="bold">'
-            f'{_escape_xml(title)}</text>'
+            f"{_escape_xml(title)}</text>"
         )
-    
+
     # Draw bars
     for i, (label, value) in enumerate(data.items()):
         x = margin_left + i * (bar_width + bar_gap)
         bar_height = (value / max_value) * chart_height if max_value > 0 else 0
         y = margin_top + chart_height - bar_height
-        
+
         # Get color
         color = _color_for(label, i, color_map)
-        
+
         # Bar
         svg_parts.append(
             f'<rect x="{x}" y="{y}" width="{bar_width}" height="{bar_height}" '
             f'fill="{color}" class="doto-chart-bar" rx="2" />'
         )
-        
+
         # Value label on top of bar
         svg_parts.append(
             f'<text x="{x + bar_width / 2}" y="{y - 5}" '
             f'text-anchor="middle" class="doto-chart-value" '
             f'font-size="12">{value}</text>'
         )
-        
+
         # X-axis label (rotated for long labels)
         label_y = margin_top + chart_height + 15
         svg_parts.append(
@@ -175,130 +185,130 @@ def generate_bar_chart(
             f'text-anchor="middle" class="doto-chart-label" '
             f'font-size="11">{_escape_xml(label)}</text>'
         )
-    
+
     # Y-axis line
     svg_parts.append(
         f'<line x1="{margin_left}" y1="{margin_top}" '
         f'x2="{margin_left}" y2="{margin_top + chart_height}" '
         f'stroke="{CHART_AXIS_COLOR}" stroke-width="1" />'
     )
-    
+
     # X-axis line
     svg_parts.append(
         f'<line x1="{margin_left}" y1="{margin_top + chart_height}" '
         f'x2="{margin_left + chart_width}" y2="{margin_top + chart_height}" '
         f'stroke="{CHART_AXIS_COLOR}" stroke-width="1" />'
     )
-    
+
     svg_parts.append("</svg>")
-    
+
     return "\n".join(svg_parts)
 
 
-def generate_status_chart(tasks: list, title: str = "Tasks by Status") -> str:
+def generate_status_chart(tasks: list[DotoTask], title: str = "Tasks by Status") -> str:
     """Generate a bar chart showing task distribution by status.
-    
+
     Args:
         tasks: List of DotoTask objects or dicts.
         title: Chart title.
-        
+
     Returns:
         SVG string for the status chart.
     """
     if not tasks:
         return ""
-    
+
     # Count tasks by status
     status_counts: dict[str, int] = {}
     for task in tasks:
         status = (_get_task_attr(task, "status") or "open").lower()
         status_counts[status] = status_counts.get(status, 0) + 1
-    
+
     # Order statuses consistently
     ordered_data: dict[str, int] = {}
     for status in STATUS_DISPLAY_ORDER:
         if status in status_counts:
             ordered_data[status] = status_counts[status]
-    
+
     # Add any unexpected statuses
     for status, count in status_counts.items():
         if status not in ordered_data:
             ordered_data[status] = count
-    
+
     return generate_bar_chart(ordered_data, title, color_map=STATUS_COLORS)
 
 
-def generate_priority_chart(tasks: list, title: str = "Tasks by Priority") -> str:
+def generate_priority_chart(tasks: list[DotoTask], title: str = "Tasks by Priority") -> str:
     """Generate a bar chart showing task distribution by priority.
-    
+
     Args:
         tasks: List of DotoTask objects or dicts.
         title: Chart title.
-        
+
     Returns:
         SVG string for the priority chart.
     """
     if not tasks:
         return ""
-    
+
     # Count tasks by priority
     priority_counts: dict[str, int] = {}
     for task in tasks:
         priority = (_get_task_attr(task, "priority") or "medium").lower()
         priority_counts[priority] = priority_counts.get(priority, 0) + 1
-    
+
     # Order priorities consistently
     ordered_data: dict[str, int] = {}
     for priority in PRIORITY_DISPLAY_ORDER:
         if priority in priority_counts:
             ordered_data[priority] = priority_counts[priority]
-    
+
     # Add any unexpected priorities
     for priority, count in priority_counts.items():
         if priority not in ordered_data:
             ordered_data[priority] = count
-    
+
     return generate_bar_chart(ordered_data, title, color_map=PRIORITY_COLORS)
 
 
-def generate_assignee_chart(tasks: list, title: str = "Tasks by Assignee") -> str:
+def generate_assignee_chart(tasks: list[DotoTask], title: str = "Tasks by Assignee") -> str:
     """Generate a bar chart showing task distribution by assignee.
-    
+
     Args:
         tasks: List of DotoTask objects or dicts.
         title: Chart title.
-        
+
     Returns:
         SVG string for the assignee chart.
     """
     if not tasks:
         return ""
-    
+
     # Count tasks by assignee
     assignee_counts: dict[str, int] = {}
     for task in tasks:
         assignee = _get_task_attr(task, "assignee") or "Unassigned"
         assignee_counts[assignee] = assignee_counts.get(assignee, 0) + 1
-    
+
     # Sort by count descending
     sorted_data = dict(sorted(assignee_counts.items(), key=lambda x: -x[1]))
-    
+
     return generate_bar_chart(sorted_data, title)
 
 
-def generate_tags_chart(tasks: list, title: str = "Tasks by Tag") -> str:
+def generate_tags_chart(tasks: list[DotoTask], title: str = "Tasks by Tag") -> str:
     """Generate a bar chart showing task distribution by tags.
-    
+
     Args:
         tasks: List of DotoTask objects or dicts.
         title: Chart title.
-        
+
     Returns:
         SVG string for the tags chart.
     """
     if not tasks:
         return ""
-    
+
     # Count tasks by tag
     tag_counts: dict[str, int] = {}
     for task in tasks:
@@ -308,10 +318,10 @@ def generate_tags_chart(tasks: list, title: str = "Tasks by Tag") -> str:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
         else:
             tag_counts["(no tags)"] = tag_counts.get("(no tags)", 0) + 1
-    
+
     # Sort by count descending
     sorted_data = dict(sorted(tag_counts.items(), key=lambda x: -x[1]))
-    
+
     return generate_bar_chart(sorted_data, title)
 
 
@@ -354,16 +364,18 @@ def generate_pie_chart(
     r = min(width, height) / 2 - 40  # Leave room for legend
 
     svg_parts: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'class="doto-chart doto-pie-chart" '
-        f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'class="doto-chart doto-pie-chart" '
+            f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        )
     ]
 
     if title:
         svg_parts.append(
             f'<text x="{width / 2}" y="16" text-anchor="middle" '
             f'class="doto-chart-title" font-size="14" font-weight="bold">'
-            f'{_escape_xml(title)}</text>'
+            f"{_escape_xml(title)}</text>"
         )
 
     start_angle = -math.pi / 2  # Start at 12 o'clock
@@ -372,7 +384,7 @@ def generate_pie_chart(
     for i, (label, value) in enumerate(data.items()):
         if value == 0:
             continue
-            
+
         fraction = value / total
         end_angle = start_angle + fraction * 2 * math.pi
         large_arc = 1 if fraction > 0.5 else 0
@@ -388,8 +400,7 @@ def generate_pie_chart(
         if fraction >= 0.9999:
             # Draw a full circle instead of an arc
             svg_parts.append(
-                f'<circle cx="{cx}" cy="{cy}" r="{r}" '
-                f'fill="{color}" class="doto-chart-slice" />'
+                f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}" class="doto-chart-slice" />'
             )
         else:
             svg_parts.append(
@@ -404,7 +415,7 @@ def generate_pie_chart(
         pct = round(fraction * 100)
         svg_parts.append(
             f'<text x="{lx + 16}" y="{ly}" font-size="11" class="doto-chart-label">'
-            f'{_escape_xml(label)} ({value}, {pct}%)</text>'
+            f"{_escape_xml(label)} ({value}, {pct}%)</text>"
         )
 
         start_angle = end_angle
@@ -413,9 +424,10 @@ def generate_pie_chart(
     return "\n".join(svg_parts)
 
 
-def _parse_date_attr(value: object) -> "date | None":
+def _parse_date_attr(value: object) -> date | None:
     """Parse a date from a task attribute (string, date, datetime, or None)."""
     from datetime import date, datetime
+
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -431,8 +443,8 @@ def _parse_date_attr(value: object) -> "date | None":
 
 
 def _burndown_daily_counts(
-    tasks: list,
-) -> "tuple[date, list[int]] | None":
+    tasks: list[DotoTask],
+) -> tuple[date, list[int]] | None:
     """Compute the shared burndown series (start date + daily remaining counts).
 
     Walks each task's created date (backlog entry) and its updated date when the
@@ -449,7 +461,7 @@ def _burndown_daily_counts(
     dated = []
     for task in tasks:
         created = _get_task_attr(task, "created")
-        status = (_get_task_attr(task, "status", "open") or "open")
+        status = _get_task_attr(task, "status", "open") or "open"
         updated = _get_task_attr(task, "updated")
 
         created_date = _parse_date_attr(created)
@@ -476,15 +488,14 @@ def _burndown_daily_counts(
     for offset in range(num_days):
         day = start + timedelta(days=offset)
         remaining = sum(
-            1 for created, done in dated
-            if created <= day and (done is None or done > day)
+            1 for created, done in dated if created <= day and (done is None or done > day)
         )
         day_counts.append(remaining)
     return start, day_counts
 
 
 def generate_burndown_chart(
-    tasks: list,
+    tasks: list[DotoTask],
     title: str = "Burndown",
     width: int = 500,
     height: int = 280,
@@ -524,16 +535,18 @@ def generate_burndown_chart(
         return x, y
 
     svg_parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'class="doto-chart doto-burndown-chart" '
-        f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'class="doto-chart doto-burndown-chart" '
+            f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        )
     ]
 
     if title:
         svg_parts.append(
             f'<text x="{width / 2}" y="16" text-anchor="middle" '
             f'class="doto-chart-title" font-size="14" font-weight="bold">'
-            f'{_escape_xml(title)}</text>'
+            f"{_escape_xml(title)}</text>"
         )
 
     # Axes
@@ -549,7 +562,9 @@ def generate_burndown_chart(
     # Line path
     points = [px(i, c) for i, c in enumerate(day_counts)]
     d = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in points)
-    svg_parts.append(f'<path d="{d}" fill="none" stroke="{CHART_ACCENT_COLOR}" stroke-width="2" class="doto-burndown-line"/>')
+    svg_parts.append(
+        f'<path d="{d}" fill="none" stroke="{CHART_ACCENT_COLOR}" stroke-width="2" class="doto-burndown-line"/>'
+    )
 
     # X-axis labels (start, mid, end)
     label_offsets = [0, num_days // 2, num_days - 1]
@@ -576,17 +591,17 @@ def generate_burndown_chart(
 
 
 def _count_by(
-    tasks: list,
+    tasks: list[DotoTask],
     field: str,
     display_order: list[str] | None = None,
 ) -> dict[str, int]:
     """Count tasks by a field value.
-    
+
     Args:
         tasks: List of DotoTask objects or dicts.
         field: Field name to count by.
         display_order: Optional list to order results.
-        
+
     Returns:
         Dictionary mapping field values to counts.
     """
@@ -594,7 +609,7 @@ def _count_by(
     for task in tasks:
         value = (_get_task_attr(task, field) or "unknown").lower()
         counts[value] = counts.get(value, 0) + 1
-    
+
     if display_order:
         ordered: dict[str, int] = {}
         for key in display_order:
@@ -605,12 +620,12 @@ def _count_by(
             if key not in ordered:
                 ordered[key] = count
         return ordered
-    
+
     return counts
 
 
 def generate_progress_chart(
-    tasks: list,
+    tasks: list[DotoTask],
     title: str = "Completion",
     width: int = 320,
     height: int = 180,
@@ -632,10 +647,7 @@ def generate_progress_chart(
         return ""
 
     total = len(tasks)
-    done = sum(
-        1 for t in tasks
-        if (_get_task_attr(t, "status") or "").lower() == "done"
-    )
+    done = sum(1 for t in tasks if (_get_task_attr(t, "status") or "").lower() == "done")
     pct = round(done / total * 100) if total else 0
 
     margin = 20
@@ -646,15 +658,17 @@ def generate_progress_chart(
     fill_w = bar_w * pct / 100
 
     svg_parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'class="doto-chart doto-progress-chart" '
-        f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'class="doto-chart doto-progress-chart" '
+            f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
+        )
     ]
     if title:
         svg_parts.append(
             f'<text x="{width / 2}" y="22" text-anchor="middle" '
             f'class="doto-chart-title" font-size="14" font-weight="bold">'
-            f'{_escape_xml(title)}</text>'
+            f"{_escape_xml(title)}</text>"
         )
     # Track
     svg_parts.append(
@@ -670,13 +684,13 @@ def generate_progress_chart(
     svg_parts.append(
         f'<text x="{width / 2}" y="{bar_y + bar_h + 22}" text-anchor="middle" '
         f'font-size="13" class="doto-chart-label">{pct}% complete '
-        f'({done}/{total})</text>'
+        f"({done}/{total})</text>"
     )
     svg_parts.append("</svg>")
     return "\n".join(svg_parts)
 
 
-def _svg_chart_bar(tasks: list, group_by: list[str]) -> list[str]:
+def _svg_chart_bar(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Render bar charts (one per group-by field) as SVG snippets."""
     charts: list[str] = []
     for field in group_by:
@@ -694,7 +708,7 @@ def _svg_chart_bar(tasks: list, group_by: list[str]) -> list[str]:
     return charts
 
 
-def _svg_chart_pie(tasks: list, group_by: list[str]) -> list[str]:
+def _svg_chart_pie(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Render pie charts (one per group-by field) as SVG snippets."""
     charts: list[str] = []
     titles = {
@@ -705,24 +719,33 @@ def _svg_chart_pie(tasks: list, group_by: list[str]) -> list[str]:
     for field in group_by:
         field_lower = field.lower()
         if field_lower == "tags":
-            charts.append(generate_pie_chart(
-                _chart_data_for_field(tasks, "tags"), title="Tasks by Tag",
-            ))
+            charts.append(
+                generate_pie_chart(
+                    _chart_data_for_field(tasks, "tags"),
+                    title="Tasks by Tag",
+                )
+            )
         elif field_lower in titles:
             title, cmap = titles[field_lower]
-            charts.append(generate_pie_chart(
-                _chart_data_for_field(tasks, field_lower),
-                title=title, color_map=cmap,
-            ))
+            charts.append(
+                generate_pie_chart(
+                    _chart_data_for_field(tasks, field_lower),
+                    title=title,
+                    color_map=cmap,
+                )
+            )
     if not charts:
-        charts.append(generate_pie_chart(
-            _chart_data_for_field(tasks, "status"),
-            title="Tasks by Status", color_map=STATUS_COLORS,
-        ))
+        charts.append(
+            generate_pie_chart(
+                _chart_data_for_field(tasks, "status"),
+                title="Tasks by Status",
+                color_map=STATUS_COLORS,
+            )
+        )
     return charts
 
 
-def _svg_chart_burndown(tasks: list, group_by: list[str]) -> list[str]:
+def _svg_chart_burndown(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Render a burndown chart, falling back to a status bar chart on no dates."""
     chart = generate_burndown_chart(tasks)
     if chart:
@@ -730,7 +753,7 @@ def _svg_chart_burndown(tasks: list, group_by: list[str]) -> list[str]:
     return [generate_status_chart(tasks)]
 
 
-def _svg_chart_progress(tasks: list, group_by: list[str]) -> list[str]:
+def _svg_chart_progress(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Render an overall completion/progress chart."""
     return [generate_progress_chart(tasks)]
 
@@ -738,7 +761,7 @@ def _svg_chart_progress(tasks: list, group_by: list[str]) -> list[str]:
 # Registry mapping a chart type to its SVG renderer. Adding a new SVG chart type
 # is one entry here plus one render function; ``stacked-bar`` reuses the bar
 # renderer (the dependency-free SVG engine draws it as grouped bars).
-SVG_CHART_RENDERERS: dict[str, "Any"] = {
+SVG_CHART_RENDERERS: dict[str, Any] = {
     "bar": _svg_chart_bar,
     "stacked-bar": _svg_chart_bar,
     "pie": _svg_chart_pie,
@@ -748,7 +771,7 @@ SVG_CHART_RENDERERS: dict[str, "Any"] = {
 
 
 def generate_summary_charts(
-    tasks: list,
+    tasks: list[DotoTask],
     group_by: list[str],
     chart_type: str = "bar",
 ) -> str:
@@ -807,7 +830,7 @@ def kaleido_available() -> bool:
     return True
 
 
-def _chart_data_for_field(tasks: list, field: str) -> dict[str, int]:
+def _chart_data_for_field(tasks: list[DotoTask], field: str) -> dict[str, int]:
     """Return an ordered count mapping for a single group-by field.
 
     Mirrors the ordering the SVG charts use (status/priority display order,
@@ -847,13 +870,10 @@ def _color_map_for_field(field: str) -> dict[str, str] | None:
     return None
 
 
-def _plotly_progress(go: "Any", tasks: list, group_by: list[str]):
+def _plotly_progress(go: Any, tasks: list[DotoTask], group_by: list[str]) -> Any:
     """Build a plotly completion gauge figure."""
     total = len(tasks)
-    done = sum(
-        1 for t in tasks
-        if (_get_task_attr(t, "status") or "").lower() == "done"
-    )
+    done = sum(1 for t in tasks if (_get_task_attr(t, "status") or "").lower() == "done")
     pct = round(done / total * 100) if total else 0
     fig = go.Figure(
         go.Indicator(
@@ -867,11 +887,11 @@ def _plotly_progress(go: "Any", tasks: list, group_by: list[str]):
             },
         )
     )
-    fig.update_layout(width=420, height=300, margin=dict(l=30, r=30, t=60, b=20))
+    fig.update_layout(width=420, height=300, margin={"l": 30, "r": 30, "t": 60, "b": 20})
     return fig
 
 
-def _plotly_burndown(go: "Any", tasks: list, group_by: list[str]):
+def _plotly_burndown(go: Any, tasks: list[DotoTask], group_by: list[str]) -> Any:
     """Build a plotly burndown line figure, or None with no dated tasks."""
     series = _burndown_series(tasks)
     if series is None:
@@ -892,12 +912,12 @@ def _plotly_burndown(go: "Any", tasks: list, group_by: list[str]):
         yaxis_title="Open tasks",
         width=560,
         height=320,
-        margin=dict(l=50, r=20, t=50, b=50),
+        margin={"l": 50, "r": 20, "t": 50, "b": 50},
     )
     return fig
 
 
-def _plotly_stacked_bar(go: "Any", tasks: list, group_by: list[str]):
+def _plotly_stacked_bar(go: Any, tasks: list[DotoTask], group_by: list[str]) -> Any:
     """Build a plotly stacked-bar composition figure."""
     primary_field = group_by[0] if group_by else "status"
     data = _chart_data_for_field(tasks, primary_field)
@@ -915,12 +935,12 @@ def _plotly_stacked_bar(go: "Any", tasks: list, group_by: list[str]):
         title=f"Tasks by {primary_field.title()}",
         width=420,
         height=320,
-        margin=dict(l=50, r=20, t=50, b=40),
+        margin={"l": 50, "r": 20, "t": 50, "b": 40},
     )
     return fig
 
 
-def _plotly_pie(go: "Any", tasks: list, group_by: list[str]):
+def _plotly_pie(go: Any, tasks: list[DotoTask], group_by: list[str]) -> Any:
     """Build a plotly pie figure."""
     primary_field = group_by[0] if group_by else "status"
     data = _chart_data_for_field(tasks, primary_field)
@@ -939,12 +959,12 @@ def _plotly_pie(go: "Any", tasks: list, group_by: list[str]):
         title=f"Tasks by {primary_field.title()}",
         width=420,
         height=320,
-        margin=dict(l=20, r=20, t=50, b=20),
+        margin={"l": 20, "r": 20, "t": 50, "b": 20},
     )
     return fig
 
 
-def _plotly_bar(go: "Any", tasks: list, group_by: list[str]):
+def _plotly_bar(go: Any, tasks: list[DotoTask], group_by: list[str]) -> Any:
     """Build a plotly bar figure (the default)."""
     primary_field = group_by[0] if group_by else "status"
     data = _chart_data_for_field(tasks, primary_field)
@@ -963,14 +983,14 @@ def _plotly_bar(go: "Any", tasks: list, group_by: list[str]):
         title=f"Tasks by {primary_field.title()}",
         width=420,
         height=320,
-        margin=dict(l=50, r=20, t=50, b=40),
+        margin={"l": 50, "r": 20, "t": 50, "b": 40},
     )
     return fig
 
 
 # Registry mapping a chart type to its plotly figure builder. Adding a new
 # plotly chart type is one entry here plus one builder function.
-PLOTLY_CHART_BUILDERS: dict[str, "Any"] = {
+PLOTLY_CHART_BUILDERS: dict[str, Any] = {
     "progress": _plotly_progress,
     "burndown": _plotly_burndown,
     "stacked-bar": _plotly_stacked_bar,
@@ -980,10 +1000,10 @@ PLOTLY_CHART_BUILDERS: dict[str, "Any"] = {
 
 
 def _plotly_figure(
-    tasks: list,
+    tasks: list[DotoTask],
     group_by: list[str],
     chart_type: str,
-):
+) -> Any:
     """Build a plotly Figure for the given tasks / grouping / chart type.
 
     Returns a ``plotly.graph_objects.Figure`` or ``None`` when a figure cannot
@@ -1007,7 +1027,7 @@ def _plotly_figure(
     return builder(go, tasks, group_by)
 
 
-def _burndown_series(tasks: list) -> "tuple[list[str], list[int]] | None":
+def _burndown_series(tasks: list[DotoTask]) -> tuple[list[str], list[int]] | None:
     """Compute the (dates, remaining-count) series used by burndown charts.
 
     Returns None when there is insufficient date data (fewer than 2 days),
@@ -1025,7 +1045,7 @@ def _burndown_series(tasks: list) -> "tuple[list[str], list[int]] | None":
     return dates, day_counts
 
 
-def _chart_filename(tasks: list, group_by: list[str], chart_type: str, ext: str) -> str:
+def _chart_filename(tasks: list[DotoTask], group_by: list[str], chart_type: str, ext: str) -> str:
     """Build a stable, unique filename for a rendered plotly chart image.
 
     The name is derived from the chart configuration and task composition so
@@ -1054,12 +1074,12 @@ def _chart_filename(tasks: list, group_by: list[str], chart_type: str, ext: str)
 
 
 def render_plotly_chart_image(
-    tasks: list,
+    tasks: list[DotoTask],
     group_by: list[str],
     chart_type: str,
-    output_dir: "str",
+    output_dir: str,
     image_format: str = "png",
-) -> "str | None":
+) -> str | None:
     """Render a plotly chart to a static image file in ``output_dir``.
 
     Requires both plotly and kaleido. Returns the written filename (relative to
@@ -1101,12 +1121,12 @@ def render_plotly_chart_image(
 
 
 def generate_summary_charts_plotly_html(
-    tasks: list,
+    tasks: list[DotoTask],
     group_by: list[str],
     chart_type: str,
-    output_dir: "str",
+    output_dir: str,
     static_prefix: str = "_static",
-) -> "str | None":
+) -> str | None:
     """Produce an HTML ``<img>`` snippet referencing a static plotly chart.
 
     Writes a PNG into ``output_dir`` (typically ``<outdir>/_static``) and
@@ -1174,8 +1194,9 @@ def _latex_hex(color: str) -> str:
     return color.lstrip("#")
 
 
-def _latex_bar_chart(tasks: list, data: dict[str, int], title: str,
-                     color_map: dict[str, str] | None) -> str:
+def _latex_bar_chart(
+    tasks: list[DotoTask], data: dict[str, int], title: str, color_map: dict[str, str] | None
+) -> str:
     r"""Emit a native-LaTeX horizontal bar chart via ``\dotochart``/``\dotochartbar``."""
     if not data:
         return ""
@@ -1188,15 +1209,12 @@ def _latex_bar_chart(tasks: list, data: dict[str, int], title: str,
             f"{{{max_value}}}{{{_latex_hex(color)}}}"
         )
     body = "\n".join(rows)
-    return (
-        f"\\begin{{dotochart}}{{{_latex_chart_escape(title)}}}\n"
-        f"{body}\n"
-        f"\\end{{dotochart}}\n"
-    )
+    return f"\\begin{{dotochart}}{{{_latex_chart_escape(title)}}}\n{body}\n\\end{{dotochart}}\n"
 
 
-def _latex_pie_chart(tasks: list, data: dict[str, int], title: str,
-                     color_map: dict[str, str] | None) -> str:
+def _latex_pie_chart(
+    tasks: list[DotoTask], data: dict[str, int], title: str, color_map: dict[str, str] | None
+) -> str:
     r"""Emit a native-LaTeX pie chart via ``\dotochartpie``."""
     total = sum(data.values())
     if total == 0:
@@ -1209,8 +1227,7 @@ def _latex_pie_chart(tasks: list, data: dict[str, int], title: str,
         pct = round(value / total * 100)
         # color/value/percent/label — the .sty draws wedges from cumulative pct.
         slices.append(
-            f"{{{_latex_hex(color)}}}{{{value}}}{{{pct}}}"
-            f"{{{_latex_chart_escape(label)}}}"
+            f"{{{_latex_hex(color)}}}{{{value}}}{{{pct}}}{{{_latex_chart_escape(label)}}}"
         )
     if not slices:
         return ""
@@ -1222,13 +1239,10 @@ def _latex_pie_chart(tasks: list, data: dict[str, int], title: str,
     )
 
 
-def _latex_progress_chart(tasks: list, title: str) -> str:
+def _latex_progress_chart(tasks: list[DotoTask], title: str) -> str:
     r"""Emit a native-LaTeX completion bar via ``\dotochartprogress``."""
     total = len(tasks)
-    done = sum(
-        1 for t in tasks
-        if (_get_task_attr(t, "status") or "").lower() == "done"
-    )
+    done = sum(1 for t in tasks if (_get_task_attr(t, "status") or "").lower() == "done")
     pct = round(done / total * 100) if total else 0
     return (
         f"\\begin{{dotochart}}{{{_latex_chart_escape(title)}}}\n"
@@ -1237,7 +1251,7 @@ def _latex_progress_chart(tasks: list, title: str) -> str:
     )
 
 
-def _latex_burndown_chart(tasks: list, title: str) -> str:
+def _latex_burndown_chart(tasks: list[DotoTask], title: str) -> str:
     r"""Emit a native-LaTeX burndown line via ``\dotochartline``.
 
     Falls back to a status bar chart when there is insufficient date data,
@@ -1254,8 +1268,7 @@ def _latex_burndown_chart(tasks: list, title: str) -> str:
     max_count = max(counts) or 1
     # Normalize to (x,y) coordinate pairs in [0,1] for the .sty tikz plot.
     coords = " ".join(
-        f"({i / (num_days - 1):.4f},{c / max_count:.4f})"
-        for i, c in enumerate(counts)
+        f"({i / (num_days - 1):.4f},{c / max_count:.4f})" for i, c in enumerate(counts)
     )
     end = start + timedelta(days=num_days - 1)
     return (
@@ -1266,39 +1279,49 @@ def _latex_burndown_chart(tasks: list, title: str) -> str:
     )
 
 
-def _latex_chart_bar(tasks: list, group_by: list[str]) -> list[str]:
+def _latex_chart_bar(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Native-LaTeX bar charts, one per group-by field."""
     charts: list[str] = []
     fields = group_by or ["status"]
     for field in fields:
         data = _chart_data_for_field(tasks, field)
         color_map = _color_map_for_field(field)
-        charts.append(_latex_bar_chart(
-            tasks, data, f"Tasks by {field.title()}", color_map,
-        ))
+        charts.append(
+            _latex_bar_chart(
+                tasks,
+                data,
+                f"Tasks by {field.title()}",
+                color_map,
+            )
+        )
     return [c for c in charts if c]
 
 
-def _latex_chart_pie(tasks: list, group_by: list[str]) -> list[str]:
+def _latex_chart_pie(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Native-LaTeX pie charts, one per group-by field."""
     charts: list[str] = []
     fields = group_by or ["status"]
     for field in fields:
         data = _chart_data_for_field(tasks, field)
         color_map = _color_map_for_field(field)
-        charts.append(_latex_pie_chart(
-            tasks, data, f"Tasks by {field.title()}", color_map,
-        ))
+        charts.append(
+            _latex_pie_chart(
+                tasks,
+                data,
+                f"Tasks by {field.title()}",
+                color_map,
+            )
+        )
     return [c for c in charts if c]
 
 
-def _latex_chart_progress(tasks: list, group_by: list[str]) -> list[str]:
+def _latex_chart_progress(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Native-LaTeX overall completion chart."""
     chart = _latex_progress_chart(tasks, "Completion")
     return [chart] if chart else []
 
 
-def _latex_chart_burndown(tasks: list, group_by: list[str]) -> list[str]:
+def _latex_chart_burndown(tasks: list[DotoTask], group_by: list[str]) -> list[str]:
     """Native-LaTeX burndown chart (falls back to a status bar chart)."""
     chart = _latex_burndown_chart(tasks, "Burndown")
     return [chart] if chart else []
@@ -1317,7 +1340,7 @@ LATEX_CHART_RENDERERS: dict[str, Any] = {
 
 
 def generate_summary_charts_latex(
-    tasks: list,
+    tasks: list[DotoTask],
     group_by: list[str],
     chart_type: str = "bar",
 ) -> str:

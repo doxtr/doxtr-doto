@@ -110,3 +110,42 @@
 .doto-summary {
   margin: 1rem 0;
 }
+
+/* Layout views (kanban | calendar | email) — minimal styling.
+   Interactions are driven by the vendored doto-views.js and degrade to static
+   markup when JS is unavailable. */
+
+/* Kanban */
+.doto-kanban { display: flex; gap: 1rem; overflow-x: auto; align-items: flex-start; }
+.doto-kanban-column { flex: 1 0 12rem; min-width: 12rem; border: 1px solid #ccc; padding: 0.5rem; }
+.doto-kanban-column-header { display: flex; justify-content: space-between; font-weight: 600; }
+.doto-kanban-cards { list-style: none; margin: 0; padding: 0; min-height: 2rem; }
+.doto-kanban-card { border: 1px solid #ccc; padding: 0.4rem; margin-bottom: 0.4rem; cursor: grab; }
+.doto-kanban-card-dragging { opacity: 0.5; }
+.doto-kanban-card-title { display: block; font-weight: 600; }
+
+/* Calendar */
+.doto-calendar-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.doto-calendar-weekday, .doto-calendar-day { border: 1px solid #ccc; padding: 0.2rem; vertical-align: top; }
+.doto-calendar-day-number { background: none; border: none; font: inherit; cursor: pointer; }
+.doto-calendar-day-tasks { list-style: none; margin: 0.2rem 0 0; padding: 0; display: none; }
+.doto-calendar-day-open .doto-calendar-day-tasks { display: block; }
+.doto-calendar-unscheduled .doto-calendar-day-tasks { display: block; }
+
+/* Email 3-pane */
+.doto-email { display: grid; grid-template-columns: 1fr 3fr; gap: 0.5rem; border: 1px solid #ccc; padding: 0.5rem; }
+.doto-email-main { display: grid; grid-template-rows: 1fr 1fr; gap: 0.5rem; }
+.doto-email-tree-node { display: flex; justify-content: space-between; width: 100%; background: none; border: none; font: inherit; text-align: left; cursor: pointer; }
+.doto-email-list { list-style: none; margin: 0; padding: 0; border: 1px solid #ccc; overflow-y: auto; --doto-row-height: 1.9rem; }
+/* Scroll cap: cap visible rows from the renderer-emitted --doto-visible-tasks
+   (directive :visible-tasks: else doto_list_visible_tasks), keyed off the
+   data-doto-visible-tasks attribute. All tasks still render; the rest scroll.
+   --doto-row-height defaults on .doto-email-list above so child themes can
+   override it. */
+.doto-email-list[data-doto-visible-tasks] { max-height: calc(var(--doto-visible-tasks) * var(--doto-row-height)); }
+.doto-email-list-item { display: flex; gap: 0.5rem; padding: 0.3rem; cursor: pointer; border-bottom: 1px solid #eee; }
+.doto-email-list-item-filtered { display: none; }
+.doto-email-detail { border: 1px solid #ccc; padding: 0.5rem; overflow-y: auto; }
+.doto-email-detail-meta { display: grid; grid-template-columns: auto 1fr; gap: 0.1rem 0.5rem; }
+.doto-email-detail-meta dt { font-weight: 600; }
+.doto-email-detail-meta dd { margin: 0; }

@@ -5,12 +5,12 @@ All implementations are consolidated in doxtr_doto.sync.json_store.
 """
 
 from doxtr_doto.sync.json_store import (
-    JsonTaskStore,
     SCHEMA_VERSION,
+    JsonStoreData,
+    JsonTaskStore,
     SeriesData,
     SyncData,
     TaskData,
-    JsonStoreData,
 )
 
 __all__ = [

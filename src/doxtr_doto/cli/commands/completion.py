@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -53,7 +52,6 @@ def get_completion_script(shell: str) -> str:
     Returns:
         Completion script content.
     """
-    env_var = f"_DOTO_COMPLETE={shell}_source"
     result = subprocess.run(
         ["doto"],
         capture_output=True,

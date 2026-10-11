@@ -25,13 +25,13 @@ VALID_GROUP_BY_FIELDS = frozenset({"status", "priority", "assignee", "tags"})
 
 def validate_group_by(value: str) -> list[str]:
     """Validate group-by field names.
-    
+
     Args:
         value: Comma-separated group-by fields.
-        
+
     Returns:
         List of validated group-by field names.
-        
+
     Raises:
         ValueError: If any group-by field is invalid.
     """
@@ -48,23 +48,23 @@ def validate_group_by(value: str) -> list[str]:
 
 class DotoSummaryDirective(SphinxDirective):
     """Directive for displaying task statistics.
-    
+
     Usage::
-    
+
         .. doto-summary::
            :group-by: status, priority
            :assignee: alice
            :show-chart: true
-    
+
     This directive creates a summary view of tasks, optionally filtered
     and grouped by specified fields. The actual statistics are computed
     during the transform phase when all tasks have been collected.
     """
-    
+
     has_content: ClassVar[bool] = False
     required_arguments: ClassVar[int] = 0
     optional_arguments: ClassVar[int] = 0
-    
+
     option_spec: ClassVar[dict[str, object]] = {
         "group-by": directives.unchanged,
         "assignee": directives.unchanged,
@@ -74,19 +74,19 @@ class DotoSummaryDirective(SphinxDirective):
         "priority": directives.unchanged,
         "tags": directives.unchanged,
     }
-    
+
     def run(self) -> list[nodes.Node]:
         """Process the directive and return document nodes.
-        
+
         Returns:
             List containing the doto_summary_node with configuration.
         """
         # Parse configuration options
         config = self._parse_config()
-        
+
         # Parse filter options
         filters = self._parse_filters()
-        
+
         # Create the node with configuration
         node = doto_summary_node(
             "",
@@ -95,21 +95,21 @@ class DotoSummaryDirective(SphinxDirective):
             docname=self.env.docname,
             lineno=self.lineno,
         )
-        
+
         # Set source info for better error messages
         node.source = self.get_source_info()[0]
         node.line = self.lineno
-        
+
         return [node]
-    
+
     def _parse_config(self) -> dict[str, Any]:
         """Parse and validate configuration options.
-        
+
         Returns:
             Dictionary of configuration settings.
         """
         config: dict[str, Any] = {}
-        
+
         # Parse group-by fields
         if "group-by" in self.options:
             try:
@@ -118,13 +118,13 @@ class DotoSummaryDirective(SphinxDirective):
                 raise self.error(str(e)) from e
         else:
             config["group_by"] = ["status"]  # Default grouping
-        
+
         # Parse show-chart option
         if "show-chart" in self.options:
             config["show_chart"] = parse_boolean(self.options["show-chart"])
         else:
             config["show_chart"] = False  # Default to no chart
-        
+
         # Parse chart-type option
         if "chart-type" in self.options:
             chart_type = self.options["chart-type"].strip().lower()
@@ -136,40 +136,39 @@ class DotoSummaryDirective(SphinxDirective):
             config["chart_type"] = chart_type
         else:
             config["chart_type"] = "bar"  # Default to bar chart
-        
+
         return config
-    
+
     def _parse_filters(self) -> dict[str, Any]:
         """Parse and validate filter options.
-        
+
         Returns:
             Dictionary of filter settings.
         """
         from doxtr_doto.config import get_config
-        
+
         filters: dict[str, Any] = {}
-        
+
         # Get valid values from config
         valid_statuses = set(get_config(self.env.app, "statuses"))
         valid_priorities = set(get_config(self.env.app, "priorities"))
-        
+
         # Parse assignee filter
         if "assignee" in self.options:
             assignees = parse_list(self.options["assignee"])
             if assignees:
                 filters["assignee"] = assignees
-        
+
         # Parse status filter
         if "status" in self.options:
             statuses = parse_list(self.options["status"])
             for s in statuses:
                 if s.lower() not in valid_statuses:
                     raise self.error(
-                        f"Invalid status '{s}'. "
-                        f"Must be one of: {', '.join(sorted(valid_statuses))}"
+                        f"Invalid status '{s}'. Must be one of: {', '.join(sorted(valid_statuses))}"
                     )
             filters["status"] = [s.lower() for s in statuses]
-        
+
         # Parse priority filter
         if "priority" in self.options:
             priorities = parse_list(self.options["priority"])
@@ -180,13 +179,13 @@ class DotoSummaryDirective(SphinxDirective):
                         f"Must be one of: {', '.join(sorted(valid_priorities))}"
                     )
             filters["priority"] = [p.lower() for p in priorities]
-        
+
         # Parse tags filter
         if "tags" in self.options:
             tags = parse_list(self.options["tags"])
             if tags:
                 filters["tags"] = tags
-        
+
         return filters
 
 
@@ -232,17 +231,17 @@ def _cleanup_orphan_chart_images(app: Sphinx, exception: Exception | None) -> No
 
 def setup(app: Sphinx) -> dict[str, object]:
     """Set up the doto-summary directive.
-    
+
     Args:
         app: Sphinx application instance.
-        
+
     Returns:
         Extension metadata.
     """
     app.add_directive("doto-summary", DotoSummaryDirective)
     # Prune stale plotly chart images after each build (Feature 7 cleanup).
     app.connect("build-finished", _cleanup_orphan_chart_images, priority=800)
-    
+
     return {
         "version": "0.1.0",
         "parallel_read_safe": True,

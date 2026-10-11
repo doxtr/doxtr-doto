@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import click
 
 from doxtr_doto.cli.completion import complete_task_id
+from doxtr_doto.cli.id_resolver import resolve_task_ref
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
@@ -29,10 +30,14 @@ def show(
     if json_output:
         formatter.json_output = True
 
-    store = ctx.store
+    resolved = resolve_task_ref(ctx, task_id)
+    if resolved is None:
+        raise click.ClickException(f"Task '{task_id}' not found.")
+    store = resolved.store
+    local_id = resolved.task_id
 
     # Get task
-    task = store.get_task(task_id)
+    task = store.get_task(local_id)
     if task is None:
         raise click.ClickException(f"Task '{task_id}' not found.")
 
@@ -40,9 +45,10 @@ def show(
     task_with_id = {"id": task_id, **task}
     series_id = task.get("series_id")
     if series_id:
-        series = store.get_series(series_id)
+        series = store.get_series(str(series_id))
         if series:
             from doxtr_doto.cli.recurrence import RecurrencePattern
+
             pattern = RecurrencePattern.from_dict(series["pattern"])
             task_with_id["_series_info"] = {
                 "series_id": series_id,

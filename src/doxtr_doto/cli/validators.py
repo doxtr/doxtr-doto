@@ -6,7 +6,7 @@ allowing customization of valid statuses and priorities.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import click
 
@@ -36,6 +36,7 @@ def _get_config_values(ctx: Context, config_attr: str, defaults: list[str]) -> l
     # Try to load config directly (for early validation before context is set)
     try:
         from doxtr_doto.cli.config import load_config
+
         config = load_config()
         values = getattr(config, config_attr, None)
         if values:
@@ -103,8 +104,6 @@ def validate_status(
     allowed = _get_config_values(ctx, "statuses", defaults)
 
     if value not in allowed:
-        raise click.BadParameter(
-            f"Invalid status '{value}'. Must be one of: {', '.join(allowed)}"
-        )
+        raise click.BadParameter(f"Invalid status '{value}'. Must be one of: {', '.join(allowed)}")
 
     return value

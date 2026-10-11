@@ -18,9 +18,7 @@ from doxtr_doto.sync.rst_writer import (
     insert_directive_into_content,
     remove_directive_from_content,
     update_directive_in_content,
-    generate_directive_text,
 )
-
 
 # =============================================================================
 # Content-level function tests
@@ -80,7 +78,9 @@ class TestUpdateDirectiveInContent:
         lines = result.split("\n")
         task2_idx = next(i for i, line in enumerate(lines) if "TASK-002" in line)
         # Check status after TASK-002 is still open
-        assert any(":status: open" in lines[i] for i in range(task2_idx, min(task2_idx + 5, len(lines))))
+        assert any(
+            ":status: open" in lines[i] for i in range(task2_idx, min(task2_idx + 5, len(lines)))
+        )
 
 
 class TestRemoveDirectiveFromContent:
@@ -230,8 +230,18 @@ Tasks
         sync_data = {
             "rst_updates": [
                 (SyncAction.UPDATE, rst_file_rel, "TASK-001", {"id": "TASK-001", "status": "done"}),
-                (SyncAction.UPDATE, rst_file_rel, "TASK-002", {"id": "TASK-002", "status": "in_progress"}),
-                (SyncAction.UPDATE, rst_file_rel, "TASK-003", {"id": "TASK-003", "priority": "high"}),
+                (
+                    SyncAction.UPDATE,
+                    rst_file_rel,
+                    "TASK-002",
+                    {"id": "TASK-002", "status": "in_progress"},
+                ),
+                (
+                    SyncAction.UPDATE,
+                    rst_file_rel,
+                    "TASK-003",
+                    {"id": "TASK-003", "priority": "high"},
+                ),
             ]
         }
 
@@ -306,7 +316,12 @@ Tasks
         sync_data = {
             "rst_updates": [
                 (SyncAction.UPDATE, rst_file_rel, "TASK-001", {"id": "TASK-001", "status": "done"}),
-                (SyncAction.UPDATE, rst_file_rel, "NONEXISTENT", {"id": "NONEXISTENT", "status": "done"}),
+                (
+                    SyncAction.UPDATE,
+                    rst_file_rel,
+                    "NONEXISTENT",
+                    {"id": "NONEXISTENT", "status": "done"},
+                ),
                 (SyncAction.UPDATE, rst_file_rel, "TASK-003", {"id": "TASK-003", "status": "done"}),
             ]
         }
@@ -318,10 +333,10 @@ Tasks
         content = rst_file_with_tasks.read_text()
         # Check TASK-001 and TASK-003 are both updated to done
         lines = content.split("\n")
-        
+
         # Find TASK-001 and verify its status
         task1_idx = next(i for i, line in enumerate(lines) if "TASK-001" in line)
-        task1_section = "\n".join(lines[task1_idx:task1_idx+5])
+        task1_section = "\n".join(lines[task1_idx : task1_idx + 5])
         assert ":status: done" in task1_section or "done" in task1_section
 
     def test_content_unchanged_does_not_trigger_write(
@@ -345,8 +360,18 @@ Tasks
         # Queue updates for non-existent tasks (content won't change)
         sync_data = {
             "rst_updates": [
-                (SyncAction.UPDATE, rst_file_rel, "NONEXISTENT-1", {"id": "NONEXISTENT-1", "status": "done"}),
-                (SyncAction.UPDATE, rst_file_rel, "NONEXISTENT-2", {"id": "NONEXISTENT-2", "status": "done"}),
+                (
+                    SyncAction.UPDATE,
+                    rst_file_rel,
+                    "NONEXISTENT-1",
+                    {"id": "NONEXISTENT-1", "status": "done"},
+                ),
+                (
+                    SyncAction.UPDATE,
+                    rst_file_rel,
+                    "NONEXISTENT-2",
+                    {"id": "NONEXISTENT-2", "status": "done"},
+                ),
             ]
         }
 
@@ -400,7 +425,12 @@ Tasks
         sync_data = {
             "rst_updates": [
                 (SyncAction.UPDATE, "tasks.rst", "TASK-001", {"id": "TASK-001", "status": "done"}),
-                (SyncAction.CREATE, "tasks.rst", "TASK-002", {"id": "TASK-002", "title": "New Task", "status": "open"}),
+                (
+                    SyncAction.CREATE,
+                    "tasks.rst",
+                    "TASK-002",
+                    {"id": "TASK-002", "title": "New Task", "status": "open"},
+                ),
             ]
         }
 
@@ -440,3 +470,87 @@ Tasks
         assert "TASK-002" not in content
         # TASK-003 should still be present (unchanged)
         assert "TASK-003" in content
+
+
+class TestBareDirectiveBatchOrdering:
+    """Regression: a batch of UPDATEs on *bare* directives must not corrupt.
+
+    Several bare ``.. doto::`` directives (no ``:id:``) in one file each get an
+    UPDATE carrying the task's auto-generated id plus the ORIGINAL line number.
+    Applying them top-to-bottom shifts every later directive down as the first
+    gains an injected ``:id:``, so the stale line numbers of later updates miss
+    (silent no-op) or hit the wrong directive (duplicate ``:id:`` / consumed
+    blank line between directives). The fix applies line-based updates
+    bottom-to-top so earlier line numbers stay valid, and guards id injection
+    with an authoritative whole-file id lookup.
+    """
+
+    def _run(self, tmp_path: Path, rst_text: str, updates: list) -> str:
+        from doxtr_doto.sync import _process_file_updates
+
+        rst = tmp_path / "tasks.rst"
+        rst.write_text(rst_text)
+        app = MagicMock()
+        app.srcdir = str(tmp_path)
+        app.env = None  # force the raw-path branch (no doc2path)
+        logger = MagicMock()
+        _process_file_updates(app, "tasks.rst", updates, logger)
+        return rst.read_text()
+
+    def test_batch_update_bare_directives_no_corruption(self, tmp_path: Path):
+        rst_text = (
+            ".. doto:: First task\n"
+            "   :assignee: alice\n"
+            "\n"
+            ".. doto:: Second task\n"
+            "   :assignee: bob\n"
+            "\n"
+            ".. doto:: Third task\n"
+            "   :assignee: carol\n"
+        )
+        # Original header lines: 1, 4, 7.
+        updates = [
+            (SyncAction.UPDATE, "noter-L1", {"id": "noter-L1", "status": "done", "_rst_line": 1}),
+            (SyncAction.UPDATE, "noter-L4", {"id": "noter-L4", "status": "done", "_rst_line": 4}),
+            (SyncAction.UPDATE, "noter-L7", {"id": "noter-L7", "status": "done", "_rst_line": 7}),
+        ]
+        out = self._run(tmp_path, rst_text, updates)
+
+        # (a) No duplicate :id: on any directive.
+        for n in (1, 4, 7):
+            assert out.count(f":id: noter-L{n}") == 1, f"L{n} id count\n{out}"
+        # (b) All three directives were actually updated.
+        assert out.count(":status: done") == 3, out
+        # (c) Each directive got exactly its own id (bottom-up kept lines valid).
+        assert ":id: noter-L1" in out
+        assert ":id: noter-L4" in out
+        assert ":id: noter-L7" in out
+        # (d) The blank lines separating directives are preserved: three
+        #     directive headers remain, none run together. Each header must
+        #     start a line (either at the very start or after a newline), so
+        #     no directive is concatenated onto a prior option line.
+        assert out.count(".. doto::") == 3
+        headers = [ln for ln in out.splitlines() if ln.startswith(".. doto::")]
+        assert len(headers) == 3, out
+        # A blank line precedes each directive after the first.
+        assert out.count("\n\n.. doto::") == 2, out
+
+    def test_batch_update_already_has_ids_no_duplicate(self, tmp_path: Path):
+        """If ids are already present, a line-carrying UPDATE must not re-add."""
+        rst_text = (
+            ".. doto:: First\n"
+            "   :id: noter-L1\n"
+            "   :status: open\n"
+            "\n"
+            ".. doto:: Second\n"
+            "   :id: noter-L5\n"
+            "   :status: open\n"
+        )
+        updates = [
+            (SyncAction.UPDATE, "noter-L1", {"id": "noter-L1", "status": "done", "_rst_line": 1}),
+            (SyncAction.UPDATE, "noter-L5", {"id": "noter-L5", "status": "done", "_rst_line": 5}),
+        ]
+        out = self._run(tmp_path, rst_text, updates)
+        assert out.count(":id: noter-L1") == 1
+        assert out.count(":id: noter-L5") == 1
+        assert out.count(":status: done") == 2

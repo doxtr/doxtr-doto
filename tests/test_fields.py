@@ -11,11 +11,11 @@ from doxtr_doto.fields import (
     COLUMN_LABELS,
     DISPLAY_COLUMNS,
     FIELD_NAME_TO_RST,
-    FieldDefinition,
     MERGE_FIELDS,
     SERIALIZABLE_FIELDS,
     TASK_FIELDS,
     VALID_COLUMNS,
+    FieldDefinition,
 )
 
 
@@ -282,12 +282,13 @@ class TestFieldRegistryIntegration:
     def test_merge_fields_import_from_merge_module(self) -> None:
         """sync/merge.py should successfully import MERGE_FIELDS."""
         from doxtr_doto.sync.merge import MERGE_FIELDS as imported_merge_fields
+
         assert imported_merge_fields == MERGE_FIELDS
 
     def test_adding_field_propagates_to_merge_fields(self) -> None:
         """
         Verify that a new mergeable field in TASK_FIELDS would appear in MERGE_FIELDS.
-        
+
         This test verifies the design: if we added a new mergeable field to TASK_FIELDS,
         it would automatically be included in MERGE_FIELDS.
         """
@@ -308,21 +309,22 @@ class TestDotoTaskFieldConsistency:
 
     def test_task_fields_match_dototask_attributes(self) -> None:
         """Verify that field names in TASK_FIELDS exist as DotoTask attributes.
-        
+
         This test catches drift between the registry and the dataclass.
         Note: 'progress' is intentionally in the registry but not yet in DotoTask
         (will be added in Phase 3.3).
         """
         from dataclasses import fields as dataclass_fields
+
         from doxtr_doto.collectors import DotoTask
-        
+
         # Get all attribute names from DotoTask dataclass
         dototask_attrs = {f.name for f in dataclass_fields(DotoTask)}
-        
+
         # Fields that are intentionally in registry but not yet in DotoTask
         # (will be added in future phases)
         pending_fields = {"progress"}  # Phase 3.3
-        
+
         # Check each field in the registry
         for field in TASK_FIELDS:
             if field.name in pending_fields:
@@ -335,19 +337,27 @@ class TestDotoTaskFieldConsistency:
 
     def test_core_dototask_fields_in_registry(self) -> None:
         """Verify that core DotoTask fields are present in the registry.
-        
+
         This is the reverse check: ensure important DotoTask attributes
         are registered in TASK_FIELDS.
         """
         # Core fields that must be in the registry
         # (excludes internal/metadata fields like docname, lineno, content_nodes, etc.)
         core_fields = {
-            "title", "assignee", "priority", "status", "due",
-            "tags", "depends_on", "body", "created", "updated"
+            "title",
+            "assignee",
+            "priority",
+            "status",
+            "due",
+            "tags",
+            "depends_on",
+            "body",
+            "created",
+            "updated",
         }
-        
+
         registry_field_names = {f.name for f in TASK_FIELDS}
-        
+
         for field_name in core_fields:
             assert field_name in registry_field_names, (
                 f"Core DotoTask field '{field_name}' is missing from TASK_FIELDS registry"
@@ -379,17 +389,18 @@ class TestInvalidColumnValidation:
 
     def test_column_validation_pattern(self) -> None:
         """Demonstrate the pattern for validating columns in directives.
-        
+
         This shows how code should validate columns against VALID_COLUMNS,
         which is the pattern used in doto-list directive.
         """
+
         def validate_columns(columns: list[str]) -> list[str]:
             """Validate column names and return list of invalid ones."""
             return [col for col in columns if col not in VALID_COLUMNS]
-        
+
         # Valid columns should pass
         assert validate_columns(["id", "title", "status"]) == []
-        
+
         # Invalid columns should be detected
         invalid = validate_columns(["id", "invalid", "title", "foo"])
         assert "invalid" in invalid
@@ -399,19 +410,19 @@ class TestInvalidColumnValidation:
 
     def test_directive_would_raise_on_invalid_column(self) -> None:
         """Test that the doto-list directive validation pattern works.
-        
+
         This simulates the validation logic that should be used in the
         doto-list directive when processing :columns: option.
         """
         # Simulate directive column validation
         requested_columns = ["id", "title", "invalid_column", "status"]
-        
+
         invalid_columns = [col for col in requested_columns if col not in VALID_COLUMNS]
-        
+
         assert invalid_columns == ["invalid_column"], (
             "Validation should detect 'invalid_column' as invalid"
         )
-        
+
         # This is the error message pattern the directive should use
         if invalid_columns:
             error_msg = (

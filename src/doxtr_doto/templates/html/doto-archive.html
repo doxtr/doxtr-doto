@@ -1,0 +1,50 @@
+{# doto-archive.html - Template for the archived-task page listing #}
+{#
+  Context variables:
+    - rows:  List of archived-task dicts, each with:
+               id, title, status, assignee, priority,
+               archived_on, original_page, body
+    - total: Number of archived tasks (len of rows)
+
+  Rendered by the doto-archive directive from the JSON task store. A child
+  theme can override this by placing its own copy at
+  _doto/templates/html/doto-archive.html in the project source tree.
+#}
+<div class="doto-archive">
+  <p class="doto-archive-total"><strong>Total archived tasks:</strong> {{ total }}</p>
+  {%- if rows %}
+  <table class="doto-archive-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Title</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Assignee</th>
+        <th>Archived</th>
+        <th>Original page</th>
+      </tr>
+    </thead>
+    <tbody>
+      {%- for row in rows %}
+      <tr class="doto-archive-row doto-priority-{{ row.priority }} doto-status-{{ row.status }}">
+        <td class="doto-archive-id">{{ row.id }}</td>
+        <td class="doto-archive-title">{{ row.title }}</td>
+        <td class="doto-archive-status">{{ row.status }}</td>
+        <td class="doto-archive-priority">{{ row.priority }}</td>
+        <td class="doto-archive-assignee">{{ row.assignee }}</td>
+        <td class="doto-archive-date">{{ row.archived_on }}</td>
+        <td class="doto-archive-page">{{ row.original_page }}</td>
+      </tr>
+      {%- if row.body %}
+      <tr class="doto-archive-body-row">
+        <td class="doto-archive-body" colspan="7">{{ row.body }}</td>
+      </tr>
+      {%- endif %}
+      {%- endfor %}
+    </tbody>
+  </table>
+  {%- else %}
+  <p class="doto-archive-empty"><em>No archived tasks.</em></p>
+  {%- endif %}
+</div>

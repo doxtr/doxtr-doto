@@ -9,7 +9,9 @@ Provides proper domain-based cross-referencing for tasks, enabling:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterable
+from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from docutils import nodes
 from sphinx.domains import Domain, ObjType
@@ -17,18 +19,20 @@ from sphinx.roles import XRefRole
 from sphinx.util.nodes import make_refnode
 
 if TYPE_CHECKING:
+    from docutils.parsers.rst import Directive
     from sphinx.addnodes import pending_xref
     from sphinx.application import Sphinx
     from sphinx.builders import Builder
     from sphinx.environment import BuildEnvironment
+    from sphinx.util.typing import RoleFunction
 
 
 class DotoXRefRole(XRefRole):
     """Cross-reference role for doto tasks.
-    
+
     Handles the `:doto:task:` role syntax for referencing tasks.
     """
-    
+
     def process_link(
         self,
         env: BuildEnvironment,
@@ -38,14 +42,14 @@ class DotoXRefRole(XRefRole):
         target: str,
     ) -> tuple[str, str]:
         """Process the link target and title.
-        
+
         Args:
             env: Build environment.
             refnode: The reference node being built.
             has_explicit_title: Whether an explicit title was provided.
             title: The display title.
             target: The reference target (task ID).
-            
+
         Returns:
             Tuple of (title, target) after processing.
         """
@@ -57,38 +61,39 @@ class DotoXRefRole(XRefRole):
 
 class DotoDomain(Domain):
     """Sphinx domain for doto task management.
-    
+
     Registers tasks and provides cross-reference resolution for task IDs.
     """
-    
+
     name = "doto"
     label = "Doto Tasks"
-    
+
     object_types = {
         "task": ObjType("task", "task"),
     }
-    
-    directives: dict[str, Any] = {
+
+    directives: ClassVar[dict[str, type[Directive]]] = {
         # Tasks are registered via the doto directive, not domain directive
     }
-    
-    roles = {
+
+    roles: ClassVar[dict[str, RoleFunction | XRefRole]] = {
         "task": DotoXRefRole(),
     }
-    
-    initial_data: dict[str, Any] = {
+
+    initial_data: ClassVar[dict[str, Any]] = {
         "tasks": {},  # task_id -> (docname, lineno, title)
     }
-    
+
     @property
     def tasks(self) -> dict[str, tuple[str, int, str]]:
         """Return task registry.
-        
+
         Returns:
             Dictionary mapping task_id to (docname, lineno, title).
         """
-        return self.data.setdefault("tasks", {})
-    
+        tasks: dict[str, tuple[str, int, str]] = self.data.setdefault("tasks", {})
+        return tasks
+
     def note_task(
         self,
         task_id: str,
@@ -97,7 +102,7 @@ class DotoDomain(Domain):
         title: str,
     ) -> None:
         """Register a task in the domain.
-        
+
         Args:
             task_id: Unique task identifier.
             docname: Document containing the task.
@@ -105,29 +110,26 @@ class DotoDomain(Domain):
             title: Task title.
         """
         self.tasks[task_id] = (docname, lineno, title)
-    
+
     def clear_doc(self, docname: str) -> None:
         """Clear tasks from a document.
-        
+
         Called when a document is being re-read.
-        
+
         Args:
             docname: Document name being cleared.
         """
-        to_remove = [
-            task_id for task_id, (doc, _, _) in self.tasks.items()
-            if doc == docname
-        ]
+        to_remove = [task_id for task_id, (doc, _, _) in self.tasks.items() if doc == docname]
         for task_id in to_remove:
             del self.tasks[task_id]
-    
+
     def merge_domaindata(
         self,
-        docnames: list[str],
+        docnames: AbstractSet[str],
         otherdata: dict[str, Any],
     ) -> None:
         """Merge domain data from parallel builds.
-        
+
         Args:
             docnames: List of document names from the other build.
             otherdata: Domain data from the other build.
@@ -135,7 +137,7 @@ class DotoDomain(Domain):
         for task_id, (docname, lineno, title) in otherdata.get("tasks", {}).items():
             if docname in docnames:
                 self.tasks[task_id] = (docname, lineno, title)
-    
+
     def resolve_xref(
         self,
         env: BuildEnvironment,
@@ -147,7 +149,7 @@ class DotoDomain(Domain):
         contnode: nodes.Element,
     ) -> nodes.reference | None:
         """Resolve a cross-reference to a task.
-        
+
         Args:
             env: Build environment.
             fromdocname: Document containing the reference.
@@ -156,18 +158,16 @@ class DotoDomain(Domain):
             target: Target task ID.
             node: The pending_xref node.
             contnode: The content node to wrap.
-            
+
         Returns:
             Resolved reference node or None if not found.
         """
         if target not in self.tasks:
             # Try to resolve from collector as fallback
-            return self._resolve_from_collector(
-                env, fromdocname, builder, target, contnode
-            )
-        
+            return self._resolve_from_collector(env, fromdocname, builder, target, contnode)
+
         docname, lineno, title = self.tasks[target]
-        
+
         return make_refnode(
             builder,
             fromdocname,
@@ -176,7 +176,7 @@ class DotoDomain(Domain):
             contnode,
             title=f"{target}: {title}",
         )
-    
+
     def _resolve_from_collector(
         self,
         env: BuildEnvironment,
@@ -186,29 +186,29 @@ class DotoDomain(Domain):
         contnode: nodes.Element,
     ) -> nodes.reference | None:
         """Resolve reference from collector data as fallback.
-        
+
         This handles tasks that were registered via the collector but not
         yet registered with the domain (e.g., during initial setup).
-        
+
         Args:
             env: Build environment.
             fromdocname: Document containing the reference.
             builder: The active builder.
             target: Target task ID.
             contnode: The content node to wrap.
-            
+
         Returns:
             Resolved reference node or None if not found.
         """
         from doxtr_doto.collectors import get_doto_env
-        
+
         doto_env = get_doto_env(env)
-        
+
         if target not in doto_env.all_tasks:
             return None
-        
+
         task = doto_env.all_tasks[target]
-        
+
         if task.docname is None:
             # Task has no document (JSON-only, possibly archived)
             # Create a broken reference
@@ -221,7 +221,7 @@ class DotoDomain(Domain):
             )
             ref_node += contnode
             return ref_node
-        
+
         return make_refnode(
             builder,
             fromdocname,
@@ -230,7 +230,7 @@ class DotoDomain(Domain):
             contnode,
             title=f"{target}: {task.title}",
         )
-    
+
     def resolve_any_xref(
         self,
         env: BuildEnvironment,
@@ -241,7 +241,7 @@ class DotoDomain(Domain):
         contnode: nodes.Element,
     ) -> list[tuple[str, nodes.reference]]:
         """Resolve any cross-reference (for :any: role).
-        
+
         Args:
             env: Build environment.
             fromdocname: Document containing the reference.
@@ -249,42 +249,40 @@ class DotoDomain(Domain):
             target: Target to resolve.
             node: The pending_xref node.
             contnode: The content node to wrap.
-            
+
         Returns:
             List of (domain:type, reference_node) tuples.
         """
-        refnode = self.resolve_xref(
-            env, fromdocname, builder, "task", target, node, contnode
-        )
+        refnode = self.resolve_xref(env, fromdocname, builder, "task", target, node, contnode)
         if refnode is None:
             return []
-        
+
         return [("doto:task", refnode)]
-    
+
     def get_objects(self) -> Iterable[tuple[str, str, str, str, str, int]]:
         """Return all tasks for the objects inventory.
-        
+
         Used by intersphinx and the search index.
-        
+
         Yields:
             Tuples of (name, dispname, type, docname, anchor, priority).
         """
-        for task_id, (docname, lineno, title) in self.tasks.items():
+        for task_id, (docname, _lineno, title) in self.tasks.items():
             yield (
-                task_id,      # name
-                title,        # dispname
-                "task",       # type
-                docname,      # docname
-                task_id,      # anchor
-                1,            # priority (1 = default)
+                task_id,  # name
+                title,  # dispname
+                "task",  # type
+                docname,  # docname
+                task_id,  # anchor
+                1,  # priority (1 = default)
             )
-    
+
     def get_full_qualified_name(self, node: nodes.Element) -> str | None:
         """Return fully qualified name for a node.
-        
+
         Args:
             node: The node to get the name for.
-            
+
         Returns:
             Fully qualified name or None.
         """
@@ -296,15 +294,15 @@ class DotoDomain(Domain):
 
 def setup(app: Sphinx) -> dict[str, Any]:
     """Set up the doto domain.
-    
+
     Args:
         app: Sphinx application instance.
-        
+
     Returns:
         Extension metadata.
     """
     app.add_domain(DotoDomain)
-    
+
     return {
         "version": "0.1.0",
         "parallel_read_safe": True,

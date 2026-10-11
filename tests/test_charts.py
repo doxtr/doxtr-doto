@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestGenerateBarChart:
     """Test the bar chart generation."""
@@ -11,14 +9,14 @@ class TestGenerateBarChart:
     def test_empty_data_returns_empty_string(self):
         """Empty data should return empty string."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         result = generate_bar_chart({}, "Test Chart")
         assert result == ""
 
     def test_single_bar(self):
         """Single data point creates one bar."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         result = generate_bar_chart({"open": 5}, "Status")
         assert "<svg" in result
         assert "<rect" in result
@@ -28,10 +26,10 @@ class TestGenerateBarChart:
     def test_multiple_bars(self):
         """Multiple data points create multiple bars."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         data = {"open": 3, "done": 7, "blocked": 2}
         result = generate_bar_chart(data, "Status")
-        
+
         assert result.count("<rect") == 3
         assert "open" in result
         assert "done" in result
@@ -40,24 +38,24 @@ class TestGenerateBarChart:
     def test_title_in_svg(self):
         """Title appears in SVG."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         result = generate_bar_chart({"test": 1}, "My Chart Title")
         assert "My Chart Title" in result
 
     def test_custom_colors(self):
         """Custom color map is applied."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         color_map = {"high": "#ff0000", "low": "#00ff00"}
         result = generate_bar_chart({"high": 5, "low": 3}, "Priority", color_map=color_map)
-        
+
         assert "#ff0000" in result
         assert "#00ff00" in result
 
     def test_zero_max_value(self):
         """Handles case where all values are zero."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         result = generate_bar_chart({"open": 0, "done": 0}, "Status")
         # Should not crash, bars should have zero height
         assert "<svg" in result
@@ -65,7 +63,7 @@ class TestGenerateBarChart:
     def test_xml_special_chars_escaped(self):
         """Special XML characters are escaped."""
         from doxtr_doto.charts import generate_bar_chart
-        
+
         result = generate_bar_chart({"<test>": 5, "a&b": 3}, "Title")
         assert "&lt;" in result
         assert "&gt;" in result
@@ -78,7 +76,7 @@ class TestGenerateStatusChart:
     def test_status_chart_counts_correctly(self):
         """Status chart counts tasks by status."""
         from doxtr_doto.charts import generate_status_chart
-        
+
         tasks = [
             {"status": "open"},
             {"status": "open"},
@@ -86,7 +84,7 @@ class TestGenerateStatusChart:
             {"status": "blocked"},
         ]
         result = generate_status_chart(tasks, "Task Status")
-        
+
         assert "open" in result.lower()
         assert "done" in result.lower()
         assert "blocked" in result.lower()
@@ -94,7 +92,7 @@ class TestGenerateStatusChart:
     def test_status_chart_empty_tasks(self):
         """Empty task list returns empty string."""
         from doxtr_doto.charts import generate_status_chart
-        
+
         result = generate_status_chart([], "Status")
         assert result == ""
 
@@ -105,7 +103,7 @@ class TestGeneratePriorityChart:
     def test_priority_chart_counts_correctly(self):
         """Priority chart counts tasks by priority."""
         from doxtr_doto.charts import generate_priority_chart
-        
+
         tasks = [
             {"priority": "high"},
             {"priority": "high"},
@@ -113,7 +111,7 @@ class TestGeneratePriorityChart:
             {"priority": "critical"},
         ]
         result = generate_priority_chart(tasks, "Priority Distribution")
-        
+
         assert "high" in result.lower()
         assert "low" in result.lower()
         assert "critical" in result.lower()
@@ -125,7 +123,7 @@ class TestGenerateAssigneeChart:
     def test_assignee_chart_groups_by_assignee(self):
         """Assignee chart groups tasks by assignee."""
         from doxtr_doto.charts import generate_assignee_chart
-        
+
         tasks = [
             {"assignee": "alice"},
             {"assignee": "alice"},
@@ -133,7 +131,7 @@ class TestGenerateAssigneeChart:
             {"assignee": None},
         ]
         result = generate_assignee_chart(tasks, "By Assignee")
-        
+
         assert "alice" in result.lower()
         assert "bob" in result.lower()
         # Unassigned tasks should be labeled
@@ -146,7 +144,7 @@ class TestGenerateTagsChart:
     def test_tags_chart_counts_by_tag(self):
         """Tags chart counts tasks by each tag."""
         from doxtr_doto.charts import generate_tags_chart
-        
+
         tasks = [
             {"tags": ["security", "backend"]},
             {"tags": ["security"]},
@@ -154,7 +152,7 @@ class TestGenerateTagsChart:
             {"tags": []},
         ]
         result = generate_tags_chart(tasks, "Tags")
-        
+
         assert "security" in result.lower()
         assert "frontend" in result.lower()
         assert "backend" in result.lower()
@@ -166,13 +164,13 @@ class TestGenerateSummaryCharts:
     def test_summary_charts_multiple_groups(self):
         """Summary charts generates charts for each group."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [
             {"status": "open", "priority": "high"},
             {"status": "done", "priority": "low"},
         ]
         result = generate_summary_charts(tasks, ["status", "priority"])
-        
+
         # Should contain both charts
         assert "status" in result.lower()
         assert "priority" in result.lower()
@@ -180,51 +178,52 @@ class TestGenerateSummaryCharts:
     def test_summary_charts_empty_tasks(self):
         """Empty tasks returns empty string."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         result = generate_summary_charts([], ["status"])
         assert result == ""
 
     def test_summary_charts_bar_type_default(self):
         """Bar chart is the default chart type."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"status": "open"}]
         result = generate_summary_charts(tasks, ["status"])
-        
+
         assert "doto-bar-chart" in result
 
     def test_summary_charts_pie_type(self):
         """Pie chart type generates pie charts."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"status": "open"}, {"status": "done"}]
         result = generate_summary_charts(tasks, ["status"], chart_type="pie")
-        
+
         assert "doto-pie-chart" in result
 
     def test_summary_charts_burndown_type(self):
         """Burndown chart type generates burndown chart."""
-        from doxtr_doto.charts import generate_summary_charts
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_summary_charts
+
         today = date.today()
         yesterday = today - timedelta(days=1)
-        
+
         tasks = [
             {"status": "open", "created": yesterday.isoformat()},
             {"status": "done", "created": yesterday.isoformat(), "updated": today.isoformat()},
         ]
         result = generate_summary_charts(tasks, ["status"], chart_type="burndown")
-        
+
         assert "doto-burndown-chart" in result
 
     def test_summary_charts_burndown_fallback_to_bar(self):
         """Burndown falls back to bar if no date data."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"status": "open"}, {"status": "done"}]  # No dates
         result = generate_summary_charts(tasks, ["status"], chart_type="burndown")
-        
+
         # Should fall back to bar chart
         assert "doto-bar-chart" in result or "doto-chart" in result
 
@@ -235,10 +234,10 @@ class TestGeneratePieChart:
     def test_generates_svg(self):
         """Pie chart generates valid SVG."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         data = {"open": 5, "done": 3}
         result = generate_pie_chart(data, "Tasks by Status")
-        
+
         assert "<svg" in result
         assert "</svg>" in result
         assert "doto-pie-chart" in result
@@ -246,28 +245,28 @@ class TestGeneratePieChart:
     def test_empty_data_returns_empty_string(self):
         """Empty data returns empty string."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({}, "Empty Chart")
         assert result == ""
 
     def test_zero_total_returns_empty_string(self):
         """All zero values returns empty string."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({"open": 0, "done": 0}, "Zero Chart")
         assert result == ""
 
     def test_title_in_svg(self):
         """Title appears in SVG."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({"test": 5}, "My Pie Title")
         assert "My Pie Title" in result
 
     def test_escapes_labels(self):
         """Special characters in labels are escaped."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({"<script>": 5, "a&b": 3}, "XSS Test")
         assert "&lt;" in result
         assert "&gt;" in result
@@ -277,7 +276,7 @@ class TestGeneratePieChart:
     def test_handles_single_item(self):
         """Single item (100%) renders as full circle."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({"only": 10}, "Single Slice")
         # Should use circle element for 100%
         assert "<circle" in result or "<path" in result
@@ -286,17 +285,17 @@ class TestGeneratePieChart:
     def test_custom_color_map(self):
         """Custom color map is applied."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         color_map = {"high": "#ff0000", "low": "#00ff00"}
         result = generate_pie_chart({"high": 5, "low": 3}, "Priority", color_map=color_map)
-        
+
         assert "#ff0000" in result
         assert "#00ff00" in result
 
     def test_percentages_in_legend(self):
         """Percentages appear in legend."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         result = generate_pie_chart({"a": 75, "b": 25}, "Percentages")
         assert "75%" in result
         assert "25%" in result
@@ -304,10 +303,10 @@ class TestGeneratePieChart:
     def test_multiple_slices(self):
         """Multiple slices render correctly."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         data = {"open": 3, "done": 5, "blocked": 2}
         result = generate_pie_chart(data, "Multi-slice")
-        
+
         # Should have path elements for slices
         assert "<path" in result or "<circle" in result
         assert "open" in result.lower()
@@ -317,10 +316,10 @@ class TestGeneratePieChart:
     def test_skips_zero_values(self):
         """Zero values don't create slices."""
         from doxtr_doto.charts import generate_pie_chart
-        
+
         data = {"open": 5, "done": 0, "blocked": 3}
         result = generate_pie_chart(data, "With Zero")
-        
+
         # Should still render
         assert "<svg" in result
         # Zero items still appear in legend
@@ -332,18 +331,19 @@ class TestGenerateBurndownChart:
 
     def test_generates_svg_with_dated_tasks(self):
         """Burndown chart generates valid SVG with dated tasks."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [
             {"status": "open", "created": week_ago.isoformat()},
             {"status": "done", "created": week_ago.isoformat(), "updated": today.isoformat()},
         ]
         result = generate_burndown_chart(tasks, "Burndown")
-        
+
         assert "<svg" in result
         assert "</svg>" in result
         assert "doto-burndown-chart" in result
@@ -351,7 +351,7 @@ class TestGenerateBurndownChart:
     def test_returns_empty_for_undated_tasks(self):
         """Returns empty string when no tasks have dates."""
         from doxtr_doto.charts import generate_burndown_chart
-        
+
         tasks = [
             {"status": "open"},
             {"status": "done"},
@@ -361,9 +361,10 @@ class TestGenerateBurndownChart:
 
     def test_returns_empty_for_single_day(self):
         """Returns empty string when all tasks are same day."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today().isoformat()
         tasks = [
             {"status": "open", "created": today},
@@ -375,27 +376,29 @@ class TestGenerateBurndownChart:
 
     def test_title_in_svg(self):
         """Title appears in SVG."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [{"status": "open", "created": week_ago.isoformat()}]
         result = generate_burndown_chart(tasks, "Sprint Burndown")
-        
+
         assert "Sprint Burndown" in result
 
     def test_counts_correctly_over_time(self):
         """Burndown calculates remaining tasks correctly."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         day1 = today - timedelta(days=5)
         day3 = today - timedelta(days=3)
         day5 = today - timedelta(days=1)
-        
+
         tasks = [
             # Task created day 1, still open
             {"status": "open", "created": day1.isoformat()},
@@ -405,7 +408,7 @@ class TestGenerateBurndownChart:
             {"status": "done", "created": day3.isoformat(), "updated": day5.isoformat()},
         ]
         result = generate_burndown_chart(tasks, "Test Burndown")
-        
+
         # Should have generated a valid chart
         assert "<svg" in result
         assert "<path" in result
@@ -413,56 +416,60 @@ class TestGenerateBurndownChart:
 
     def test_has_axes(self):
         """Burndown chart has axis lines."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [{"status": "open", "created": week_ago.isoformat()}]
         result = generate_burndown_chart(tasks)
-        
+
         # Should have axis lines
         assert "<line" in result
 
     def test_has_date_labels(self):
         """Burndown chart has date labels on x-axis."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [{"status": "open", "created": week_ago.isoformat()}]
         result = generate_burndown_chart(tasks)
-        
+
         # Should have ISO date format labels
         assert week_ago.isoformat() in result
 
     def test_handles_datetime_objects(self):
         """Burndown handles datetime objects as dates."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import datetime, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         now = datetime.now()
         week_ago = now - timedelta(days=7)
-        
+
         tasks = [{"status": "open", "created": week_ago}]
         result = generate_burndown_chart(tasks)
-        
+
         assert "<svg" in result
 
     def test_handles_date_objects(self):
         """Burndown handles date objects directly."""
-        from doxtr_doto.charts import generate_burndown_chart
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_burndown_chart
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [{"status": "open", "created": week_ago}]  # date object, not string
         result = generate_burndown_chart(tasks)
-        
+
         assert "<svg" in result
 
 
@@ -472,64 +479,65 @@ class TestChartTypeRouting:
     def test_bar_chart_selected_by_default(self):
         """Bar chart is selected when no chart_type specified."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"status": "open"}, {"status": "done"}]
         result = generate_summary_charts(tasks, ["status"])
-        
+
         assert "doto-bar-chart" in result
 
     def test_pie_chart_selected_when_requested(self):
         """Pie chart is selected when chart_type=pie."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"status": "open"}, {"status": "done"}]
         result = generate_summary_charts(tasks, ["status"], chart_type="pie")
-        
+
         assert "doto-pie-chart" in result
 
     def test_burndown_chart_selected_when_requested(self):
         """Burndown chart is selected when chart_type=burndown."""
-        from doxtr_doto.charts import generate_summary_charts
         from datetime import date, timedelta
-        
+
+        from doxtr_doto.charts import generate_summary_charts
+
         today = date.today()
         week_ago = today - timedelta(days=7)
-        
+
         tasks = [
             {"status": "open", "created": week_ago.isoformat()},
             {"status": "done", "created": week_ago.isoformat(), "updated": today.isoformat()},
         ]
         result = generate_summary_charts(tasks, ["status"], chart_type="burndown")
-        
+
         assert "doto-burndown-chart" in result
 
     def test_pie_chart_for_priority(self):
         """Pie chart works for priority grouping."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"priority": "high"}, {"priority": "low"}]
         result = generate_summary_charts(tasks, ["priority"], chart_type="pie")
-        
+
         assert "doto-pie-chart" in result
         assert "Priority" in result
 
     def test_pie_chart_for_assignee(self):
         """Pie chart works for assignee grouping."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"assignee": "alice"}, {"assignee": "bob"}]
         result = generate_summary_charts(tasks, ["assignee"], chart_type="pie")
-        
+
         assert "doto-pie-chart" in result
         assert "Assignee" in result
 
     def test_pie_chart_for_tags(self):
         """Pie chart works for tags grouping."""
         from doxtr_doto.charts import generate_summary_charts
-        
+
         tasks = [{"tags": ["bug"]}, {"tags": ["feature"]}]
         result = generate_summary_charts(tasks, ["tags"], chart_type="pie")
-        
+
         assert "doto-pie-chart" in result
         assert "Tag" in result
 
@@ -632,13 +640,18 @@ class TestPlotlyFigure:
 
         if not plotly_available():
             import pytest as _pytest
+
             _pytest.skip("plotly not installed")
 
         tasks = [
-            {"id": "A-1", "status": "open", "priority": "high",
-             "created": "2024-01-01"},
-            {"id": "A-2", "status": "done", "priority": "low",
-             "created": "2024-01-02", "updated": "2024-01-05"},
+            {"id": "A-1", "status": "open", "priority": "high", "created": "2024-01-01"},
+            {
+                "id": "A-2",
+                "status": "done",
+                "priority": "low",
+                "created": "2024-01-02",
+                "updated": "2024-01-05",
+            },
         ]
         for ct in ("pie", "bar", "stacked-bar", "progress"):
             fig = _plotly_figure(tasks, ["status"], ct)
@@ -649,6 +662,7 @@ class TestPlotlyFigure:
 
         if not plotly_available():
             import pytest as _pytest
+
             _pytest.skip("plotly not installed")
 
         # No created dates -> insufficient data -> None (SVG fallback).
@@ -657,16 +671,15 @@ class TestPlotlyFigure:
 
     def test_render_image_when_kaleido_works(self, tmp_path):
         """End-to-end static export, skipped when Chrome/kaleido unavailable."""
-        from doxtr_doto.charts import render_plotly_chart_image, kaleido_available
+        from doxtr_doto.charts import kaleido_available, render_plotly_chart_image
 
         if not kaleido_available():
             import pytest as _pytest
+
             _pytest.skip("kaleido not installed")
 
         tasks = [{"id": "A-1", "status": "open", "priority": "high"}]
-        filename = render_plotly_chart_image(
-            tasks, ["status"], "pie", str(tmp_path)
-        )
+        filename = render_plotly_chart_image(tasks, ["status"], "pie", str(tmp_path))
         # May be None if Chrome is unavailable in this environment; only assert
         # the file exists when a filename was returned.
         if filename is not None:
@@ -692,11 +705,15 @@ class TestChartFilename:
 
         a = _chart_filename(
             [{"id": "A-1", "status": "open", "priority": "high"}],
-            ["status"], "pie", "png",
+            ["status"],
+            "pie",
+            "png",
         )
         b = _chart_filename(
             [{"id": "A-1", "status": "done", "priority": "high"}],
-            ["status"], "pie", "png",
+            ["status"],
+            "pie",
+            "png",
         )
         assert a != b
 
@@ -706,12 +723,15 @@ class TestNativeLatexCharts:
 
     def _tasks(self):
         return [
-            {"id": "T-1", "status": "open", "priority": "high",
-             "assignee": "alice", "tags": ["x"]},
-            {"id": "T-2", "status": "done", "priority": "low",
-             "assignee": "bob", "tags": []},
-            {"id": "T-3", "status": "open", "priority": "high",
-             "assignee": "alice", "tags": ["x", "y"]},
+            {"id": "T-1", "status": "open", "priority": "high", "assignee": "alice", "tags": ["x"]},
+            {"id": "T-2", "status": "done", "priority": "low", "assignee": "bob", "tags": []},
+            {
+                "id": "T-3",
+                "status": "open",
+                "priority": "high",
+                "assignee": "alice",
+                "tags": ["x", "y"],
+            },
         ]
 
     def test_empty_tasks_returns_empty(self):
@@ -745,9 +765,7 @@ class TestNativeLatexCharts:
     def test_stacked_bar_reuses_bar_renderer(self):
         from doxtr_doto.charts import generate_summary_charts_latex
 
-        out = generate_summary_charts_latex(
-            self._tasks(), ["status"], "stacked-bar"
-        )
+        out = generate_summary_charts_latex(self._tasks(), ["status"], "stacked-bar")
         assert "\\dotochartbar" in out
 
     def test_progress_chart(self):
@@ -777,11 +795,13 @@ class TestNativeLatexCharts:
 
         today = date.today()
         tasks = [
-            {"id": "B-1", "status": "open",
-             "created": (today - timedelta(days=5)).isoformat()},
-            {"id": "B-2", "status": "done",
-             "created": (today - timedelta(days=4)).isoformat(),
-             "updated": (today - timedelta(days=1)).isoformat()},
+            {"id": "B-1", "status": "open", "created": (today - timedelta(days=5)).isoformat()},
+            {
+                "id": "B-2",
+                "status": "done",
+                "created": (today - timedelta(days=4)).isoformat(),
+                "updated": (today - timedelta(days=1)).isoformat(),
+            },
         ]
         out = generate_summary_charts_latex(tasks, ["status"], "burndown")
         assert "\\dotochartline{" in out
@@ -835,8 +855,7 @@ class TestBurndownDedup:
 
         today = date.today()
         tasks = [
-            {"id": "B-1", "status": "open",
-             "created": (today - timedelta(days=3)).isoformat()},
+            {"id": "B-1", "status": "open", "created": (today - timedelta(days=3)).isoformat()},
         ]
         raw = _burndown_daily_counts(tasks)
         series = _burndown_series(tasks)
@@ -853,8 +872,7 @@ class TestBurndownDedup:
 
         today = date.today()
         tasks = [
-            {"id": "B-1", "status": None,
-             "created": (today - timedelta(days=3)).isoformat()},
+            {"id": "B-1", "status": None, "created": (today - timedelta(days=3)).isoformat()},
         ]
         # Must not raise AttributeError on None.lower()
         result = _burndown_daily_counts(tasks)

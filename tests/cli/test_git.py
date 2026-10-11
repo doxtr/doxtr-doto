@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -69,11 +68,16 @@ def test_git_link_with_message_and_branch(runner, store_with_task):
     result = runner.invoke(
         cli,
         [
-            "--json", str(store_with_task),
-            "git", "TASK-001",
-            "--commit", "abc123",
-            "--message", "Fix the bug",
-            "--branch", "feature/fix",
+            "--json",
+            str(store_with_task),
+            "git",
+            "TASK-001",
+            "--commit",
+            "abc123",
+            "--message",
+            "Fix the bug",
+            "--branch",
+            "feature/fix",
         ],
     )
     assert result.exit_code == 0
@@ -91,11 +95,16 @@ def test_git_log_shows_linked_commits(runner, store_with_task):
     runner.invoke(
         cli,
         [
-            "--json", str(store_with_task),
-            "git", "TASK-001",
-            "--commit", "abc123def456",
-            "--message", "Initial commit",
-            "--branch", "main",
+            "--json",
+            str(store_with_task),
+            "git",
+            "TASK-001",
+            "--commit",
+            "abc123def456",
+            "--message",
+            "Initial commit",
+            "--branch",
+            "main",
         ],
     )
 
@@ -116,10 +125,14 @@ def test_git_log_json_format(runner, store_with_task):
     runner.invoke(
         cli,
         [
-            "--json", str(store_with_task),
-            "git", "TASK-001",
-            "--commit", "abc123",
-            "--message", "Test",
+            "--json",
+            str(store_with_task),
+            "git",
+            "TASK-001",
+            "--commit",
+            "abc123",
+            "--message",
+            "Test",
         ],
     )
 
@@ -218,9 +231,14 @@ def test_git_auto_detects_head(runner, store_with_task):
     """doto git without --commit uses current HEAD when git is available."""
     with patch("doxtr_doto.cli.commands.git._get_current_commit", return_value="auto123456789"):
         with patch("doxtr_doto.cli.commands.git._get_current_branch", return_value="main"):
-            with patch("doxtr_doto.cli.commands.git._get_commit_message", return_value="Auto message"):
+            with patch(
+                "doxtr_doto.cli.commands.git._get_commit_message", return_value="Auto message"
+            ):
                 with patch("doxtr_doto.cli.commands.git._get_commit_author", return_value="alice"):
-                    with patch("doxtr_doto.cli.commands.git._get_commit_date", return_value="2024-07-26T14:30:45+00:00"):
+                    with patch(
+                        "doxtr_doto.cli.commands.git._get_commit_date",
+                        return_value="2024-07-26T14:30:45+00:00",
+                    ):
                         result = runner.invoke(
                             cli,
                             ["--json", str(store_with_task), "git", "TASK-001"],
@@ -315,9 +333,16 @@ def test_git_link_stores_author_and_date_from_git(runner, store_with_task):
     """doto git stores author and date retrieved from git."""
     with patch("doxtr_doto.cli.commands.git._get_current_commit", return_value="commit789"):
         with patch("doxtr_doto.cli.commands.git._get_current_branch", return_value="feature"):
-            with patch("doxtr_doto.cli.commands.git._get_commit_message", return_value="Feature work"):
-                with patch("doxtr_doto.cli.commands.git._get_commit_author", return_value="charlie"):
-                    with patch("doxtr_doto.cli.commands.git._get_commit_date", return_value="2024-08-15T09:00:00Z"):
+            with patch(
+                "doxtr_doto.cli.commands.git._get_commit_message", return_value="Feature work"
+            ):
+                with patch(
+                    "doxtr_doto.cli.commands.git._get_commit_author", return_value="charlie"
+                ):
+                    with patch(
+                        "doxtr_doto.cli.commands.git._get_commit_date",
+                        return_value="2024-08-15T09:00:00Z",
+                    ):
                         result = runner.invoke(
                             cli,
                             ["--json", str(store_with_task), "git", "TASK-001"],

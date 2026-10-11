@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from doxtr_doto.query import DisplayOptions, TaskFilter
 
 
@@ -187,6 +185,7 @@ class TestDisplayOptions:
             "limit": None,
             "show_archived": False,
             "columns": ["id", "title", "priority", "status"],
+            "visible_tasks": None,
         }
 
     def test_roundtrip_from_dict_to_dict(self) -> None:
@@ -198,6 +197,7 @@ class TestDisplayOptions:
             "limit": 5,
             "show_archived": True,
             "columns": ["id", "title"],
+            "visible_tasks": 5,
         }
         d = DisplayOptions.from_dict(original)
         result = d.to_dict()
@@ -404,8 +404,7 @@ class TestFilterTasksIntegration:
         from doxtr_doto.collectors import DotoTask, filter_tasks
 
         tasks = {
-            f"TASK-{i:03d}": DotoTask(id=f"TASK-{i:03d}", title=f"Task {i}")
-            for i in range(1, 11)
+            f"TASK-{i:03d}": DotoTask(id=f"TASK-{i:03d}", title=f"Task {i}") for i in range(1, 11)
         }
 
         f = TaskFilter()
@@ -441,7 +440,9 @@ class TestFilterTasksIntegration:
         tasks = {
             "TASK-001": DotoTask(id="TASK-001", title="Base task", depends_on=[]),
             "TASK-002": DotoTask(id="TASK-002", title="Depends on 001", depends_on=["TASK-001"]),
-            "TASK-003": DotoTask(id="TASK-003", title="Depends on 001 and 002", depends_on=["TASK-001", "TASK-002"]),
+            "TASK-003": DotoTask(
+                id="TASK-003", title="Depends on 001 and 002", depends_on=["TASK-001", "TASK-002"]
+            ),
             "TASK-004": DotoTask(id="TASK-004", title="Independent", depends_on=[]),
         }
 
@@ -472,8 +473,12 @@ class TestFilterTasksIntegration:
         from doxtr_doto.collectors import DotoTask, filter_tasks
 
         tasks = {
-            "TASK-001": DotoTask(id="TASK-001", title="T1", status="Open", priority="High", assignee="Alice"),
-            "TASK-002": DotoTask(id="TASK-002", title="T2", status="DONE", priority="LOW", assignee="BOB"),
+            "TASK-001": DotoTask(
+                id="TASK-001", title="T1", status="Open", priority="High", assignee="Alice"
+            ),
+            "TASK-002": DotoTask(
+                id="TASK-002", title="T2", status="DONE", priority="LOW", assignee="BOB"
+            ),
         }
 
         # Filter with lowercase should match mixed-case values

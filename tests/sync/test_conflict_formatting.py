@@ -7,8 +7,8 @@ import pytest
 from doxtr_doto.sync.conflict import (
     ConflictError,
     FieldConflict,
-    format_conflict_error,
     _format_value,
+    format_conflict_error,
 )
 
 
@@ -109,7 +109,7 @@ class TestFormatConflictError:
             )
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "TASK-001" in result
         assert "priority" in result
         assert "medium" in result
@@ -139,7 +139,7 @@ class TestFormatConflictError:
             ),
         ]
         result = format_conflict_error(conflicts)
-        
+
         # Task ID should appear once (grouped)
         assert result.count("Task TASK-001:") == 1
         # Both fields should be mentioned
@@ -167,7 +167,7 @@ class TestFormatConflictError:
             ),
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "TASK-001" in result
         assert "TASK-002" in result
         assert "priority" in result
@@ -186,7 +186,7 @@ class TestFormatConflictError:
             )
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "doto resolve TASK-001 --use-rst" in result
         assert "doto resolve TASK-001 --use-json" in result
 
@@ -211,7 +211,7 @@ class TestFormatConflictError:
             ),
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "doto resolve <task-id> --use-rst" in result
         assert "doto resolve <task-id> --use-json" in result
 
@@ -228,7 +228,7 @@ class TestFormatConflictError:
             )
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "ERROR" in result
         assert "conflicts detected" in result.lower()
 
@@ -245,7 +245,7 @@ class TestFormatConflictError:
             )
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "(not set)" in result
 
     def test_conflict_with_list_values(self):
@@ -261,7 +261,7 @@ class TestFormatConflictError:
             )
         ]
         result = format_conflict_error(conflicts)
-        
+
         assert "bug" in result
         assert "critical" in result
         assert "feature" in result
@@ -283,7 +283,7 @@ class TestConflictError:
             )
         ]
         error = ConflictError(conflicts)
-        
+
         assert error.conflicts == conflicts
         assert "TASK-001" in str(error)
 
@@ -300,7 +300,7 @@ class TestConflictError:
             )
         ]
         error = ConflictError(conflicts, message="Custom conflict message")
-        
+
         assert str(error) == "Custom conflict message"
         assert error.conflicts == conflicts
 
@@ -316,10 +316,10 @@ class TestConflictError:
                 task_id="TASK-001",
             )
         ]
-        
+
         with pytest.raises(ConflictError) as exc_info:
             raise ConflictError(conflicts)
-        
+
         assert len(exc_info.value.conflicts) == 1
         assert exc_info.value.conflicts[0].task_id == "TASK-001"
 
@@ -336,7 +336,7 @@ class TestConflictError:
             )
         ]
         error = ConflictError(conflicts)
-        
+
         # Should auto-generate message
         assert "TASK-123" in str(error)
         assert "status" in str(error)

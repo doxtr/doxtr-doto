@@ -31,6 +31,19 @@ jobs:
         # cli, templates, and dev.
         run: pip install -e ".[all]" || pip install -e ".[dev]" || pip install -e .
 
+      - name: Verify TUI dependency is present
+        # The `.[all]` -> `.[dev]` fallback above can silently drop `textual`,
+        # which would make the TUI/Pilot tests SKIP while CI stayed green. Fail
+        # loudly here so a missing optional dep is visible instead of hiding
+        # skipped tests.
+        run: python -c "import textual"
+
+      - name: Verify calendar-sync dependencies are present
+        # Same rationale as the textual guard: the `.[all]` -> `.[dev]`
+        # fallback can silently drop the `calendar` extra, turning the calsync
+        # provider tests into confusing import errors instead of running.
+        run: python -c "import caldav, icalendar, msal, googleapiclient"
+
       - name: Install doxtr-pdf-theme-core
         # Mirrors test.yml: install the optional integration core so Features 3
         # and 6 (semantic-color derivation + landscape rotation) are exercised

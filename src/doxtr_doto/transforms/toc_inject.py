@@ -36,7 +36,7 @@ class DotoTocInjectTransform(SphinxTransform):
             if parent is None:
                 continue
             idx = parent.index(section)
-            siblings_after = parent.children[idx + 1:]
+            siblings_after = parent.children[idx + 1 :]
             if siblings_after and isinstance(siblings_after[0], doto_node):
                 sibling_id = siblings_after[0].get("task_id", "")
                 if sibling_id in ids:

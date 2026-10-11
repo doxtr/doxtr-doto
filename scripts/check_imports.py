@@ -26,10 +26,10 @@ from pathlib import Path
 
 def discover_modules(package_name: str) -> list[str]:
     """Discover all modules in a package recursively.
-    
+
     Args:
         package_name: Name of the package to scan.
-        
+
     Returns:
         List of fully qualified module names.
     """
@@ -38,37 +38,37 @@ def discover_modules(package_name: str) -> list[str]:
     except ImportError as e:
         print(f"✗ Cannot import base package {package_name}: {e}")
         return []
-    
+
     modules = [package_name]
-    
+
     if not hasattr(package, "__path__"):
         return modules
-    
+
     for importer, modname, ispkg in pkgutil.walk_packages(
         package.__path__, prefix=f"{package_name}."
     ):
         modules.append(modname)
-    
+
     return modules
 
 
 def check_imports(package_name: str) -> tuple[int, int]:
     """Check all imports in a package for circular import issues.
-    
+
     Args:
         package_name: Name of the package to check.
-        
+
     Returns:
         Tuple of (successful_count, failed_count).
     """
     modules = discover_modules(package_name)
-    
+
     if not modules:
         return 0, 1
-    
+
     success = 0
     failed = 0
-    
+
     for module_name in sorted(modules):
         try:
             importlib.import_module(module_name)
@@ -80,7 +80,7 @@ def check_imports(package_name: str) -> tuple[int, int]:
         except Exception as e:
             print(f"✗ {module_name}: {type(e).__name__}: {e}")
             failed += 1
-    
+
     return success, failed
 
 
@@ -96,21 +96,21 @@ def main() -> int:
     package_name = sys.argv[1] if len(sys.argv) > 1 else "doxtr_doto"
 
     print(f"Checking for circular imports in {package_name}...\n")
-    
+
     # Add src to path if running from project root
     src_path = Path(__file__).parent.parent / "src"
     if src_path.exists() and str(src_path) not in sys.path:
         sys.path.insert(0, str(src_path))
-    
+
     success, failed = check_imports(package_name)
-    
+
     print(f"\n{'=' * 50}")
     print(f"Results: {success} passed, {failed} failed")
-    
+
     if failed > 0:
         print("\n✗ Import cycle check FAILED")
         return 1
-    
+
     print("\n✓ No circular imports detected")
     return 0
 

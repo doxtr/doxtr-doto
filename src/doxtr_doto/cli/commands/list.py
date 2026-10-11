@@ -4,15 +4,59 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 import click
 
 from doxtr_doto.cli.completion import complete_assignee, complete_tag
+from doxtr_doto.cli.display import DisplayScope, apply_scope, tag_repo
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
+
+
+def _aggregate_tasks(
+    ctx: DotoContext,
+    filter_kwargs: dict[str, Any],
+    rescan: bool,
+) -> tuple[list[dict[str, Any]], DisplayScope]:
+    """Load and merge filtered tasks across all cached repositories.
+
+    Each cached repo's :class:`JsonTaskStore` is loaded and filtered with the
+    same criteria, then tasks are tagged with their owning repo so display
+    logic can namespace ids.
+
+    Args:
+        ctx: The CLI context.
+        filter_kwargs: Keyword arguments forwarded to ``filter_tasks``.
+        rescan: Whether to rediscover repositories before aggregating.
+
+    Returns:
+        A tuple of ``(tasks, scope)`` where ``scope`` is
+        :data:`DisplayScope.GLOBAL`.
+    """
+    from pathlib import Path
+
+    from doxtr_doto.cli.json_store import JsonTaskStore
+    from doxtr_doto.cli.repo_registry import DOTO_MARKER, RepoRegistry
+
+    registry = RepoRegistry(ctx.global_store)
+    if rescan:
+        repos = registry.rescan(Path.cwd())
+    else:
+        repos = registry.list_repos()
+
+    merged: list[dict[str, Any]] = []
+    for repo in repos:
+        store_path = Path(repo.path) / DOTO_MARKER
+        if not store_path.is_file():
+            continue
+        repo_store = JsonTaskStore(store_path)
+        repo_tasks = repo_store.filter_tasks(**filter_kwargs)
+        merged.extend(tag_repo(repo_tasks, repo.name))
+
+    return merged, DisplayScope.GLOBAL
 
 
 def sort_tasks(
@@ -35,8 +79,8 @@ def sort_tasks(
     # Status order
     status_order = {"blocked": 4, "in-progress": 3, "open": 2, "done": 1}
 
-    def sort_key(task: dict[str, Any]) -> tuple:
-        keys = []
+    def sort_key(task: dict[str, Any]) -> tuple[Any, ...]:
+        keys: list[Any] = []
         for field in sort_fields:
             value = task.get(field)
             if field == "priority":
@@ -88,7 +132,12 @@ def format_csv(tasks: list[dict[str, Any]], columns: list[str]) -> str:
 
 
 @click.command("list")
-@click.option("--assignee", "-a", shell_complete=complete_assignee, help="Filter by assignee (comma-separated for multiple).")
+@click.option(
+    "--assignee",
+    "-a",
+    shell_complete=complete_assignee,
+    help="Filter by assignee (comma-separated for multiple).",
+)
 @click.option(
     "--priority",
     "-p",
@@ -99,7 +148,12 @@ def format_csv(tasks: list[dict[str, Any]], columns: list[str]) -> str:
     "-s",
     help="Filter by status (comma-separated for multiple).",
 )
-@click.option("--tags", "-t", shell_complete=complete_tag, help="Filter by tags (comma-separated, matches any).")
+@click.option(
+    "--tags",
+    "-t",
+    shell_complete=complete_tag,
+    help="Filter by tags (comma-separated, matches any).",
+)
 @click.option("--due-before", help="Filter by due date before (YYYY-MM-DD).")
 @click.option("--due-after", help="Filter by due date after (YYYY-MM-DD).")
 @click.option("--archived", is_flag=True, help="Include archived tasks.")
@@ -112,13 +166,24 @@ def format_csv(tasks: list[dict[str, Any]], columns: list[str]) -> str:
     help="Output format.",
 )
 @click.option("--sort", "sort_by", help="Sort by field(s) (comma-separated).")
-@click.option("--reverse", "-r", is_flag=True, help="Reverse sort order.")
+@click.option("--reverse", is_flag=True, help="Reverse sort order.")
 @click.option("--limit", "-l", type=int, help="Maximum number of tasks to show.")
 @click.option("--columns", help="Columns to display (comma-separated).")
 @click.option(
     "--with-deps",
     is_flag=True,
     help="Show dependency information (adds deps column or tree view).",
+)
+@click.option(
+    "--recursive",
+    "-r",
+    is_flag=True,
+    help="Aggregate tasks across all cached repositories (namespaced ids).",
+)
+@click.option(
+    "--rescan",
+    is_flag=True,
+    help="Rediscover repositories before an aggregated view (implies -r).",
 )
 @click.pass_obj
 def list_tasks(
@@ -136,6 +201,8 @@ def list_tasks(
     limit: int | None,
     columns: str | None,
     with_deps: bool,
+    recursive: bool,
+    rescan: bool,
 ) -> None:
     """List tasks with optional filters.
 
@@ -154,9 +221,15 @@ def list_tasks(
         doto list --with-deps
 
         doto list --format tree
+
+        doto list -r               # aggregated view across cached repos
+
+        doto list --rescan         # rediscover repos, then aggregate
     """
     formatter = ctx.formatter
     store = ctx.store
+
+    recursive = recursive or rescan
 
     # Parse comma-separated filters
     assignee_list = [a.strip() for a in assignee.split(",")] if assignee else None
@@ -164,16 +237,21 @@ def list_tasks(
     status_list = [s.strip() for s in status.split(",")] if status else None
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
 
-    # Filter tasks
-    tasks = store.filter_tasks(
-        assignee=assignee_list,
-        priority=priority_list,
-        status=status_list,
-        tags=tag_list,
-        due_before=due_before,
-        due_after=due_after,
-        include_archived=archived,
-    )
+    filter_kwargs: dict[str, Any] = {
+        "assignee": assignee_list,
+        "priority": priority_list,
+        "status": status_list,
+        "tags": tag_list,
+        "due_before": due_before,
+        "due_after": due_after,
+        "include_archived": archived,
+    }
+
+    if recursive:
+        tasks, scope = _aggregate_tasks(ctx, filter_kwargs, rescan=rescan)
+    else:
+        tasks = store.filter_tasks(**filter_kwargs)
+        scope = DisplayScope.LOCAL
 
     # Sort tasks
     if sort_by:
@@ -183,6 +261,9 @@ def list_tasks(
         sort_fields = ["priority", "due"]
 
     tasks = sort_tasks(tasks, sort_fields, reverse=reverse)
+
+    # Namespace ids for display when aggregating across repos.
+    apply_scope(tasks, scope)
 
     # Apply limit
     if limit:
@@ -203,10 +284,7 @@ def list_tasks(
             task["has_deps"] = len(deps) > 0
             task["deps_count"] = len(deps)
             # Count pending deps
-            pending = sum(
-                1 for d in deps
-                if all_tasks.get(d, {}).get("status") != "done"
-            )
+            pending = sum(1 for d in deps if all_tasks.get(d, {}).get("status") != "done")
             task["pending_deps"] = pending
             # Format deps display
             if deps:
@@ -257,7 +335,7 @@ def _format_deps_display(deps: list[str], all_tasks: dict[str, Any]) -> str:
 
 
 def _format_task_tree(
-    formatter,
+    formatter: OutputFormatter,
     tasks: list[dict[str, Any]],
     all_tasks: dict[str, Any],
 ) -> None:
@@ -306,10 +384,7 @@ def _format_task_tree(
 
         # Show pending deps count
         deps = task.get("depends_on", [])
-        pending_deps = sum(
-            1 for d in deps
-            if all_tasks.get(d, {}).get("status") != "done"
-        )
+        pending_deps = sum(1 for d in deps if all_tasks.get(d, {}).get("status") != "done")
         deps_info = ""
         if pending_deps > 0:
             deps_info = f" [waiting on {pending_deps}]"
@@ -326,8 +401,7 @@ def _format_task_tree(
             if dep_id in task_ids and dep_id not in printed
         ]
         children = [c for c in children if c]  # Filter None
-        for i, child in enumerate(children):
-            child_task = {"id": dependents.get(task_id, [])[i], **child}
+        for i, _child in enumerate(children):
             for t in tasks:
                 if t["id"] in dependents.get(task_id, []):
                     print_task(t, child_prefix, i == len(children) - 1)
@@ -335,11 +409,10 @@ def _format_task_tree(
 
     # Print tasks that have no dependencies first (root tasks)
     root_tasks = [
-        t for t in tasks
-        if not t.get("depends_on") or all(
-            all_tasks.get(d, {}).get("status") == "done"
-            for d in t.get("depends_on", [])
-        )
+        t
+        for t in tasks
+        if not t.get("depends_on")
+        or all(all_tasks.get(d, {}).get("status") == "done" for d in t.get("depends_on", []))
     ]
     other_tasks = [t for t in tasks if t not in root_tasks]
 

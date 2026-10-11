@@ -3,11 +3,10 @@
 Section 12 tests: Ensures that changing status from 'done' to 'open' in RST
 propagates correctly to JSON without triggering conflicts.
 """
+
 from __future__ import annotations
 
-import pytest
-
-from doxtr_doto.sync.merge import sync_task, create_snapshot, MergeResult
+from doxtr_doto.sync.merge import create_snapshot, sync_task
 
 
 class TestReopenViaMerge:
@@ -131,10 +130,22 @@ class TestReopenStatusTransitions:
 
     def test_reopen_from_done_to_open(self):
         """Standard reopen: done -> open."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "_sync": {"snapshot": snapshot}}
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "_sync": {"snapshot": snapshot},
+        }
         rst_current = {"title": "T", "status": "open", "priority": "medium"}
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
@@ -144,10 +155,22 @@ class TestReopenStatusTransitions:
 
     def test_reopen_from_done_to_in_progress(self):
         """Reopen directly to in-progress: done -> in-progress."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "_sync": {"snapshot": snapshot}}
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "_sync": {"snapshot": snapshot},
+        }
         rst_current = {"title": "T", "status": "in-progress", "priority": "medium"}
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
@@ -157,10 +180,22 @@ class TestReopenStatusTransitions:
 
     def test_reopen_from_done_to_blocked(self):
         """Reopen to blocked state: done -> blocked."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "_sync": {"snapshot": snapshot}}
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "_sync": {"snapshot": snapshot},
+        }
         rst_current = {"title": "T", "status": "blocked", "priority": "medium"}
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
@@ -174,10 +209,22 @@ class TestReopenWithOtherFieldChanges:
 
     def test_reopen_with_priority_change_in_rst(self):
         """Reopen with simultaneous priority change in RST."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "_sync": {"snapshot": snapshot}}
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "_sync": {"snapshot": snapshot},
+        }
         rst_current = {"title": "T", "status": "open", "priority": "high"}
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
@@ -189,13 +236,29 @@ class TestReopenWithOtherFieldChanges:
 
     def test_reopen_with_json_assignee_change(self):
         """Reopen in RST while JSON has assignee change - both apply."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "assignee": "bob",  # Changed via CLI
-                     "_sync": {"snapshot": snapshot}}
-        rst_current = {"title": "T", "status": "open", "priority": "medium",
-                       "assignee": None}  # RST still has no assignee
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": "bob",  # Changed via CLI
+            "_sync": {"snapshot": snapshot},
+        }
+        rst_current = {
+            "title": "T",
+            "status": "open",
+            "priority": "medium",
+            "assignee": None,
+        }  # RST still has no assignee
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
 
@@ -208,13 +271,29 @@ class TestReopenWithOtherFieldChanges:
 
     def test_reopen_with_tags_change_no_conflict(self):
         """Reopen with tags change in JSON - both apply cleanly."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": ["old"], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "tags": ["old", "new"],  # Tags added via CLI
-                     "_sync": {"snapshot": snapshot}}
-        rst_current = {"title": "T", "status": "open", "priority": "medium",
-                       "tags": ["old"]}  # RST unchanged
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": ["old"],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "tags": ["old", "new"],  # Tags added via CLI
+            "_sync": {"snapshot": snapshot},
+        }
+        rst_current = {
+            "title": "T",
+            "status": "open",
+            "priority": "medium",
+            "tags": ["old"],
+        }  # RST unchanged
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
 
@@ -228,10 +307,22 @@ class TestReopenSnapshot:
 
     def test_reopen_updates_snapshot_flag(self):
         """Reopening sets update_snapshot flag for future merges."""
-        snapshot = {"title": "T", "status": "done", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "done", "priority": "medium",
-                     "_sync": {"snapshot": snapshot}}
+        snapshot = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "done",
+            "priority": "medium",
+            "_sync": {"snapshot": snapshot},
+        }
         rst_current = {"title": "T", "status": "open", "priority": "medium"}
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
@@ -286,13 +377,37 @@ class TestReopenEdgeCases:
 
     def test_reopen_same_status_no_change(self):
         """If status is already open in both, no change needed."""
-        snapshot = {"title": "T", "status": "open", "priority": "medium",
-                    "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
-        json_task = {"title": "T", "status": "open", "priority": "medium",
-                     "assignee": None, "due": None, "tags": [], "depends_on": [], "body": "",
-                     "_sync": {"snapshot": snapshot}}
-        rst_current = {"title": "T", "status": "open", "priority": "medium",
-                       "assignee": None, "due": None, "tags": [], "depends_on": [], "body": ""}
+        snapshot = {
+            "title": "T",
+            "status": "open",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
+        json_task = {
+            "title": "T",
+            "status": "open",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+            "_sync": {"snapshot": snapshot},
+        }
+        rst_current = {
+            "title": "T",
+            "status": "open",
+            "priority": "medium",
+            "assignee": None,
+            "due": None,
+            "tags": [],
+            "depends_on": [],
+            "body": "",
+        }
 
         result = sync_task("TASK-001", rst_current, json_task, "t.rst", 1)
 

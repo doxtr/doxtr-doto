@@ -164,6 +164,18 @@
   content: "👤 ";
 }
 
+.doto-raci {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.doto-raci-role {
+  color: #495057;
+}
+
 .doto-due::before {
   content: "📅 ";
 }
@@ -714,3 +726,226 @@
   max-width: 100%;
   height: auto;
 }
+
+/* ========================================================================
+   Layout views (doto-list :format: kanban | calendar | email)
+   All classes namespaced doto-*. The kanban drag, calendar day reveal, and
+   email pane selection are driven by the vendored doto-views.js; the markup
+   degrades gracefully (static) when JS is unavailable.
+   ======================================================================== */
+
+/* ---- Kanban board ---- */
+.doto-kanban {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding: 0.5rem 0;
+  align-items: flex-start;
+}
+.doto-kanban-column {
+  flex: 1 0 14rem;
+  min-width: 14rem;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+.doto-kanban-column-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 2px solid #d0d7de;
+}
+.doto-kanban-column-count {
+  background: #d0d7de;
+  border-radius: 999px;
+  padding: 0 0.5rem;
+  font-size: 0.8em;
+}
+.doto-kanban-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 2rem;
+}
+.doto-kanban-card {
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-left: 4px solid #0d6efd;
+  border-radius: 6px;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  cursor: grab;
+}
+.doto-kanban-card.doto-priority-critical { border-left-color: #dc3545; }
+.doto-kanban-card.doto-priority-high { border-left-color: #fd7e14; }
+.doto-kanban-card.doto-priority-low { border-left-color: #6c757d; }
+.doto-kanban-card-dragging { opacity: 0.5; }
+.doto-kanban-dropzone-active { background: #e7f1ff; }
+.doto-kanban-card-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85em;
+}
+.doto-kanban-card-title {
+  display: block;
+  font-weight: 600;
+  margin: 0.25rem 0;
+}
+.doto-kanban-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.8em;
+  color: #57606a;
+}
+
+/* ---- Calendar ---- */
+.doto-calendar-header {
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-bottom: 0.5rem;
+}
+.doto-calendar-grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.doto-calendar-weekday {
+  text-align: center;
+  padding: 0.35rem;
+  border-bottom: 2px solid #d0d7de;
+}
+.doto-calendar-day {
+  vertical-align: top;
+  border: 1px solid #eaecef;
+  height: 4rem;
+  padding: 0.2rem;
+}
+.doto-calendar-day-other { background: #f6f8fa; color: #8c959f; }
+.doto-calendar-day-has-tasks { background: #e7f1ff; }
+.doto-calendar-day-number {
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+}
+.doto-calendar-day-number[disabled] { cursor: default; }
+.doto-calendar-day-count {
+  display: inline-block;
+  margin-left: 0.25rem;
+  background: #0d6efd;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.7em;
+  padding: 0 0.4rem;
+}
+.doto-calendar-day-tasks {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  display: none;
+}
+.doto-calendar-day-open .doto-calendar-day-tasks {
+  display: block;
+}
+.doto-calendar-task { font-size: 0.8em; padding: 0.1rem 0; }
+.doto-calendar-unscheduled { margin-top: 0.75rem; }
+.doto-calendar-unscheduled .doto-calendar-day-tasks { display: block; }
+.doto-calendar-unscheduled-title { font-weight: 600; }
+
+/* ---- Email 3-pane ---- */
+.doto-email {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) 3fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0.75rem;
+  min-height: 20rem;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+.doto-email-tree {
+  grid-row: 1 / span 2;
+  border-right: 1px solid #eaecef;
+  padding-right: 0.5rem;
+  overflow-y: auto;
+}
+.doto-email-tree-node {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  padding: 0.35rem 0.4rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.doto-email-tree-node:hover,
+.doto-email-tree-node-active { background: #e7f1ff; }
+.doto-email-main {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 0.5rem;
+  min-height: 0;
+}
+.doto-email-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 1px solid #eaecef;
+  border-radius: 4px;
+  /* Approximate per-row height; declared on the plain (low-specificity)
+   * selector so a child theme restyling .doto-email-list-item can override it
+   * via its own .doto-email-list { --doto-row-height: ... } rule. */
+  --doto-row-height: 2.2rem;
+}
+/*
+ * Email list scroll cap. The Python renderer resolves the effective
+ * visible-task count (directive :visible-tasks: else doto_list_visible_tasks)
+ * and emits data-doto-visible-tasks plus the --doto-visible-tasks custom
+ * property on .doto-email-list only for a positive cap. We derive the pane's
+ * max-height from --doto-row-height so only that many rows are visible at
+ * once; the rest stay rendered and scrollable. When the data attribute is
+ * absent (0 / "show all"), no cap applies.
+ */
+.doto-email-list[data-doto-visible-tasks] {
+  max-height: calc(var(--doto-visible-tasks) * var(--doto-row-height));
+}
+.doto-email-list-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+  border-bottom: 1px solid #eaecef;
+}
+.doto-email-list-item:hover,
+.doto-email-list-item-selected { background: #e7f1ff; }
+.doto-email-list-item-filtered { display: none; }
+.doto-email-list-id { font-weight: 600; }
+.doto-email-list-title { flex: 1; }
+.doto-email-list-status { color: #57606a; font-size: 0.85em; }
+.doto-email-detail {
+  border: 1px solid #eaecef;
+  border-radius: 4px;
+  padding: 0.5rem;
+  overflow-y: auto;
+}
+.doto-email-detail-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.1rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.doto-email-detail-meta dt { font-weight: 600; }
+.doto-email-detail-meta dd { margin: 0; }
+.doto-email-detail-body { margin-top: 0.5rem; }

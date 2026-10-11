@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestThreeWayMerge:
     """Test the 3-way merge algorithm."""
-    
+
     def test_no_changes(self, doto_sync):
         """Neither RST nor JSON changed - no updates needed."""
         result = doto_sync.merge_task(
@@ -18,31 +16,31 @@ class TestThreeWayMerge:
         )
         assert result.has_changes is False
         assert result.conflicts == []
-    
+
     def test_rst_only_change(self, doto_sync):
         """RST changed, JSON didn't - use RST value."""
         result = doto_sync.merge_task(
             task_id="TASK-001",
             snapshot={"priority": "medium"},
-            rst_current={"priority": "high"},      # Changed in RST
-            json_current={"priority": "medium"},   # Unchanged
+            rst_current={"priority": "high"},  # Changed in RST
+            json_current={"priority": "medium"},  # Unchanged
         )
         assert result.merged["priority"] == "high"
         assert result.update_json is True
         assert result.write_rst is False  # write_rst, not update_rst
-    
+
     def test_json_only_change(self, doto_sync):
         """JSON changed (via CLI), RST didn't - use JSON value."""
         result = doto_sync.merge_task(
             task_id="TASK-001",
             snapshot={"assignee": "alice"},
-            rst_current={"assignee": "alice"},     # Unchanged
-            json_current={"assignee": "bob"},      # Changed via CLI
+            rst_current={"assignee": "alice"},  # Unchanged
+            json_current={"assignee": "bob"},  # Changed via CLI
         )
         assert result.merged["assignee"] == "bob"
         assert result.write_rst is True  # write_rst, not update_rst
         assert result.update_json is False
-    
+
     def test_both_change_same_value(self, doto_sync):
         """Both changed to same value - no conflict."""
         result = doto_sync.merge_task(
@@ -53,14 +51,14 @@ class TestThreeWayMerge:
         )
         assert result.merged["status"] == "done"
         assert result.conflicts == []
-    
+
     def test_both_change_different_values_conflict(self, doto_sync):
         """Both changed to different values - conflict."""
         result = doto_sync.merge_task(
             task_id="TASK-001",
             snapshot={"priority": "medium"},
             rst_current={"priority": "critical"},  # User edited RST
-            json_current={"priority": "high"},     # CLI changed it
+            json_current={"priority": "high"},  # CLI changed it
         )
         assert len(result.conflicts) == 1
         conflict = result.conflicts[0]
@@ -68,7 +66,7 @@ class TestThreeWayMerge:
         assert conflict.base == "medium"
         assert conflict.rst == "critical"
         assert conflict.json == "high"
-    
+
     def test_multiple_fields_mixed_changes(self, doto_sync):
         """Multiple fields with different change patterns."""
         result = doto_sync.merge_task(
@@ -78,11 +76,11 @@ class TestThreeWayMerge:
             json_current={"priority": "medium", "assignee": "bob", "status": "in-progress"},
         )
         # RST changed priority, JSON changed assignee and status
-        assert result.merged["priority"] == "high"       # From RST
-        assert result.merged["assignee"] == "bob"        # From JSON
+        assert result.merged["priority"] == "high"  # From RST
+        assert result.merged["assignee"] == "bob"  # From JSON
         assert result.merged["status"] == "in-progress"  # From JSON
         assert result.conflicts == []
-    
+
     def test_new_task_from_rst_no_snapshot(self, doto_sync):
         """New task in RST with no prior snapshot - RST is authoritative."""
         result = doto_sync.merge_task(
@@ -93,7 +91,7 @@ class TestThreeWayMerge:
         )
         assert result.merged["priority"] == "high"
         assert result.create_in_json is True
-    
+
     def test_new_task_from_json_cli(self, doto_sync):
         """New task created via CLI - should be written to RST."""
         result = doto_sync.merge_task(
@@ -106,9 +104,63 @@ class TestThreeWayMerge:
         assert result.create_in_rst is True
 
 
+class TestCase2JsonOnly:
+    """Case 2: task in JSON but not RST - distinguish CLI task vs deletion.
+
+    The discriminator is ``_sync.rst_hash``: empty/missing means the directive
+    was never written to RST (a CLI task to create), while a truthy hash means
+    the directive previously existed in an RST file and has now been removed by
+    the user (a deletion to honour by archiving, not re-inserting).
+    """
+
+    def test_cli_task_without_rst_hash_creates_in_rst(self, doto_sync):
+        """CLI task with empty/missing rst_hash is created in RST."""
+        result = doto_sync.merge_task(
+            task_id="TASK-CLI",
+            snapshot=None,
+            rst_current=None,
+            json_current={
+                "id": "TASK-CLI",
+                "priority": "medium",
+                "archived": False,
+                "_sync": {"rst_hash": ""},
+            },
+        )
+        assert result.create_in_rst is True
+        assert result.update_snapshot is True
+        assert result.write_rst is False
+        # Not re-marked as archived/done; left as the plain CLI task.
+        assert result.merged.get("archived", False) is False
+
+    def test_deleted_directive_with_rst_hash_is_archived(self, doto_sync):
+        """A task whose RST directive was removed is marked done + archived."""
+        result = doto_sync.merge_task(
+            task_id="TASK-DEL",
+            snapshot=None,
+            rst_current=None,  # directive gone from the .rst
+            json_current={
+                "id": "TASK-DEL",
+                "status": "open",
+                "priority": "high",
+                "archived": False,
+                "_sync": {"rst_hash": "abc123"},
+            },
+        )
+        # Honour the deletion: archive, do not re-insert.
+        assert result.merged["status"] == "done"
+        assert result.merged["archived"] is True
+        assert result.merged["archived_on"]
+        # Single-timestamp contract: updated is set and equals archived_on.
+        assert result.merged["updated"]
+        assert result.merged["updated"] == result.merged["archived_on"]
+        assert result.update_json is True
+        assert result.write_rst is False
+        assert result.create_in_rst is False
+
+
 class TestConflictDetection:
     """Test conflict detection and error messages."""
-    
+
     def test_conflict_error_message_format(self, doto_sync):
         """Conflict error message includes all necessary info."""
         result = doto_sync.merge_task(
@@ -119,10 +171,10 @@ class TestConflictDetection:
             rst_file="features/auth.rst",
             rst_line=42,
         )
-        
+
         assert len(result.conflicts) == 1
         conflict = result.conflicts[0]
-        
+
         # Verify conflict contains all required info
         assert conflict.task_id == "TASK-001"
         assert conflict.field == "priority"
@@ -130,7 +182,7 @@ class TestConflictDetection:
         assert conflict.rst == "critical"
         assert conflict.json == "high"
         assert conflict.rst_file == "features/auth.rst"
-    
+
     def test_multiple_conflicts_all_reported(self, doto_sync):
         """Multiple field conflicts are all reported."""
         result = doto_sync.merge_task(
@@ -146,39 +198,39 @@ class TestConflictDetection:
 
 class TestRstHashTracking:
     """Test RST content hash for change detection."""
-    
+
     def test_hash_unchanged_content(self, doto_sync):
         """Same content produces same hash."""
-        content = '''.. doto:: Fix bug
+        content = """.. doto:: Fix bug
    :priority: high
    :assignee: alice
 
    Description here.
-'''
+"""
         hash1 = doto_sync.compute_rst_hash(content)
         hash2 = doto_sync.compute_rst_hash(content)
         assert hash1 == hash2
-    
+
     def test_hash_whitespace_normalization(self, doto_sync):
         """Whitespace differences don't affect hash."""
-        content1 = '''.. doto:: Fix bug
+        content1 = """.. doto:: Fix bug
    :priority: high
-'''
-        content2 = '''.. doto:: Fix bug
+"""
+        content2 = """.. doto:: Fix bug
    :priority:   high
-'''
+"""
         hash1 = doto_sync.compute_rst_hash(content1)
         hash2 = doto_sync.compute_rst_hash(content2)
         assert hash1 == hash2  # Whitespace normalized
-    
+
     def test_hash_detects_content_change(self, doto_sync):
         """Content changes produce different hash."""
-        content1 = '''.. doto:: Fix bug
+        content1 = """.. doto:: Fix bug
    :priority: high
-'''
-        content2 = '''.. doto:: Fix bug
+"""
+        content2 = """.. doto:: Fix bug
    :priority: critical
-'''
+"""
         hash1 = doto_sync.compute_rst_hash(content1)
         hash2 = doto_sync.compute_rst_hash(content2)
         assert hash1 != hash2

@@ -25,10 +25,37 @@ jobs:
       # The circular-import check imports the click-based CLI, so cli extras
       # must be present. `all` pulls in cli, templates, and dev.
       run: pip install -e ".[all]" || pip install -e ".[dev]" || pip install -e .
+    - name: Verify TUI dependency is present
+      # The `.[all]` -> `.[dev]` fallback above can silently drop `textual`,
+      # which would make the TUI/Pilot tests SKIP while CI stayed green. Fail
+      # loudly here so a missing optional dep is visible instead of hiding
+      # skipped tests.
+      run: python -c "import textual"
+    - name: Verify calendar-sync dependencies are present
+      # Same rationale as the textual guard: the `.[all]` -> `.[dev]` fallback
+      # can silently drop the `calendar` extra, which would turn the calsync
+      # provider tests into confusing import errors instead of running. Fail
+      # loudly if the calendar SDKs are missing.
+      run: python -c "import caldav, icalendar, msal, googleapiclient"
     - name: Install test dependencies
       run: pip install pytest pytest-cov sphinxcontrib-plantuml "doxtr-pdf-theme-core>=1.1.9"
+    - name: Install sphinxcontrib-xlink
+      # Optional xlink resolver integration. Installing it lets the xlink HTML
+      # build tests actually exercise resolved output instead of skipping.
+      run: pip install "sphinxcontrib-xlink>=1.3"
     - name: Check for circular imports
       run: python scripts/check_imports.py
+    - name: Check formatting and lint
+      # Enforce the pinned ruff==0.16.9 formatting/lint so format drift cannot
+      # silently recur after the repo-wide reformat.
+      run: |
+        ruff format --check src tests
+        ruff check src tests
+    - name: Type check
+      # Enforce the strict mypy gate (pyproject.toml [tool.mypy]) so the
+      # codebase stays at zero type errors; mypy>=1.0 ships in the dev extra
+      # installed above via `.[all]`/`.[dev]`.
+      run: mypy src
     - name: Run unit tests with coverage
       # No plantuml binary required — all subprocess calls are monkeypatched.
       # Coverage flags (--cov, --cov-report, --cov-fail-under) come from

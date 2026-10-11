@@ -75,3 +75,11 @@ test_harness/source/_static/wizard-of-docs*.png
 
 # DocDash Docker container
 .DS_Store
+
+# doto remembered-names cache (derived; safe to delete)
+.doto/known_names.json
+
+# doto calendar-sync local config + secrets (never commit)
+.doto.toml
+.doto/calsync.json
+client_secret_*.json

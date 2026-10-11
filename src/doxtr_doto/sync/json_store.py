@@ -6,26 +6,72 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+if TYPE_CHECKING:
+    from doxtr_doto.sync.restore import RestoreResult
+
+
+class ArchiveData(TypedDict, total=False):
+    """Restore-anchor metadata captured when a task is archived.
+
+    Persisted under ``_sync._archive`` so a reopened task can be restored to
+    the same place in its original RST file.
+
+    Attributes:
+        version: Schema version of this ``_archive`` block. Lets the restore
+            layer branch defensively as the capture format evolves; a
+            missing/unknown version is treated as version 1 for back-compat.
+        original_rst_file: The docname/path the directive was removed from.
+        page_title: The document title / first heading of that page, used in
+            the renamed/deleted error message.
+        preceding_lines: The run of non-blank source lines immediately above
+            the removed directive, used as the positional anchor.
+        directive_line: 1-indexed header line the directive was on (diagnostic).
+    """
+
+    version: int
+    original_rst_file: str | None
+    page_title: str | None
+    preceding_lines: list[str]
+    directive_line: int
 
 
 class SyncData(TypedDict, total=False):
     """Sync metadata for a task."""
+
     rst_file: str | None
     rst_line: int | None
     rst_hash: str | None
     snapshot: dict[str, Any] | None
+    _archive: ArchiveData
 
 
 class GitData(TypedDict, total=False):
     """Git metadata for a task."""
+
     commits: list[dict[str, Any]]
+
+
+class WorkLog(TypedDict):
+    """A single work session interval for a task.
+
+    Attributes:
+        started_at: ISO 8601 timestamp when the session started.
+        stopped_at: ISO 8601 timestamp when the session stopped, or None
+            if the session is still open.
+    """
+
+    started_at: str
+    stopped_at: str | None
 
 
 class TaskData(TypedDict, total=False):
     """Task data structure stored in JSON."""
+
     title: str
     assignee: str | None
     priority: str
@@ -34,16 +80,20 @@ class TaskData(TypedDict, total=False):
     tags: list[str]
     depends_on: list[str]
     body: str
+    progress: int | None
+    raci: dict[str, list[str]] | None
     created: str
     updated: str
     archived: bool
     archived_on: str | None
+    worklogs: list[WorkLog]
     _sync: SyncData
     _git: GitData
 
 
 class SeriesData(TypedDict, total=False):
     """Series data structure stored in JSON."""
+
     title_template: str
     pattern: dict[str, Any]
     start_date: str
@@ -54,8 +104,17 @@ class SeriesData(TypedDict, total=False):
     updated: str
 
 
-class JsonStoreData(TypedDict):
+class _JsonStoreOptional(TypedDict, total=False):
+    """Optional keys of :class:`JsonStoreData` (absent on a clean store)."""
+
+    # Pending field-level sync conflicts, persisted so ``doto resolve`` can act
+    # on them across invocations.
+    _conflicts: list[dict[str, Any]]
+
+
+class JsonStoreData(_JsonStoreOptional):
     """Root structure of tasks.json."""
+
     version: int
     updated: str
     tasks: dict[str, TaskData]
@@ -63,7 +122,7 @@ class JsonStoreData(TypedDict):
 
 
 # Current schema version
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _cleanup_stale_tmp_files(path: Path) -> None:
@@ -114,7 +173,7 @@ class _IdGenerator:
         for tid in self._existing:
             if tid.startswith(prefix + "-"):
                 try:
-                    max_num = max(max_num, int(tid[len(prefix) + 1:]))
+                    max_num = max(max_num, int(tid[len(prefix) + 1 :]))
                 except ValueError:
                     pass
         return f"{prefix}-{max_num + 1:03d}"
@@ -192,13 +251,20 @@ class _TaskRepository:
         task_data.setdefault("updated", now)
         task_data.setdefault("archived", False)
         task_data.setdefault("archived_on", None)
-        task_data.setdefault("_sync", {
-            "rst_file": None,
-            "rst_line": None,
-            "rst_hash": None,
-            "snapshot": None,
-        })
-        self._tasks[task_id] = task_data
+        task_data.setdefault("worklogs", [])
+        task_data.setdefault(
+            "_sync",
+            {
+                "rst_file": None,
+                "rst_line": None,
+                "rst_hash": None,
+                "snapshot": None,
+            },
+        )
+        # task_data has been populated with every required TaskData field via
+        # the setdefault calls above, so narrow the user-supplied dict to
+        # TaskData for storage.
+        self._tasks[task_id] = cast("TaskData", task_data)
 
     def update(self, task_id: str, data: dict[str, Any]) -> bool:
         """Update a task's fields.
@@ -213,12 +279,15 @@ class _TaskRepository:
         if task_id not in self._tasks:
             return False
         task = self._tasks[task_id]
+        # ``key`` is a runtime-dynamic field name, so operate through a plain
+        # mutable-mapping view (TaskData only permits literal keys).
+        task_mut = cast("dict[str, Any]", task)
         for key, value in data.items():
             if key in ("_sync", "_git"):
-                task.setdefault(key, {}).update(value)
+                task_mut.setdefault(key, {}).update(value)
             else:
-                task[key] = value
-        task["updated"] = datetime.now().isoformat()
+                task_mut[key] = value
+        task_mut["updated"] = datetime.now().isoformat()
         return True
 
     def delete(self, task_id: str) -> bool:
@@ -335,8 +404,9 @@ class _SeriesRepository:
         """
         if series_id not in self._series:
             return False
-        self._series[series_id].update(updates)
-        self._series[series_id]["updated"] = datetime.now().isoformat()
+        series_mut = cast("dict[str, Any]", self._series[series_id])
+        series_mut.update(updates)
+        series_mut["updated"] = datetime.now().isoformat()
         return True
 
     def delete(self, series_id: str) -> bool:
@@ -366,7 +436,7 @@ class _SeriesRepository:
         for sid in self._series:
             if sid.startswith(prefix + "-"):
                 try:
-                    max_num = max(max_num, int(sid[len(prefix) + 1:]))
+                    max_num = max(max_num, int(sid[len(prefix) + 1 :]))
                 except ValueError:
                     pass
         return f"{prefix}-{max_num + 1:03d}"
@@ -442,7 +512,19 @@ class JsonTaskStore:
 
         If the file doesn't exist, initializes with an empty store.
         Handles schema migration if needed.
+
+        Reloading an already-loaded store rebinds the cached task/series
+        repositories to the freshly loaded data. Without this the repositories
+        would keep wrapping the previous ``_data`` dict, so reads/writes would
+        operate on stale data while :meth:`save` persisted the new ``_data`` -
+        silently dropping concurrent edits made through another store instance
+        for the same path.
         """
+        # Invalidate cached repository wrappers so they rebind to the data
+        # loaded below (they lazily wrap ``self._data`` on next access).
+        self._tasks_repo = None
+        self._series_repo = None
+
         if not self.path.exists():
             self._data = {
                 "version": SCHEMA_VERSION,
@@ -569,16 +651,29 @@ class JsonTaskStore:
         task_id: str,
         status: str = "open",
         target_file: str | None = None,
-    ) -> bool:
-        """Reopen an archived task.
+        srcdir: Path | str | None = None,
+    ) -> RestoreResult | bool:
+        """Reopen an archived task, optionally restoring it in place.
+
+        When ``srcdir`` is provided and no ``target_file`` override is given,
+        the directive is re-inserted into its original RST file using the
+        restore anchor captured at archive time (see
+        :func:`doxtr_doto.sync.restore.restore_task_to_rst`). The archived flag
+        is only cleared when the restore succeeds; a renamed/deleted original
+        page leaves the task archived and returns a failing
+        :class:`~doxtr_doto.sync.restore.RestoreResult` so the caller can
+        surface the retrace message.
 
         Args:
             task_id: Task identifier.
             status: New status for the task.
-            target_file: Target RST file (overrides original).
+            target_file: Target RST file (overrides original + anchor).
+            srcdir: Sphinx source directory. When given, enables
+                restore-to-place and the return value is a ``RestoreResult``.
 
         Returns:
-            True if task was reopened, False if not found or not archived.
+            ``True``/``False`` in the legacy (no ``srcdir``) path; a
+            ``RestoreResult`` when ``srcdir`` is provided.
         """
         task = self.get_task(task_id)
         if task is None:
@@ -587,6 +682,44 @@ class JsonTaskStore:
         if not task.get("archived"):
             return False
 
+        # Restore-to-place path.
+        if srcdir is not None and not target_file:
+            from doxtr_doto.sync.restore import restore_task_to_rst
+
+            sync = task.get("_sync", {}) or {}
+            has_restore_info = bool(sync.get("_archive") or sync.get("rst_file"))
+            # Only attempt restore-to-place when we actually know where the
+            # task came from. A task that was never on an RST page (e.g. a
+            # CLI-created archived task) has no origin to restore to, so fall
+            # through to the legacy reopen (writes to inbox on next build).
+            if has_restore_info:
+                # Build the restore input with the *reopen* status applied and
+                # the archived flags cleared, so the re-inserted directive
+                # carries ``:status: <reopen status>`` rather than the archived
+                # ``:status: done``. Otherwise the now-default auto-archive
+                # would immediately re-archive the task on the next build.
+                restore_input = dict(task)
+                restore_input["id"] = task_id
+                restore_input["status"] = status
+                restore_input["archived"] = False
+                restore_input["archived_on"] = None
+                result = restore_task_to_rst(restore_input, srcdir)
+                if not result.success:
+                    return result
+
+                task["archived"] = False
+                task["archived_on"] = None
+                task["status"] = status
+                task["updated"] = datetime.now().isoformat()
+                sync = task.setdefault("_sync", {})
+                if result.rst_file:
+                    sync["rst_file"] = result.rst_file
+                sync["snapshot"] = None
+                sync["rst_hash"] = None
+                sync.pop("_archive", None)
+                return result
+
+        # Legacy path.
         task["archived"] = False
         task["archived_on"] = None
         task["status"] = status
@@ -602,6 +735,7 @@ class JsonTaskStore:
         if "_sync" in task:
             task["_sync"]["snapshot"] = None
             task["_sync"]["rst_hash"] = None
+            task["_sync"].pop("_archive", None)
 
         return True
 
@@ -908,7 +1042,7 @@ class JsonTaskStore:
                 tasks.append({"id": task_id, **task})
 
         # Sort by due date
-        tasks.sort(key=lambda t: t.get("due") or "")
+        tasks.sort(key=lambda t: str(t.get("due") or ""))
         return tasks
 
     def generate_series_id(self, prefix: str = "SER") -> str:
@@ -965,3 +1099,12 @@ class JsonTaskStore:
                 task.setdefault("progress", None)
 
             self._data["version"] = 4
+            version = 4
+
+        if version < 5:
+            # Migration from v4 to v5:
+            # - Add worklogs field (session time tracking) to all tasks
+            for task in self._data.get("tasks", {}).values():
+                task.setdefault("worklogs", [])
+
+            self._data["version"] = 5

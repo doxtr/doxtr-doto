@@ -1,8 +1,8 @@
 """Tests for the doto resolve command."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -60,9 +60,7 @@ class TestResolveList:
 
     def test_resolve_list_shows_conflicts(self, runner, store_with_conflicts, tmp_path):
         """doto resolve --list prints the conflict entry."""
-        result = runner.invoke(
-            cli, ["--json", str(store_with_conflicts), "resolve", "--list"]
-        )
+        result = runner.invoke(cli, ["--json", str(store_with_conflicts), "resolve", "--list"])
         assert result.exit_code == 0
         assert "TASK-001" in result.output
 
@@ -98,9 +96,7 @@ class TestResolveUseRst:
             ["--json", str(store_with_conflicts), "resolve", "TASK-001", "--use-rst"],
         )
         data = json.loads(store_with_conflicts.read_text())
-        remaining = [
-            c for c in data.get("_conflicts", []) if c["task_id"] == "TASK-001"
-        ]
+        remaining = [c for c in data.get("_conflicts", []) if c["task_id"] == "TASK-001"]
         assert remaining == []
 
 
@@ -249,9 +245,7 @@ class TestResolveMultipleConflicts:
         assert data["tasks"]["TASK-001"]["title"] == "JSON title"
         assert data["tasks"]["TASK-001"]["priority"] == "medium"
         # All conflicts should be cleared
-        remaining = [
-            c for c in data.get("_conflicts", []) if c["task_id"] == "TASK-001"
-        ]
+        remaining = [c for c in data.get("_conflicts", []) if c["task_id"] == "TASK-001"]
         assert remaining == []
 
 

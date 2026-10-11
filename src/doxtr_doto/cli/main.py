@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
 
 import click
 
-from doxtr_doto.cli.config import DotoConfig, OperationMode, load_config
+from doxtr_doto.cli.config import DotoConfig, load_config
+from doxtr_doto.cli.global_state import GlobalStateStore
 from doxtr_doto.cli.json_store import JsonTaskStore
 from doxtr_doto.cli.output import OutputFormatter, get_formatter
 
@@ -21,10 +21,12 @@ class DotoContext:
         config: DotoConfig,
         store: JsonTaskStore,
         formatter: OutputFormatter,
+        global_store: GlobalStateStore | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.formatter = formatter
+        self.global_store = global_store or GlobalStateStore()
 
 
 pass_context = click.make_pass_decorator(DotoContext)
@@ -85,34 +87,53 @@ def cli(
     # Create formatter
     formatter = get_formatter(config, quiet=quiet)
 
+    # Global cross-repo state (work clock, active session, registry)
+    global_store = GlobalStateStore()
+
     # Store in context
-    ctx.obj = DotoContext(config=config, store=store, formatter=formatter)
+    ctx.obj = DotoContext(
+        config=config,
+        store=store,
+        formatter=formatter,
+        global_store=global_store,
+    )
 
 
 # Import and register commands
 from doxtr_doto.cli.commands.add import add
 from doxtr_doto.cli.commands.archive import archive
+from doxtr_doto.cli.commands.calsync import calsync
+from doxtr_doto.cli.commands.clockout import clock_out
+from doxtr_doto.cli.commands.completion import completion
 from doxtr_doto.cli.commands.config import config_cmd
 from doxtr_doto.cli.commands.delete import delete
 from doxtr_doto.cli.commands.deps import deps
-from doxtr_doto.cli.commands.export import export
-from doxtr_doto.cli.commands.list import list_tasks
-from doxtr_doto.cli.commands.search import search
-from doxtr_doto.cli.commands.show import show
-from doxtr_doto.cli.commands.update import update
 from doxtr_doto.cli.commands.done import done
-from doxtr_doto.cli.commands.reopen import reopen
-from doxtr_doto.cli.commands.resolve import resolve
-from doxtr_doto.cli.commands.init import init
-from doxtr_doto.cli.commands.stats import stats
-from doxtr_doto.cli.commands.completion import completion
-from doxtr_doto.cli.commands.next import next_task
-from doxtr_doto.cli.commands.tree import tree
-from doxtr_doto.cli.commands.series import series
+from doxtr_doto.cli.commands.export import export
 from doxtr_doto.cli.commands.git import git_cmd
+from doxtr_doto.cli.commands.init import init
+from doxtr_doto.cli.commands.list import list_tasks
+from doxtr_doto.cli.commands.log import log
+from doxtr_doto.cli.commands.next import next_task
+from doxtr_doto.cli.commands.reopen import reopen
+from doxtr_doto.cli.commands.report import report
+from doxtr_doto.cli.commands.repos import repos
+from doxtr_doto.cli.commands.resolve import resolve
+from doxtr_doto.cli.commands.search import search
+from doxtr_doto.cli.commands.series import series
+from doxtr_doto.cli.commands.show import show
+from doxtr_doto.cli.commands.start import start
+from doxtr_doto.cli.commands.stats import stats
+from doxtr_doto.cli.commands.status import status
+from doxtr_doto.cli.commands.stop import stop
+from doxtr_doto.cli.commands.timesheet import timesheet
+from doxtr_doto.cli.commands.tree import tree
+from doxtr_doto.cli.commands.tui import tui
+from doxtr_doto.cli.commands.update import update
 
 cli.add_command(add)
 cli.add_command(archive)
+cli.add_command(calsync)
 cli.add_command(config_cmd, name="config")
 cli.add_command(completion)
 cli.add_command(delete)
@@ -131,6 +152,16 @@ cli.add_command(stats)
 cli.add_command(tree)
 cli.add_command(update)
 cli.add_command(git_cmd, name="git")
+cli.add_command(done, name="complete")
+cli.add_command(start)
+cli.add_command(stop)
+cli.add_command(clock_out, name="clock-out")
+cli.add_command(status)
+cli.add_command(log)
+cli.add_command(report)
+cli.add_command(repos)
+cli.add_command(timesheet)
+cli.add_command(tui)
 
 
 def main() -> None:

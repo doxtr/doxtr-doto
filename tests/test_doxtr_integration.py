@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestDetectDoxtrFeatures:
     """Test the detect_doxtr_features function."""
@@ -88,9 +86,7 @@ class TestSetupDoxtrIntegration:
         # Configure with auto integration (default)
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_doxtr_integration = 'auto'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_doxtr_integration = 'auto'\n"
         )
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
@@ -107,9 +103,7 @@ class TestSetupDoxtrIntegration:
         # Configure with auto integration
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_doxtr_integration = 'auto'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_doxtr_integration = 'auto'\n"
         )
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
@@ -150,9 +144,7 @@ class TestSetupDoxtrIntegration:
             assert "doxtr-pdf-theme-core" in warning_msg
             assert "not loaded" in warning_msg
 
-    def test_enabled_mode_registers_containers_when_doxtr_loaded(
-        self, doto_srcdir, make_app
-    ):
+    def test_enabled_mode_registers_containers_when_doxtr_loaded(self, doto_srcdir, make_app):
         """Test enabled mode registers containers when doxtr is loaded."""
         from doxtr_doto.integration import setup_doxtr_integration
 

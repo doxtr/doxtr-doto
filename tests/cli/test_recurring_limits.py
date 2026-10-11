@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import pytest
 from datetime import date, timedelta
+
+import pytest
 from click.testing import CliRunner
 
 
@@ -19,16 +20,20 @@ def add_project(tmp_path):
     """Create a project for add command testing."""
     doto_dir = tmp_path / ".doto"
     doto_dir.mkdir()
-    
+
     # Just create the json file, don't rely on .toml config
     json_file = doto_dir / "tasks.json"
-    json_file.write_text(json.dumps({
-        "version": 3,
-        "updated": "2026-07-26T10:00:00",
-        "tasks": {},
-        "series": {},
-    }))
-    
+    json_file.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {},
+                "series": {},
+            }
+        )
+    )
+
     return tmp_path
 
 
@@ -42,13 +47,20 @@ class TestRecurringTaskLimits:
         # Daily tasks for 3 years would be ~1095 occurrences, well over 500 limit
         today = date.today()
         end_date = (today + timedelta(days=1095)).isoformat()
-        
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily standup",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily standup",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code != 0
         assert "limit" in result.output.lower()
@@ -65,12 +77,19 @@ class TestRecurringTaskLimits:
         today = date.today()
         end_date = (today + timedelta(days=9)).isoformat()  # 10 days = 10 occurrences
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily review",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily review",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Created series" in result.output
@@ -86,12 +105,19 @@ class TestRecurringTaskLimits:
         today = date.today()
         end_date = (today + timedelta(days=5)).isoformat()  # 6 days = 6 occurrences
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily review",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily review",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code != 0
         assert "limit" in result.output.lower()
@@ -109,13 +135,20 @@ class TestRecurringTaskLimits:
         end_date = (today + timedelta(days=4)).isoformat()
 
         # Even with dry-run, limit check should happen before showing preview
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily review",
-            "--repeat", "every day",
-            "--until", end_date,
-            "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily review",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+                "--dry-run",
+            ],
+        )
 
         # Should fail with limit error, not show dry-run output
         assert result.exit_code != 0
@@ -124,6 +157,7 @@ class TestRecurringTaskLimits:
     def test_default_limit_is_500(self, cli_runner, add_project):
         """Test that default limit is 500."""
         from doxtr_doto.cli.commands.add import MAX_OCCURRENCES
+
         assert MAX_OCCURRENCES == 500
 
     def test_env_var_can_increase_limit(self, cli_runner, add_project, monkeypatch):
@@ -137,13 +171,20 @@ class TestRecurringTaskLimits:
         today = date.today()
         end_date = (today + timedelta(days=730)).isoformat()
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily task",
-            "--repeat", "every day",
-            "--until", end_date,
-            "--dry-run"
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily task",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+                "--dry-run",
+            ],
+        )
 
         # Should show dry-run output, not limit error
         assert result.exit_code == 0
@@ -159,12 +200,19 @@ class TestRecurringTaskLimits:
         today = date.today()
         end_date = (today + timedelta(days=4)).isoformat()
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily review",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily review",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code != 0
         assert "limit" in result.output.lower()
@@ -182,12 +230,19 @@ class TestRecurringTaskCreation:
         today = date.today()
         end_date = (today + timedelta(days=3)).isoformat()
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily standup",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily standup",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Created series" in result.output
@@ -206,16 +261,24 @@ class TestRecurringTaskCreation:
         today = date.today()
         end_date = (today + timedelta(days=1095)).isoformat()
 
-        result = cli_runner.invoke(cli, [
-            "--config", str(add_project),
-            "add", "Daily task",
-            "--repeat", "every day",
-            "--until", end_date
-        ])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(add_project),
+                "add",
+                "Daily task",
+                "--repeat",
+                "every day",
+                "--until",
+                end_date,
+            ],
+        )
 
         assert result.exit_code != 0
         # Should include the actual count and helpful suggestions
         assert "limit" in result.output.lower()
-        assert any(suggestion in result.output.lower() for suggestion in [
-            "shorten", "interval", "config", "max_occurrences"
-        ])
+        assert any(
+            suggestion in result.output.lower()
+            for suggestion in ["shorten", "interval", "config", "max_occurrences"]
+        )

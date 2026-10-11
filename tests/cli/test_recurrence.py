@@ -7,18 +7,18 @@ from datetime import date
 import pytest
 
 from doxtr_doto.cli.recurrence import (
+    WEEKDAY_NAMES,
+    WEEKDAYS,
     RecurrencePattern,
     RecurrenceType,
     WeekdayPosition,
-    WEEKDAYS,
-    WEEKDAY_NAMES,
-    format_date_for_title,
-    generate_occurrences,
-    parse_recurrence,
     _add_months,
     _days_in_month,
     _nth_weekday_of_month,
     _ordinal_suffix,
+    format_date_for_title,
+    generate_occurrences,
+    parse_recurrence,
 )
 
 
@@ -185,7 +185,7 @@ class TestRecurrencePatternSerialization:
             weekday_position=WeekdayPosition.LAST,
         )
         data = pattern.to_dict()
-        
+
         assert data["type"] == "monthly"
         assert data["interval"] == 2
         assert data["weekday"] == 4
@@ -201,7 +201,7 @@ class TestRecurrencePatternSerialization:
             "weekday_position": None,
         }
         pattern = RecurrencePattern.from_dict(data)
-        
+
         assert pattern.type == RecurrenceType.WEEKLY
         assert pattern.interval == 2
         assert pattern.weekday == 0
@@ -215,7 +215,7 @@ class TestRecurrencePatternSerialization:
             weekday_position=WeekdayPosition.THIRD,
         )
         restored = RecurrencePattern.from_dict(original.to_dict())
-        
+
         assert restored.type == original.type
         assert restored.interval == original.interval
         assert restored.weekday == original.weekday
@@ -237,30 +237,22 @@ class TestRecurrencePatternDescribe:
 
     def test_describe_weekly(self):
         """Describe weekly pattern."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.WEEKLY, interval=1, weekday=0
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.WEEKLY, interval=1, weekday=0)
         assert pattern.describe() == "every monday"
 
     def test_describe_n_weeks(self):
         """Describe every N weeks pattern."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.WEEKLY, interval=2, weekday=4
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.WEEKLY, interval=2, weekday=4)
         assert pattern.describe() == "every 2 weeks on friday"
 
     def test_describe_monthly_day(self):
         """Describe monthly on day N pattern."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.MONTHLY, interval=1, day_of_month=15
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.MONTHLY, interval=1, day_of_month=15)
         assert pattern.describe() == "every month on the 15th"
 
     def test_describe_n_months_day(self):
         """Describe every N months on day pattern."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.MONTHLY, interval=3, day_of_month=1
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.MONTHLY, interval=3, day_of_month=1)
         assert pattern.describe() == "every 3 months on the 1st"
 
     def test_describe_monthly_weekday(self):
@@ -292,9 +284,9 @@ class TestGenerateOccurrences:
         pattern = RecurrencePattern(type=RecurrenceType.DAILY, interval=1)
         start = date(2025, 1, 1)
         end = date(2025, 1, 5)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         assert len(occurrences) == 5
         assert occurrences[0] == date(2025, 1, 1)
         assert occurrences[-1] == date(2025, 1, 5)
@@ -304,9 +296,9 @@ class TestGenerateOccurrences:
         pattern = RecurrencePattern(type=RecurrenceType.DAILY, interval=3)
         start = date(2025, 1, 1)
         end = date(2025, 1, 10)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         assert occurrences == [
             date(2025, 1, 1),
             date(2025, 1, 4),
@@ -317,13 +309,15 @@ class TestGenerateOccurrences:
     def test_weekly_occurrences(self):
         """Generate weekly occurrences."""
         pattern = RecurrencePattern(
-            type=RecurrenceType.WEEKLY, interval=1, weekday=0  # Monday
+            type=RecurrenceType.WEEKLY,
+            interval=1,
+            weekday=0,  # Monday
         )
         start = date(2025, 1, 1)  # Wednesday
         end = date(2025, 1, 31)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         # Mondays in January 2025: 6, 13, 20, 27
         assert occurrences == [
             date(2025, 1, 6),
@@ -335,13 +329,15 @@ class TestGenerateOccurrences:
     def test_biweekly_occurrences(self):
         """Generate every 2 weeks occurrences."""
         pattern = RecurrencePattern(
-            type=RecurrenceType.WEEKLY, interval=2, weekday=4  # Friday
+            type=RecurrenceType.WEEKLY,
+            interval=2,
+            weekday=4,  # Friday
         )
         start = date(2025, 1, 1)
         end = date(2025, 2, 28)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         # Every other Friday starting from Jan 3
         assert occurrences[0] == date(2025, 1, 3)
         assert occurrences[1] == date(2025, 1, 17)
@@ -349,14 +345,12 @@ class TestGenerateOccurrences:
 
     def test_monthly_day_occurrences(self):
         """Generate monthly on specific day occurrences."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.MONTHLY, interval=1, day_of_month=15
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.MONTHLY, interval=1, day_of_month=15)
         start = date(2025, 1, 1)
         end = date(2025, 4, 30)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         assert occurrences == [
             date(2025, 1, 15),
             date(2025, 2, 15),
@@ -366,14 +360,12 @@ class TestGenerateOccurrences:
 
     def test_monthly_day_31_handles_short_months(self):
         """Monthly on 31st handles months with fewer days."""
-        pattern = RecurrencePattern(
-            type=RecurrenceType.MONTHLY, interval=1, day_of_month=31
-        )
+        pattern = RecurrencePattern(type=RecurrenceType.MONTHLY, interval=1, day_of_month=31)
         start = date(2025, 1, 1)
         end = date(2025, 4, 30)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         # Feb has 28 days (2025), April has 30
         assert date(2025, 1, 31) in occurrences
         assert date(2025, 2, 28) in occurrences  # Clamped to 28
@@ -390,9 +382,9 @@ class TestGenerateOccurrences:
         )
         start = date(2025, 1, 1)
         end = date(2025, 3, 31)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         # First Mondays of Jan, Feb, Mar 2025
         assert occurrences == [
             date(2025, 1, 6),
@@ -410,9 +402,9 @@ class TestGenerateOccurrences:
         )
         start = date(2025, 1, 1)
         end = date(2025, 3, 31)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         # Last Fridays of Jan, Feb, Mar 2025
         assert occurrences == [
             date(2025, 1, 31),
@@ -425,21 +417,23 @@ class TestGenerateOccurrences:
         pattern = RecurrencePattern(type=RecurrenceType.DAILY, interval=1)
         start = date(2025, 2, 1)
         end = date(2025, 1, 1)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         assert occurrences == []
 
     def test_start_on_occurrence_date(self):
         """Start date is included if it matches pattern."""
         pattern = RecurrencePattern(
-            type=RecurrenceType.WEEKLY, interval=1, weekday=0  # Monday
+            type=RecurrenceType.WEEKLY,
+            interval=1,
+            weekday=0,  # Monday
         )
         start = date(2025, 1, 6)  # Monday
         end = date(2025, 1, 13)
-        
+
         occurrences = list(generate_occurrences(pattern, start, end))
-        
+
         assert date(2025, 1, 6) in occurrences
 
 

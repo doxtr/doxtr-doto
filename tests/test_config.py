@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestValidateConfig:
     """Test the validate_config function."""
@@ -99,9 +97,7 @@ class TestValidateConfig:
         # Configure with invalid conflict action
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_conflict_action = 'ignore'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_conflict_action = 'ignore'\n"
         )
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
@@ -190,9 +186,7 @@ class TestGetConfig:
 
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_default_priority = 'high'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_default_priority = 'high'\n"
         )
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
@@ -202,7 +196,7 @@ class TestGetConfig:
 
     def test_returns_default_for_missing_config(self, doto_srcdir, make_app):
         """Test that get_config returns default for missing config."""
-        from doxtr_doto.config import get_config, DEFAULTS
+        from doxtr_doto.config import DEFAULTS, get_config
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
 
@@ -226,16 +220,15 @@ class TestSetupConfig:
 
     def test_default_values_are_correct(self, doto_srcdir, make_app):
         """Test that default values are correctly applied."""
-        from doxtr_doto.config import DEFAULTS
 
         app = make_app(srcdir=doto_srcdir, buildername="html")
 
         # Spot check some defaults
-        assert app.config.doto_enabled == True
+        assert app.config.doto_enabled is True
         assert app.config.doto_default_priority == "medium"
         assert app.config.doto_default_status == "open"
         assert app.config.doto_conflict_action == "error"
-        assert app.config.doto_auto_archive == False
+        assert app.config.doto_auto_archive is True
 
 
 class TestConfigDefaults:
@@ -243,9 +236,9 @@ class TestConfigDefaults:
 
     def test_constants_match_defaults(self):
         """Test that DEFAULTS uses the constants correctly."""
-        from doxtr_doto.constants import DEFAULT_PRIORITY, DEFAULT_STATUS
         from doxtr_doto.config import DEFAULTS
-        
+        from doxtr_doto.constants import DEFAULT_PRIORITY, DEFAULT_STATUS
+
         assert DEFAULTS["doto_default_priority"] == DEFAULT_PRIORITY
         assert DEFAULTS["doto_default_status"] == DEFAULT_STATUS
 
@@ -312,9 +305,7 @@ class TestListIconModeConfig:
 
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_list_icon_mode = 'icon'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_list_icon_mode = 'icon'\n"
         )
         app = make_app(srcdir=doto_srcdir, buildername="html")
         assert get_config(app, "list_icon_mode") == "icon"
@@ -338,9 +329,7 @@ class TestListIconModeConfig:
 
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_list_icon_mode = 'sparkles'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_list_icon_mode = 'sparkles'\n"
         )
         app = make_app(srcdir=doto_srcdir, buildername="html")
         warnings = validate_config(app)
@@ -360,9 +349,7 @@ class TestChartEngineConfig:
 
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_chart_engine = 'plotly'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_chart_engine = 'plotly'\n"
         )
         app = make_app(srcdir=doto_srcdir, buildername="html")
         assert get_config(app, "chart_engine") == "plotly"
@@ -386,13 +373,55 @@ class TestChartEngineConfig:
 
         conf_py = doto_srcdir / "conf.py"
         conf_py.write_text(
-            "extensions = ['doxtr_doto']\n"
-            "master_doc = 'index'\n"
-            "doto_chart_engine = 'matplotlib'\n"
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_chart_engine = 'matplotlib'\n"
         )
         app = make_app(srcdir=doto_srcdir, buildername="html")
         warnings = validate_config(app)
         assert any("doto_chart_engine" in w for w in warnings)
+
+
+class TestLatexLayoutConfig:
+    """Test the doto_latex_layout option (Feature D)."""
+
+    def test_default_is_default(self):
+        from doxtr_doto.config import DEFAULTS
+
+        assert DEFAULTS["doto_latex_layout"] == "default"
+
+    def test_registered_and_readable(self, doto_srcdir, make_app):
+        from doxtr_doto.config import get_config
+
+        conf_py = doto_srcdir / "conf.py"
+        conf_py.write_text(
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_latex_layout = 'compact'\n"
+        )
+        app = make_app(srcdir=doto_srcdir, buildername="html")
+        assert get_config(app, "latex_layout") == "compact"
+
+    def test_valid_layouts_no_warning(self, doto_srcdir, make_app):
+        from doxtr_doto.config import validate_config
+
+        for layout in ("default", "compact"):
+            conf_py = doto_srcdir / "conf.py"
+            conf_py.write_text(
+                "extensions = ['doxtr_doto']\n"
+                "master_doc = 'index'\n"
+                f"doto_latex_layout = '{layout}'\n"
+            )
+            app = make_app(srcdir=doto_srcdir, buildername="html")
+            warnings = validate_config(app)
+            assert not [w for w in warnings if "doto_latex_layout" in w]
+
+    def test_invalid_layout_warns(self, doto_srcdir, make_app):
+        from doxtr_doto.config import validate_config
+
+        conf_py = doto_srcdir / "conf.py"
+        conf_py.write_text(
+            "extensions = ['doxtr_doto']\nmaster_doc = 'index'\ndoto_latex_layout = 'roomy'\n"
+        )
+        app = make_app(srcdir=doto_srcdir, buildername="html")
+        warnings = validate_config(app)
+        assert any("doto_latex_layout" in w for w in warnings)
 
 
 class TestDotoListIcons:

@@ -453,7 +453,7 @@ class TestDotoDateIntegration:
         """DotoDate should work in filter comparisons."""
         task_due = DotoDate.parse("2024-08-15")
         filter_date = DotoDate.parse("2024-08-20")
-        
+
         # This mirrors the filter_tasks logic
         assert task_due.is_before(filter_date)
         assert not task_due.is_after(filter_date)
@@ -471,6 +471,7 @@ class TestBackwardCompatibility:
     def test_utils_parse_date_returns_date(self):
         """utils.parse_date should still return a date object."""
         from doxtr_doto.utils import parse_date as utils_parse_date
+
         result = utils_parse_date("2024-08-15")
         # utils.parse_date returns the underlying date for backward compat
         assert isinstance(result, date)
@@ -479,6 +480,7 @@ class TestBackwardCompatibility:
     def test_utils_parse_date_safe_returns_date(self):
         """utils.parse_date_safe should still return a date object."""
         from doxtr_doto.utils import parse_date_safe as utils_parse_date_safe
+
         result = utils_parse_date_safe("2024-08-15")
         # utils.parse_date_safe returns the underlying date for backward compat
         assert isinstance(result, date)
@@ -487,6 +489,7 @@ class TestBackwardCompatibility:
     def test_utils_normalize_date_returns_string(self):
         """utils.normalize_date should return ISO string."""
         from doxtr_doto.utils import normalize_date as utils_normalize_date
+
         result = utils_normalize_date("2024-08-15")
         assert result == "2024-08-15"
         assert isinstance(result, str)
@@ -494,6 +497,145 @@ class TestBackwardCompatibility:
     def test_utils_format_date_display_returns_string(self):
         """utils.format_date_display should return formatted string."""
         from doxtr_doto.utils import format_date_display as utils_format
+
         result = utils_format("2024-08-15")
         assert result == "2024-08-15"
         assert isinstance(result, str)
+
+
+class TestDotoDateTime:
+    """Tests for optional naive-local time on a due value.
+
+    A due may carry a clock time appended to the YYYY-MM-DD date. These tests
+    cover parsing the accepted syntaxes, backward-compatible date-only
+    behavior, display/serialization, and overdue semantics.
+    """
+
+    def test_date_only_has_no_time(self):
+        """A plain date parses with no time component (unchanged behavior)."""
+        d = DotoDate.parse("2026-08-15")
+        assert d is not None
+        assert d.has_time is False
+        assert d.time is None
+        assert d.isoformat() == "2026-08-15"
+
+    def test_parse_hh_mm(self):
+        """HH:MM time is parsed and preserved."""
+        d = DotoDate.parse("2026-08-15 16:00")
+        assert d is not None
+        assert d.has_time is True
+        assert d.isoformat() == "2026-08-15T16:00"
+
+    def test_parse_hour_shorthand(self):
+        """The HHh shorthand expands to HH:00."""
+        d = DotoDate.parse("2026-08-15 16h")
+        assert d is not None
+        assert d.has_time is True
+        assert d.isoformat() == "2026-08-15T16:00"
+
+    def test_parse_hh_mm_ss(self):
+        """HH:MM:SS time keeps its seconds."""
+        d = DotoDate.parse("2026-08-15 16:00:31")
+        assert d is not None
+        assert d.has_time is True
+        assert d.isoformat() == "2026-08-15T16:00:31"
+
+    def test_t_separator_accepted(self):
+        """An ISO 'T' separator is accepted equivalently to a space."""
+        space = DotoDate.parse("2026-08-15 16:00")
+        tsep = DotoDate.parse("2026-08-15T16:00")
+        assert space is not None and tsep is not None
+        assert space.isoformat() == tsep.isoformat()
+
+    def test_seconds_dropped_when_zero(self):
+        """Zero seconds are not emitted, so 16:00:00 round-trips as 16:00."""
+        d = DotoDate.parse("2026-08-15T16:00:00")
+        assert d is not None
+        assert d.isoformat() == "2026-08-15T16:00"
+
+    def test_isoformat_roundtrip(self):
+        """isoformat output re-parses to an equal canonical form."""
+        for raw in ("2026-08-15", "2026-08-15T16:00", "2026-08-15T16:00:31"):
+            first = DotoDate.parse(raw)
+            assert first is not None
+            second = DotoDate.parse(first.isoformat())
+            assert second is not None
+            assert second.isoformat() == first.isoformat()
+
+    def test_display_date_only_unchanged(self):
+        """Date-only display is identical to before (no trailing time)."""
+        d = DotoDate.parse("2026-08-15")
+        assert d is not None
+        assert d.to_display() == "2026-08-15"
+
+    def test_display_with_time(self):
+        """A time-bearing due displays with a space-separated clock time."""
+        d = DotoDate.parse("2026-08-15 16:00")
+        assert d is not None
+        assert d.to_display() == "2026-08-15 16:00"
+
+    def test_display_with_time_and_custom_date_format(self):
+        """Custom date format applies to the date; the time is appended."""
+        d = DotoDate.parse("2026-08-15 16:00:31")
+        assert d is not None
+        assert d.to_display("%b %d, %Y") == "Aug 15, 2026 16:00:31"
+
+    def test_to_datetime_combines_time(self):
+        """to_datetime combines date+time (midnight when date-only)."""
+        from datetime import datetime
+
+        timed = DotoDate.parse("2026-08-15 16:00")
+        assert timed is not None
+        assert timed.to_datetime() == datetime(2026, 8, 15, 16, 0)
+
+        date_only = DotoDate.parse("2026-08-15")
+        assert date_only is not None
+        assert date_only.to_datetime() == datetime(2026, 8, 15, 0, 0)
+
+    @pytest.mark.parametrize("bad", ["16:99", "25:00", "16:", "ab:cd", "16:00:99"])
+    def test_invalid_times_rejected(self, bad):
+        """Out-of-range or malformed times raise a clear ValueError."""
+        with pytest.raises(ValueError):
+            DotoDate.parse(f"2026-08-15 {bad}")
+
+    def test_parse_safe_returns_none_on_bad_time(self):
+        """parse_safe swallows a bad time and returns None."""
+        assert DotoDate.parse_safe("2026-08-15 25:00") is None
+
+    def test_normalize_date_preserves_time(self):
+        """normalize_date keeps a time-bearing due as canonical ISO."""
+        assert normalize_date("2026-08-15 16h") == "2026-08-15T16:00"
+        assert normalize_date("2026-08-15") == "2026-08-15"
+
+    def test_format_date_display_with_time(self):
+        """The module helper formats a time-bearing due for display."""
+        assert format_date_display("2026-08-15 16:00") == "2026-08-15 16:00"
+        assert format_date_display("2026-08-15") == "2026-08-15"
+
+    def test_overdue_date_only_today_not_overdue(self):
+        """A date-only due of today is NOT overdue (unchanged semantics)."""
+        today = date.today()
+        d = DotoDate.parse(today.isoformat())
+        assert d is not None
+        assert d.is_overdue() is False
+
+    def test_overdue_time_in_past_is_overdue(self):
+        """A today due at a past clock time is overdue at that instant."""
+        d = DotoDate.parse(f"{date.today().isoformat()} 00:00")
+        assert d is not None
+        # 00:00 today is already in the past at any later point in the day.
+        assert d.is_overdue() is True
+
+    def test_overdue_time_in_future_not_overdue(self):
+        """A today due at 23:59 is not overdue until that instant passes."""
+        d = DotoDate.parse(f"{date.today().isoformat()} 23:59")
+        assert d is not None
+        assert d.is_overdue() is False
+
+    def test_comparison_uses_calendar_day(self):
+        """Comparisons/equality are day-level (time ignored for ordering)."""
+        a = DotoDate.parse("2026-08-15 09:00")
+        b = DotoDate.parse("2026-08-15 17:00")
+        assert a is not None and b is not None
+        assert a == b
+        assert not (a < b)

@@ -3,6 +3,8 @@
   Context variables:
     - tasks: List of DotoTask objects
     - task_links: Dict mapping task.id -> href of the task box (Feature 5)
+    - card_data: Dict mapping task.id -> {assignee, assignee_href} with any
+      :xlink: tokens in the assignee resolved (empty assignee_href when none)
     - icon_mode: Effective icon mode ("icon" | "icon-text" | "text")
 
   Available filters:
@@ -12,12 +14,15 @@
   {%- for task in tasks %}
   <li class="doto-list-item {{ task | row_classes }}{% if task.is_overdue() %} doto-overdue{% endif %}">
     {%- set href = (task_links.get(task.id) if task_links is defined else '#' ~ task.id) or ('#' ~ task.id) %}
+    {%- set cd = (card_data.get(task.id) if card_data is defined else none) %}
+    {%- set assignee = (cd.assignee if cd else task.assignee) %}
+    {%- set assignee_href = (cd.assignee_href if cd else '') %}
     <a class="doto-list-link doto-list-id" href="{{ href }}">{{ task.id }}</a>
     <a class="doto-list-link doto-list-title" href="{{ href }}">{{ task.title }}</a>
     <span class="doto-list-priority">[{{ task.priority }}]</span>
     <span class="doto-list-status">({{ task.status }})</span>
-    {%- if task.assignee %}
-    <span class="doto-list-assignee">@{{ task.assignee }}</span>
+    {%- if assignee %}
+    <span class="doto-list-assignee">@{% if assignee_href %}<a class="doto-list-link doto-list-assignee-link" href="{{ assignee_href }}">{{ assignee }}</a>{% else %}{{ assignee }}{% endif %}</span>
     {%- endif %}
   </li>
   {%- endfor %}

@@ -56,11 +56,76 @@ class TestResolveDotoPaletteColors:
         for key in ("doto@bg", "doto@border", "doto@titlebg", "doto@titlefg"):
             assert resolved[key].startswith("#")
 
+    def test_resolves_brand_keys_from_core_with_partial_user_config(self, doto_srcdir, make_app):
+        # Regression: brand keys (primary, danger, ...) are supplied by the
+        # core defaults, not the user config. Setting any user palette key must
+        # not drop the core-supplied brand keys during resolution.
+        from doxtr_pdf_theme_core.core_config import DOXTR_SEMANTIC_PALETTE
 
-# NOTE: the core-INDEPENDENT assertions (build_doto_color_preamble,
-# wrap_longtable_in_landscape, resolve returns-empty-without-palette, and the
-# apply no-op branches) live in test_integration_doxtr_pure.py so they run in
-# the CI matrix job even when doxtr-pdf-theme-core is absent. Keep only
+        from doxtr_doto.integration import resolve_doto_palette_colors
+
+        app = make_app(srcdir=doto_srcdir, buildername="latex")
+        # User overrides only 'warning'; primary/danger come from core defaults.
+        app.config.doxtr_theme_defaults = {}
+        app.config.doxtr_semantic_palette = {"warning": "#ABCDEF"}
+
+        resolved = resolve_doto_palette_colors(app)
+
+        # medium -> primary and critical -> danger resolve to the CORE defaults
+        # even though the user config never defined them.
+        assert resolved["doto@medium"] == DOXTR_SEMANTIC_PALETTE["primary"].upper()
+        assert resolved["doto@critical"] == DOXTR_SEMANTIC_PALETTE["danger"].upper()
+        # high -> warning picks up the user override.
+        assert resolved["doto@high"] == "#ABCDEF"
+
+
+class TestMergedSemanticPalette:
+    """Feature 3: reconstruct the core's three-tier merged light palette."""
+
+    def test_merges_core_theme_user_tiers(self, doto_srcdir, make_app):
+        from doxtr_pdf_theme_core.core_config import DOXTR_SEMANTIC_PALETTE
+
+        from doxtr_doto.integration import _merged_semantic_palette
+
+        app = make_app(srcdir=doto_srcdir, buildername="latex")
+        # Theme tier overrides core; user tier overrides theme.
+        app.config.doxtr_theme_defaults = {
+            "semantic_palette": {"primary": "#THEME1", "secondary": "#THEME2"}
+        }
+        app.config.doxtr_semantic_palette = {"primary": "#USER01"}
+
+        merged = _merged_semantic_palette(app)
+
+        # User wins over theme wins over core for 'primary'.
+        assert merged["primary"] == "#USER01"
+        # Theme wins over core for 'secondary' (no user override).
+        assert merged["secondary"] == "#THEME2"
+        # Core default survives where neither theme nor user override it.
+        assert merged["danger"] == DOXTR_SEMANTIC_PALETTE["danger"]
+
+    def test_strips_dark_sub_key(self, doto_srcdir, make_app):
+        from doxtr_doto.integration import _merged_semantic_palette
+
+        app = make_app(srcdir=doto_srcdir, buildername="latex")
+        app.config.doxtr_theme_defaults = {
+            "semantic_palette": {"primary": "#THEME1", "dark": {"primary": "#D1"}}
+        }
+        app.config.doxtr_semantic_palette = {"dark": {"danger": "#D2"}}
+
+        merged = _merged_semantic_palette(app)
+
+        # The nested 'dark' overrides are a dark-palette concern; the light
+        # merge must not carry them.
+        assert "dark" not in merged
+        assert merged["primary"] == "#THEME1"
+
+
+# NOTE: the seam-override tests (TestCoreLightPaletteSeam) are core-INDEPENDENT
+# -- they fully substitute _core_light_palette_defaults with fakes -- so they
+# live in test_integration_doxtr_pure.py (outside the module-level importorskip
+# above) alongside the other core-INDEPENDENT assertions
+# (build_doto_color_preamble, wrap_longtable_in_landscape, resolve
+# returns-empty-without-palette, and the apply no-op branches). Keep only
 # core-DEPENDENT assertions here, under the module-level importorskip above.
 
 
@@ -106,10 +171,11 @@ class TestLandscapeThreshold:
     """Feature 6: landscape threshold reads the core's config."""
 
     def test_default_matches_core_constant(self, doto_srcdir, make_app):
-        from doxtr_doto.integration import get_landscape_min_columns
         from doxtr_pdf_theme_core.ast_processors.landscape import (
             DEFAULT_MIN_COLUMNS,
         )
+
+        from doxtr_doto.integration import get_landscape_min_columns
 
         app = make_app(srcdir=doto_srcdir, buildername="latex")
         assert get_landscape_min_columns(app) == DEFAULT_MIN_COLUMNS

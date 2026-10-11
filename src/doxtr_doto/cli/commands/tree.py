@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import click
 
@@ -42,7 +42,9 @@ def get_priority_indicator(priority: str) -> str:
 @click.option("--assignee", "-a", help="Filter by assignee.")
 @click.option("--depth", "-d", type=int, help="Maximum tree depth to display.")
 @click.option("--show-done", is_flag=True, help="Include completed tasks.")
-@click.option("--reverse", "-r", is_flag=True, help="Show reverse dependencies (what depends on this).")
+@click.option(
+    "--reverse", "-r", is_flag=True, help="Show reverse dependencies (what depends on this)."
+)
 @click.option("--compact", "-c", is_flag=True, help="Compact output (no details).")
 @click.pass_obj
 def tree(
@@ -144,7 +146,9 @@ def tree(
 
         formatter.print(line, style=style)
 
-    def print_tree_down(tid: str, prefix: str, is_last: bool, visited: set, current_depth: int) -> None:
+    def print_tree_down(
+        tid: str, prefix: str, is_last: bool, visited: set[str], current_depth: int
+    ) -> None:
         """Print task and its dependencies (what it depends ON)."""
         if depth is not None and current_depth > depth:
             return
@@ -173,7 +177,9 @@ def tree(
             is_last_child = i == len(deps) - 1
             print_tree_down(dep_id, child_prefix, is_last_child, visited.copy(), current_depth + 1)
 
-    def print_tree_up(tid: str, prefix: str, is_last: bool, visited: set, current_depth: int) -> None:
+    def print_tree_up(
+        tid: str, prefix: str, is_last: bool, visited: set[str], current_depth: int
+    ) -> None:
         """Print task and its dependents (what depends ON it)."""
         if depth is not None and current_depth > depth:
             return
@@ -203,8 +209,8 @@ def tree(
 
     # Single task mode
     if task_id:
-        task = all_tasks.get(task_id)
-        if not task:
+        root_task = all_tasks.get(task_id)
+        if not root_task:
             formatter.print_error(f"Task not found: {task_id}")
             raise SystemExit(1)
 
@@ -215,12 +221,14 @@ def tree(
         formatter.print("")
 
         # Print root task
-        marker, style = get_status_marker(task.get("status", "open"))
-        title = task.get("title", "")
+        marker, style = get_status_marker(root_task.get("status", "open"))
+        title = root_task.get("title", "")
         if compact:
             formatter.print(f"{marker} {task_id}", style=style)
         else:
-            formatter.print(f"{marker} {task_id}: {title} [{task.get('status', 'open')}]", style=style)
+            formatter.print(
+                f"{marker} {task_id}: {title} [{root_task.get('status', 'open')}]", style=style
+            )
 
         # Print tree
         if reverse:
@@ -247,7 +255,7 @@ def tree(
     root_tasks = []
     non_root_tasks = []
 
-    for tid, task in all_tasks.items():
+    for tid, _task in all_tasks.items():
         if not should_show(tid):
             continue
         deps = depends_on_map.get(tid, [])
@@ -281,17 +289,21 @@ def tree(
         printed.add(tid)
 
         # Get tasks that depend on this one
-        dependents = [d for d in depended_by_map.get(tid, []) if should_show(d) and d not in printed]
+        dependents = [
+            d for d in depended_by_map.get(tid, []) if should_show(d) and d not in printed
+        ]
         for i, dep_id in enumerate(dependents):
             print_forest_node(dep_id, child_prefix, i == len(dependents) - 1, current_depth + 1)
 
     # Sort roots by priority
     priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    root_tasks.sort(key=lambda t: (
-        priority_order.get(all_tasks[t].get("priority", "medium"), 2),
-        all_tasks[t].get("due") or "9999-99-99",
-        t
-    ))
+    root_tasks.sort(
+        key=lambda t: (
+            priority_order.get(all_tasks[t].get("priority", "medium"), 2),
+            all_tasks[t].get("due") or "9999-99-99",
+            t,
+        )
+    )
 
     for i, tid in enumerate(root_tasks):
         if tid not in printed:
@@ -316,7 +328,9 @@ def tree(
             printed.add(tid)
 
             # Print dependents
-            dependents = [d for d in depended_by_map.get(tid, []) if should_show(d) and d not in printed]
+            dependents = [
+                d for d in depended_by_map.get(tid, []) if should_show(d) and d not in printed
+            ]
             for j, dep_id in enumerate(dependents):
                 print_forest_node(dep_id, "", j == len(dependents) - 1, 1)
 

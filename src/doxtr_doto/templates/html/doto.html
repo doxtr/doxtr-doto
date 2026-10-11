@@ -6,8 +6,13 @@
     - priority: Priority level (low, medium, high, critical)
     - status: Task status (open, in-progress, blocked, done)
     - assignee: Assigned person (optional)
+    - assignee_href: Resolved xlink URL for the assignee (optional; empty when
+      there is no resolved link)
     - due: Due date string (optional)
     - tags: List of tag strings (optional)
+    - raci_html: Pre-rendered RACI HTML subsection (optional; empty when the
+      task has no RACI data). Rendered via doxtr_doto.raci.render_raci_html,
+      which is overridable by child themes.
     - progress: Progress percentage 0-100 (optional)
     - is_overdue: Boolean indicating if task is past due
     - classes: Pre-computed CSS classes string
@@ -23,7 +28,12 @@
   </div>
   <div class="doto-meta">
     {%- if assignee %}
-    <span class="doto-assignee">{{ assignee }}</span>
+    <span class="doto-assignee">
+      {%- if assignee_href %}<a class="doto-assignee-link" href="{{ assignee_href }}">{{ assignee }}</a>{% else %}{{ assignee }}{% endif -%}
+    </span>
+    {%- endif %}
+    {%- if raci_html %}
+    {{ raci_html | safe }}
     {%- endif %}
     {%- if due %}
     <span class="doto-due{% if is_overdue %} doto-overdue{% endif %}">{{ due }}</span>

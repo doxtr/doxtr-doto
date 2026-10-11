@@ -1,8 +1,8 @@
 """Tests for standalone (non-Sphinx) operation mode."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -82,9 +82,7 @@ class TestStandaloneAddAndList:
 class TestStandaloneWithoutConfPy:
     """Tests for CLI operation without Sphinx conf.py."""
 
-    def test_standalone_mode_does_not_require_conf_py(
-        self, runner, standalone_store, tmp_path
-    ):
+    def test_standalone_mode_does_not_require_conf_py(self, runner, standalone_store, tmp_path):
         """CLI works from a directory with no conf.py or .doto.toml."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(

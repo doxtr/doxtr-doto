@@ -82,7 +82,7 @@ def archive(
                 return
 
     # Perform archiving
-    for task_id, task in tasks_to_archive:
+    for task_id, _task in tasks_to_archive:
         if store.archive_task(task_id):
             archived.append(task_id)
 
@@ -104,8 +104,10 @@ def archive(
 
     # JSON output
     if json_output:
-        formatter.print_json({
-            "archived": archived,
-            "already_archived": already_archived,
-            "not_found": not_found,
-        })
+        formatter.print_json(
+            {
+                "archived": archived,
+                "already_archived": already_archived,
+                "not_found": not_found,
+            }
+        )

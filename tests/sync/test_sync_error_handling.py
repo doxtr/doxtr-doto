@@ -17,7 +17,7 @@ class TestJsonStoreErrorHandling:
         """Corrupted JSON file raises clear error."""
         json_path = tmp_path / "tasks.json"
         json_path.write_text("not valid json {")
-        
+
         store = JsonTaskStore(json_path)
         with pytest.raises(json.JSONDecodeError):
             store.load()
@@ -26,7 +26,7 @@ class TestJsonStoreErrorHandling:
         """Empty JSON file is handled gracefully."""
         json_path = tmp_path / "tasks.json"
         json_path.write_text("")
-        
+
         store = JsonTaskStore(json_path)
         # Should raise or handle gracefully
         with pytest.raises((json.JSONDecodeError, ValueError)):
@@ -36,7 +36,7 @@ class TestJsonStoreErrorHandling:
         """Missing version field triggers migration."""
         json_path = tmp_path / "tasks.json"
         json_path.write_text('{"tasks": {}}')
-        
+
         store = JsonTaskStore(json_path)
         store.load()
         # Should have been migrated to have version
@@ -46,7 +46,7 @@ class TestJsonStoreErrorHandling:
         """Missing tasks field raises KeyError when accessing tasks."""
         json_path = tmp_path / "tasks.json"
         json_path.write_text('{"version": 2}')
-        
+
         store = JsonTaskStore(json_path)
         store.load()
         # Accessing tasks without the key raises - user must provide valid JSON
@@ -56,21 +56,21 @@ class TestJsonStoreErrorHandling:
     def test_nonexistent_file_creates_empty_store(self, tmp_path: Path):
         """Nonexistent file creates empty store on load."""
         json_path = tmp_path / "nonexistent" / "tasks.json"
-        
+
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         assert store.data["version"] is not None
         assert store.data["tasks"] == {}
 
     def test_save_creates_parent_directories(self, tmp_path: Path):
         """Save creates parent directories if needed."""
         json_path = tmp_path / "deep" / "nested" / "tasks.json"
-        
+
         store = JsonTaskStore(json_path)
         store.load()
         store.save()
-        
+
         assert json_path.exists()
 
     def test_update_nonexistent_task_returns_false(self, tmp_path: Path):
@@ -78,9 +78,9 @@ class TestJsonStoreErrorHandling:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         result = store.update_task("NONEXISTENT-999", {"title": "New"})
-        
+
         assert result is False
 
     def test_delete_nonexistent_task_returns_false(self, tmp_path: Path):
@@ -88,9 +88,9 @@ class TestJsonStoreErrorHandling:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         result = store.delete_task("NONEXISTENT-999")
-        
+
         assert result is False
 
     def test_get_nonexistent_task_returns_none(self, tmp_path: Path):
@@ -98,9 +98,9 @@ class TestJsonStoreErrorHandling:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         result = store.get_task("NONEXISTENT-999")
-        
+
         assert result is None
 
 
@@ -117,13 +117,13 @@ class TestJsonStoreSchemaMigration:
                     "title": "Old task",
                     "status": "open",
                 }
-            }
+            },
         }
         json_path.write_text(json.dumps(v1_data))
-        
+
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         task = store.get_task("TASK-001")
         # Should have all expected fields after migration
         assert task is not None
@@ -142,13 +142,13 @@ class TestJsonStoreSchemaMigration:
                     "assignee": "alice",
                     "tags": ["bug", "urgent"],
                 }
-            }
+            },
         }
         json_path.write_text(json.dumps(v1_data))
-        
+
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         task = store.get_task("TASK-001")
         assert task["title"] == "Important task"
         assert task["status"] == "in-progress"
@@ -165,12 +165,12 @@ class TestJsonStoreIdGeneration:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         id1 = store.generate_id(prefix="TEST", sequential=True)
         store.add_task(id1, {"title": "First"})
-        
+
         id2 = store.generate_id(prefix="TEST", sequential=True)
-        
+
         assert id1 == "TEST-001"
         assert id2 == "TEST-002"
 
@@ -179,11 +179,11 @@ class TestJsonStoreIdGeneration:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         # Add tasks with specific IDs
         store.add_task("TEST-001", {"title": "First"})
         store.add_task("TEST-005", {"title": "Fifth"})
-        
+
         # Next ID should be TEST-006 (after highest)
         next_id = store.generate_id(prefix="TEST", sequential=True)
         assert next_id == "TEST-006"
@@ -193,12 +193,12 @@ class TestJsonStoreIdGeneration:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         id1 = store.generate_id(prefix="HASH", sequential=False)
         store.add_task(id1, {"title": "First"})
-        
+
         id2 = store.generate_id(prefix="HASH", sequential=False)
-        
+
         assert id1 != id2
         assert id1.startswith("HASH-")
         assert id2.startswith("HASH-")
@@ -212,13 +212,13 @@ class TestJsonStoreFilterTasks:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         store.add_task("TASK-001", {"title": "Open", "status": "open"})
         store.add_task("TASK-002", {"title": "Done", "status": "done"})
         store.add_task("TASK-003", {"title": "Also Open", "status": "open"})
-        
+
         open_tasks = store.filter_tasks(status="open")
-        
+
         assert len(open_tasks) == 2
 
     def test_filter_by_assignee(self, tmp_path: Path):
@@ -226,13 +226,13 @@ class TestJsonStoreFilterTasks:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         store.add_task("TASK-001", {"title": "Alice's", "assignee": "alice"})
         store.add_task("TASK-002", {"title": "Bob's", "assignee": "bob"})
         store.add_task("TASK-003", {"title": "Also Alice's", "assignee": "alice"})
-        
+
         alice_tasks = store.filter_tasks(assignee="alice")
-        
+
         assert len(alice_tasks) == 2
 
     def test_filter_excludes_archived_by_default(self, tmp_path: Path):
@@ -240,12 +240,12 @@ class TestJsonStoreFilterTasks:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         store.add_task("TASK-001", {"title": "Active", "archived": False})
         store.add_task("TASK-002", {"title": "Archived", "archived": True})
-        
+
         active_tasks = store.filter_tasks()
-        
+
         assert len(active_tasks) == 1
         assert active_tasks[0].get("title") == "Active"
 
@@ -254,12 +254,12 @@ class TestJsonStoreFilterTasks:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         store.add_task("TASK-001", {"title": "Active", "archived": False})
         store.add_task("TASK-002", {"title": "Archived", "archived": True})
-        
+
         all_tasks = store.filter_tasks(include_archived=True)
-        
+
         assert len(all_tasks) == 2
 
 
@@ -271,10 +271,10 @@ class TestJsonStoreAtomicWrite:
         json_path = tmp_path / "tasks.json"
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         store.add_task("TASK-001", {"title": "Test"})
         store.save()
-        
+
         # File should exist and be valid JSON
         assert json_path.exists()
         data = json.loads(json_path.read_text())
@@ -283,14 +283,14 @@ class TestJsonStoreAtomicWrite:
     def test_save_preserves_data_on_error(self, tmp_path: Path):
         """Original file preserved if save fails."""
         json_path = tmp_path / "tasks.json"
-        
+
         # Create initial valid file
         initial_data = {"version": 2, "tasks": {"TASK-001": {"title": "Original"}}}
         json_path.write_text(json.dumps(initial_data))
-        
+
         store = JsonTaskStore(json_path)
         store.load()
-        
+
         # File should still be readable
         store2 = JsonTaskStore(json_path)
         store2.load()

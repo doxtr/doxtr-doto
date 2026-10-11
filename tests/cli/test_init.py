@@ -24,10 +24,10 @@ class TestInitCommand:
         """Init creates .doto.toml config file."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             assert Path(".doto.toml").exists()
-            
+
             content = Path(".doto.toml").read_text()
             assert "[doto]" in content
             assert "json_file" in content
@@ -36,7 +36,7 @@ class TestInitCommand:
         """Init creates .doto directory."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             assert Path(".doto").is_dir()
 
@@ -44,11 +44,11 @@ class TestInitCommand:
         """Init creates tasks.json file."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             json_path = Path(".doto/tasks.json")
             assert json_path.exists()
-            
+
             data = json.loads(json_path.read_text())
             assert "version" in data
             assert "tasks" in data
@@ -57,11 +57,11 @@ class TestInitCommand:
         """Init creates inbox.rst file."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             inbox_path = Path("tasks/inbox.rst")
             assert inbox_path.exists()
-            
+
             content = inbox_path.read_text()
             assert "Task Inbox" in content
 
@@ -69,7 +69,7 @@ class TestInitCommand:
         """Init creates inbox at custom location."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init", "--inbox", "custom/tasks.rst"])
-            
+
             assert result.exit_code == 0
             assert Path("custom/tasks.rst").exists()
 
@@ -77,9 +77,9 @@ class TestInitCommand:
         """Init fails if .doto.toml already exists."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             Path(".doto.toml").write_text("[doto]\n")
-            
+
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code != 0
             assert "already exists" in result.output
 
@@ -87,9 +87,9 @@ class TestInitCommand:
         """Init --force overwrites existing files."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             Path(".doto.toml").write_text("old content")
-            
+
             result = runner.invoke(cli, ["init", "--force"])
-            
+
             assert result.exit_code == 0
             content = Path(".doto.toml").read_text()
             assert "[doto]" in content
@@ -101,27 +101,29 @@ class TestInitCommand:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        
+
         # Need to also patch Path.home() since it might cache the value
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         result = runner.invoke(cli, ["init", "--standalone"])
-        
+
         assert result.exit_code == 0
         config_path = fake_home / ".doto" / "config.toml"
         assert config_path.exists()
-        
+
         content = config_path.read_text()
         assert "[doto]" in content
 
-    def test_init_standalone_creates_json_store(self, runner: CliRunner, tmp_path: Path, monkeypatch):
+    def test_init_standalone_creates_json_store(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
         """Init --standalone creates tasks.json in ~/.doto/."""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         result = runner.invoke(cli, ["init", "--standalone"])
-        
+
         assert result.exit_code == 0
         json_path = fake_home / ".doto" / "tasks.json"
         assert json_path.exists()
@@ -133,9 +135,9 @@ class TestInitCommand:
         doto_dir.mkdir(parents=True)
         (doto_dir / "config.toml").write_text("[doto]\n")
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         result = runner.invoke(cli, ["init", "--standalone"])
-        
+
         assert result.exit_code != 0
         assert "already exists" in result.output
 
@@ -146,9 +148,9 @@ class TestInitCommand:
         doto_dir.mkdir(parents=True)
         (doto_dir / "config.toml").write_text("old")
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         result = runner.invoke(cli, ["init", "--standalone", "--force"])
-        
+
         assert result.exit_code == 0
         content = (doto_dir / "config.toml").read_text()
         assert "[doto]" in content
@@ -158,9 +160,9 @@ class TestInitCommand:
         with runner.isolated_filesystem(temp_dir=tmp_path):
             source_dir = Path("docs")
             source_dir.mkdir()
-            
+
             result = runner.invoke(cli, ["init", "--source", "docs"])
-            
+
             assert result.exit_code == 0
             assert (source_dir / ".doto.toml").exists()
 
@@ -168,7 +170,7 @@ class TestInitCommand:
         """Init shows tab completion hint."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             assert "completion" in result.output
 
@@ -176,9 +178,9 @@ class TestInitCommand:
         """Init detects existing conf.py and shows hint."""
         with runner.isolated_filesystem(temp_dir=tmp_path):
             Path("conf.py").write_text("# Sphinx config\n")
-            
+
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             assert "conf.py" in result.output
             assert "extensions" in result.output
@@ -189,8 +191,8 @@ class TestInitCommand:
             docs_dir = Path("docs/source")
             docs_dir.mkdir(parents=True)
             (docs_dir / "conf.py").write_text("# Sphinx config\n")
-            
+
             result = runner.invoke(cli, ["init"])
-            
+
             assert result.exit_code == 0
             assert "conf.py" in result.output

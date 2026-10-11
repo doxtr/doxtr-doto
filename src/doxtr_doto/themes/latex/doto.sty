@@ -117,6 +117,56 @@
   title={#1},
 }
 
+% --- Feature D: compact PDF layout ----------------------------------------
+% The compact layout lays out the SAME fields as the default box (id, priority,
+% status, assignee, due, created, updated, tags, raci) more densely: a tighter
+% box geometry, a single-line header (id + priority + status) instead of the
+% roomy stacked-icon rows, and inline icon+value field pairs separated by thin
+% rules. nodes.py selects dotoboxcompact<priority> + the \dotocompact* macros
+% when doto_latex_layout="compact"; everything visual lives here so a child
+% theme's .sty can \renewenvironment / \renewcommand either layout. The default
+% layout (dotobox* + \dotometa*) is untouched for full backward compatibility.
+
+% Compact box: no title bar (the title + id/priority/status live in a dense
+% single-line header emitted into the body), tighter padding, a priority-colored
+% thick left rule for at-a-glance severity. #1 = (unused title placeholder kept
+% for a uniform [#1] call signature with the default boxes).
+\newtcolorbox{dotoboxcompact}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@border, coltext=doto@text,
+  boxrule=0.4pt, arc=1pt,
+  left=5pt, right=5pt, top=3pt, bottom=3pt,
+  boxsep=1pt,
+}
+
+\newtcolorbox{dotoboxcompactlow}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@low, coltext=doto@text,
+  boxrule=0.4pt, leftrule=2.5pt, arc=1pt,
+  left=5pt, right=5pt, top=3pt, bottom=3pt, boxsep=1pt,
+}
+
+\newtcolorbox{dotoboxcompactmedium}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@medium, coltext=doto@text,
+  boxrule=0.4pt, leftrule=2.5pt, arc=1pt,
+  left=5pt, right=5pt, top=3pt, bottom=3pt, boxsep=1pt,
+}
+
+\newtcolorbox{dotoboxcompacthigh}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@high, coltext=doto@text,
+  boxrule=0.4pt, leftrule=2.5pt, arc=1pt,
+  left=5pt, right=5pt, top=3pt, bottom=3pt, boxsep=1pt,
+}
+
+\newtcolorbox{dotoboxcompactcritical}[1][]{
+  enhanced, breakable,
+  colback=doto@bg, colframe=doto@critical, coltext=doto@text,
+  boxrule=0.4pt, leftrule=2.5pt, arc=1pt,
+  left=5pt, right=5pt, top=3pt, bottom=3pt, boxsep=1pt,
+}
+
 % Doto list environment
 \newenvironment{dotolist}{%
   \begin{itemize}
@@ -159,6 +209,7 @@
   \providecommand{\faFlag}{}%
   \providecommand{\faExclamation}{}%
   \providecommand{\faCircleDot}{}%
+  \providecommand{\faUsers}{\faUser}%
 }
 
 % Stacked icon: a Font Awesome icon on top with a small text label underneath.
@@ -182,6 +233,7 @@
 \newcommand{\dotometacreated}[1]{\dotostackedicon{\faCalendarPlus}{Created}~{\color{doto@text}#1}}
 \newcommand{\dotometaupdated}[1]{\dotostackedicon{\faCalendarCheck}{Updated}~{\color{doto@text}#1}}
 \newcommand{\dotometatags}[1]{\dotostackedicon{\faTags}{Tags}~{\color{doto@text}#1}}
+\newcommand{\dotometaraci}[1]{\dotostackedicon{\faUsers}{RACI}~{\color{doto@text}#1}}
 \newcommand{\dotometapriority}[1]{\dotostackedicon{\faFlag}{Priority}~#1}
 \newcommand{\dotometastatus}[1]{\dotostackedicon{\faCircleDot}{Status}~{\color{doto@text}#1}}
 \newcommand{\dotometaid}[1]{\dotostackedicon{\faExclamation}{ID}~{\color{doto@text}\texttt{\small #1}}}
@@ -200,6 +252,31 @@
 
 % Overdue styling
 \newcommand{\dotooverdue}[1]{\textcolor{doto@overdue}{\textbf{#1} (OVERDUE)}}
+
+% --- Feature D: compact-layout metadata macros ----------------------------
+% These render the compact box body. They deliberately reuse the same colors,
+% priority-coloring (\dotopriorityvalue) and overdue macro (\dotooverdue) as the
+% default layout so the two layouts stay visually consistent, only denser.
+%
+% Single-line header: title (bold) + id + priority + status on one line.
+% #1 = title, #2 = id, #3 = priority value (already \dotopriorityvalue-wrapped),
+% #4 = status. Icons sit inline (not stacked) so the whole header is one row.
+\newcommand{\dotocompactheader}[4]{%
+  {\bfseries #1}\hfill
+  {\faHashtag\,\texttt{\small #2}}\quad
+  {\faFlag\,#3}\quad
+  {\faCircleDot\,{\footnotesize #4}}\par
+}
+
+% Thin separator rule between the header and the inline field pairs.
+\newcommand{\dotocompactrule}{\par\vspace{1pt}{\color{doto@border}\hrule height 0.3pt}\vspace{1pt}\par}
+
+% One inline icon+value field pair. #1 = FA icon macro, #2 = value. Rendered
+% snugly so several pairs flow on one line separated by \dotocompactsep.
+\newcommand{\dotocompactfield}[2]{{\color{doto@label}#1}\,{\color{doto@text}#2}}
+
+% Separator placed between consecutive inline field pairs.
+\newcommand{\dotocompactsep}{\hspace{1.2em}}
 
 % Task reference command. The matching target label is emitted by the task box
 % (see \dotolabel below and visit_doto_node_latex).

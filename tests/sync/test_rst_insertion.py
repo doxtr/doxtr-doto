@@ -2,6 +2,7 @@
 
 Section 02 tests: Ensures task_id is properly propagated during RST updates.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,9 +11,9 @@ import pytest
 
 from doxtr_doto.exceptions import DotoValidationError
 from doxtr_doto.sync.rst_writer import (
+    _find_last_directive_line,
     generate_directive_text,
     insert_doto_directive,
-    _find_last_directive_line,
 )
 
 
@@ -96,10 +97,10 @@ class TestInsertDotoDirective:
         """insert_doto_directive creates file if it doesn't exist."""
         rst = tmp_path / "new_file.rst"
         assert not rst.exists()
-        
+
         task_data = {"id": "TASK-001", "title": "New Task"}
         insert_doto_directive(rst, task_data)
-        
+
         assert rst.exists()
         content = rst.read_text()
         assert ":id: TASK-001" in content
@@ -124,12 +125,7 @@ class TestInsertDotoDirective:
     def test_insert_after_existing_directive(self, tmp_path: Path):
         """New directive is inserted after the last existing doto directive."""
         rst = tmp_path / "tasks.rst"
-        rst.write_text(
-            ".. doto:: First Task\n"
-            "   :id: TASK-001\n"
-            "   :status: open\n\n"
-            "Some prose.\n"
-        )
+        rst.write_text(".. doto:: First Task\n   :id: TASK-001\n   :status: open\n\nSome prose.\n")
         task_data = {
             "id": "TASK-002",
             "title": "Second Task",
@@ -150,15 +146,15 @@ class TestInsertDotoDirective:
         """insert_doto_directive respects explicit after_line parameter."""
         rst = tmp_path / "tasks.rst"
         rst.write_text("Line 1\nLine 2\nLine 3\n")
-        
+
         task_data = {"id": "TASK-001", "title": "Inserted Task"}
         insert_doto_directive(rst, task_data, after_line=2)
-        
+
         content = rst.read_text()
         lines = content.split("\n")
         # Should have Line 1, Line 2, blank, directive, blank, Line 3
         assert "Line 2" in lines[1]
-        task_line_idx = next(i for i, l in enumerate(lines) if "TASK-001" in l)
+        task_line_idx = next(i for i, line in enumerate(lines) if "TASK-001" in line)
         assert task_line_idx > 1  # After line 2
 
 
@@ -173,11 +169,7 @@ class TestFindLastDirectiveLine:
 
     def test_finds_single_directive(self):
         """Finds the end line of a single directive."""
-        content = (
-            ".. doto:: Single Task\n"
-            "   :id: TASK-001\n"
-            "   :status: open\n"
-        )
+        content = ".. doto:: Single Task\n   :id: TASK-001\n   :status: open\n"
         result = _find_last_directive_line(content)
         assert result is not None
         assert result >= 3  # Should be at least line 3

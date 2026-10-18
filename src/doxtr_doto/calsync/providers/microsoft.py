@@ -9,11 +9,16 @@ for the REST calls -- both lazily imported (``[calendar]`` extra).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from doxtr_doto.calsync import auth
-from doxtr_doto.calsync.model import EventKind
-from doxtr_doto.calsync.providers._shared import local_tz_name, read_client_secrets
+from doxtr_doto.calsync.model import EventKind, RemoteEvent
+from doxtr_doto.calsync.providers._shared import (
+    local_tz_name,
+    parse_graph_datetime,
+    read_client_secrets,
+)
 from doxtr_doto.calsync.providers.base import (
     CalendarProvider,
     ProviderAuthError,
@@ -135,8 +140,6 @@ class MicrosoftCalendarProvider(CalendarProvider):
         return f"{GRAPH_BASE}/me/events"
 
     def _body(self, event: CalendarEvent) -> dict[str, Any]:
-        from datetime import datetime
-
         tz = local_tz_name()
 
         def _dt(d: datetime) -> dict[str, Any]:
@@ -233,3 +236,65 @@ class MicrosoftCalendarProvider(CalendarProvider):
             return ""
         items = resp.json().get("value", [])
         return str(items[0]["id"]) if items else ""
+
+    def list_events(self) -> list[RemoteEvent]:
+        """List the configured calendar's events via Microsoft Graph.
+
+        Requests the stashed doto-uid extended property alongside the standard
+        fields so a doto-created event's iCalUID round-trips, and follows
+        ``@odata.nextLink`` for pagination. Graph start/end are returned as
+        ``{"dateTime", "timeZone"}``; we take the wall-clock value as
+        naive-local, consistent with how ``_body`` writes it on push.
+        """
+        assert self._session is not None, "connect() must be called first"
+        params: dict[str, Any] | None = {
+            "$top": "100",
+            "$expand": (f"singleValueExtendedProperties($filter=id eq '{DOTO_UID_PROP}')"),
+        }
+        # Graph returns start/end.dateTime in UTC by default; ask it to express
+        # them in the local zone's wall-clock instead so that dropping tzinfo in
+        # ``_to_remote_event`` yields the correct naive-local time (not a value
+        # shifted by the user's UTC offset). ``local_tz_name()`` resolves a real
+        # IANA name, which Graph's ``outlook.timezone`` Prefer header requires.
+        headers = {"Prefer": f'outlook.timezone="{local_tz_name()}"'}
+        url = self._events_url()
+        out: list[RemoteEvent] = []
+        while url:
+            resp = self._session.get(url, params=params, headers=headers)
+            if resp.status_code >= 400:
+                raise ProviderError(f"Microsoft list failed: {resp.status_code} {resp.text}")
+            data = resp.json()
+            for item in data.get("value", []):
+                out.append(self._to_remote_event(item))
+            url = data.get("@odata.nextLink") or ""
+            params = None  # nextLink already carries the query
+        return out
+
+    @staticmethod
+    def _to_remote_event(item: dict[str, Any]) -> RemoteEvent:
+        """Map one Graph event resource into a :class:`RemoteEvent`."""
+        uid = ""
+        for prop in item.get("singleValueExtendedProperties", []) or []:
+            if prop.get("id") == DOTO_UID_PROP:
+                uid = str(prop.get("value", ""))
+                break
+        if not uid:
+            uid = str(item.get("iCalUId") or item.get("iCalUID") or "")
+        all_day = bool(item.get("isAllDay"))
+        start = parse_graph_datetime(item.get("start", {}))
+        end = parse_graph_datetime(item.get("end", {}))
+        body = item.get("body", {}) or {}
+        return RemoteEvent(
+            uid=uid,
+            remote_id=str(item.get("id", "")),
+            etag=str(item.get("@odata.etag", "")),
+            summary=str(item.get("subject", "")),
+            description=str(body.get("content", "")),
+            start=start,
+            end=end,
+            all_day=all_day,
+            due=None,
+            kind=EventKind.EVENT,
+            status=None,
+            raw=item,
+        )

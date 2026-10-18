@@ -131,9 +131,24 @@ class CalendarConfig:
     #:   * ``"todo"``  - a VTODO item (a to-do, not a visible timed event).
     event_mode: str = "event"
 
-    #: Sync direction. Only ``"push"`` (doto -> calendar) is implemented today;
-    #: the engine is direction-aware so ``"two-way"`` can be enabled later.
+    #: Sync direction:
+    #:   * ``"push"``    - doto -> calendar only (the default).
+    #:   * ``"pull"``    - calendar -> doto only (import/reconcile).
+    #:   * ``"two-way"`` - pull (calendar -> doto) then push (doto -> calendar).
+    #: The spellings ``"twoway"`` and ``"both"`` are accepted as aliases and
+    #: normalized to ``"two-way"`` by :meth:`normalized_direction`.
     direction: str = "push"
+
+    #: How a dual local+remote edit of a doto-owned item is resolved on a
+    #: two-way sync:
+    #:   * ``"local-wins"`` (default) - keep the local task; push overwrites
+    #:     the remote (the remote edit is discarded).
+    #:   * ``"merge"`` - three-way merge the two edits (git-style, line-level
+    #:     on the body, with conflict markers on a true divergence) and
+    #:     re-push the merged result so both sides converge.
+    #: Only consulted when ``direction`` resolves to ``"two-way"``. Normalized
+    #: by :meth:`normalized_conflict_policy`.
+    conflict_policy: str = "local-wins"
 
     # --- Event-projection (event_mode == "event") --------------------------
     #: Duration (minutes) of the event created for a time-bearing due.
@@ -180,8 +195,56 @@ class CalendarConfig:
     )
     #: Accepted event-mode values.
     _VALID_EVENT_MODES = frozenset({"event", "todo"})
-    #: Accepted sync directions (only "push" is implemented today).
-    _VALID_DIRECTIONS = frozenset({"push"})
+    #: Accepted sync directions, including spelling aliases. Normalized by
+    #: :meth:`normalized_direction` to the canonical ``"push"`` / ``"pull"`` /
+    #: ``"two-way"``.
+    _VALID_DIRECTIONS = frozenset({"push", "pull", "two-way", "twoway", "both"})
+
+    #: Map of accepted direction spellings to their canonical form.
+    _DIRECTION_ALIASES = {
+        "push": "push",
+        "pull": "pull",
+        "two-way": "two-way",
+        "twoway": "two-way",
+        "both": "two-way",
+    }
+
+    #: Accepted conflict-policy values (canonical spellings; aliases folded by
+    #: :meth:`normalized_conflict_policy`).
+    _VALID_CONFLICT_POLICIES = frozenset(
+        {"local-wins", "localwins", "local", "merge", "three-way", "3-way"}
+    )
+
+    #: Map of accepted conflict-policy spellings to their canonical form.
+    _CONFLICT_POLICY_ALIASES = {
+        "local-wins": "local-wins",
+        "localwins": "local-wins",
+        "local": "local-wins",
+        "merge": "merge",
+        "three-way": "merge",
+        "3-way": "merge",
+    }
+
+    def normalized_direction(self) -> str:
+        """Return the canonical direction (``"push"`` / ``"pull"`` / ``"two-way"``).
+
+        Accepts the configured spelling (case-insensitively, surrounding
+        whitespace stripped) and the ``"twoway"``/``"both"`` aliases, folding
+        them to ``"two-way"``. An unrecognized value falls back to ``"push"``
+        (validation surfaces the problem separately).
+        """
+        key = (self.direction or "push").strip().lower()
+        return self._DIRECTION_ALIASES.get(key, "push")
+
+    def normalized_conflict_policy(self) -> str:
+        """Return the canonical conflict policy (``"local-wins"`` / ``"merge"``).
+
+        Accepts the configured spelling case-insensitively plus the
+        ``"local"`` / ``"three-way"`` / ``"3-way"`` aliases. An unrecognized
+        value falls back to ``"local-wins"`` (validation surfaces the problem).
+        """
+        key = (self.conflict_policy or "local-wins").strip().lower()
+        return self._CONFLICT_POLICY_ALIASES.get(key, "local-wins")
 
     def validate(self) -> list[str]:
         """Return a list of human-readable configuration problems (empty if OK).
@@ -195,17 +258,26 @@ class CalendarConfig:
             A list of error strings; empty when the config is usable.
         """
         errors: list[str] = []
-        if self.provider and self.provider.lower() not in self._VALID_PROVIDERS:
+        if self.provider and self.provider.strip().lower() not in self._VALID_PROVIDERS:
             errors.append(
                 f"Unknown calendar provider {self.provider!r}; expected one of: "
                 "google, microsoft, apple, caldav."
             )
-        if self.event_mode and self.event_mode.lower() not in self._VALID_EVENT_MODES:
+        if self.event_mode and self.event_mode.strip().lower() not in self._VALID_EVENT_MODES:
             errors.append(f"Unknown event_mode {self.event_mode!r}; expected 'event' or 'todo'.")
-        if self.direction and self.direction.lower() not in self._VALID_DIRECTIONS:
+        if self.direction and self.direction.strip().lower() not in self._VALID_DIRECTIONS:
             errors.append(
-                f"Unsupported direction {self.direction!r}; only 'push' is implemented "
-                "(doto -> calendar). Two-way sync is planned."
+                f"Unsupported direction {self.direction!r}; expected 'push' "
+                "(doto -> calendar), 'pull' (calendar -> doto), or 'two-way' "
+                "(calendar <-> doto)."
+            )
+        if (
+            self.conflict_policy
+            and self.conflict_policy.strip().lower() not in self._VALID_CONFLICT_POLICIES
+        ):
+            errors.append(
+                f"Unsupported conflict_policy {self.conflict_policy!r}; expected "
+                "'local-wins' or 'merge'."
             )
         return errors
 
@@ -222,6 +294,16 @@ class DotoConfig:
     json_file: Path = field(default_factory=lambda: Path(".doto/tasks.json"))
     inbox_file: Path = field(default_factory=lambda: Path("tasks/inbox.rst"))
     conf_py: Path | None = None
+
+    # Private global-state location override. The global state file holds the
+    # work clock (your working hours), the active session, favorites, and the
+    # repo registry. In a *shared* checkout you often do NOT want this committed
+    # or visible to the team, so this lets you redirect it to a path only you
+    # control (e.g. a personal subfolder or a path outside the repo). Set via
+    # ``state_file`` in ``.doto.toml`` (or ``DOTO_STATE_FILE``); ``~`` and
+    # ``$VAR``/``${VAR}`` references are expanded. When empty, the usual
+    # portable/XDG resolution applies. ``$DOTO_CONFIG`` still wins over this.
+    state_file: str = ""
 
     # Defaults
     default_priority: str = DEFAULT_PRIORITY
@@ -245,6 +327,44 @@ class DotoConfig:
     # Current user (for RACI auto-defaults)
     user: str = ""
 
+    # TUI add-task modal field configuration.
+    #: Which fields the TUI add-task modal shows, and in what order. Either a
+    #: preset name (``"minimal"`` / ``"default"`` / ``"all"``) or an explicit
+    #: list of field names (which overrides a preset). Defaults to
+    #: ``"minimal"`` (title only) for backward compatibility. See
+    #: :func:`doxtr_doto.cli.tui.add_fields.resolve_field_names` for the
+    #: precedence rules.
+    tui_add_fields: str | list[str] = "minimal"
+    #: Per-field default values for the TUI add-task modal (the
+    #: ``[doto.tui_add_defaults]`` TOML sub-table). Maps a field name to a raw
+    #: default string; date fields (``due``) accept relative expressions
+    #: (``"tomorrow"``, ``"+7d"``) resolved at modal-open time. See
+    #: :func:`doxtr_doto.cli.tui.add_fields.resolve_default`.
+    tui_add_defaults: dict[str, str] = field(default_factory=dict)
+    #: Whether the TUI auto-selects (highlights and scrolls into view) a task
+    #: immediately after it is created via the add-task modal (the ``a`` key /
+    #: ``action_add``). Defaults to ``True`` so a freshly added task becomes the
+    #: active row in whichever view is showing. Set to ``false`` in the
+    #: ``[doto]`` TOML table to keep the previous selection after adding. The
+    #: selection is performed by :meth:`DotoApp.select_task`, an overridable
+    #: seam a child theme can replace.
+    tui_auto_select_new_task: bool = True
+    #: The default "recent done" window, in days, for the TUI task list: when
+    #: the recent-done filter is active the list hides ``done`` tasks whose
+    #: completion is older than this many days (keeping recently-completed and
+    #: non-done tasks). Defaults to ``10``. This is the *default* N; the filter
+    #: is on by default on a fresh install (so the list stays focused on
+    #: recent work) but the user can change the window or disable it entirely
+    #: in the TUI's filter/sort pop-up (``F``), and that per-session choice is
+    #: persisted in the global state - overriding this config default on the
+    #: next launch. See
+    #: :func:`doxtr_doto.cli.tui.actions.load_view_prefs` for how the config
+    #: default seeds the initial :class:`ViewPrefs` and
+    #: :func:`doxtr_doto.cli.tui.filtersort.filter_done_recent` for the filter
+    #: semantics (notably that done tasks with no completion timestamp are
+    #: always shown, for backward compatibility).
+    tui_recent_done_days: int = 10
+
     # Validation
     statuses: list[str] = field(default_factory=lambda: list(VALID_STATUSES))
     priorities: list[str] = field(default_factory=lambda: list(VALID_PRIORITIES))
@@ -264,6 +384,30 @@ class DotoConfig:
         if self.inbox_file.is_absolute():
             return self.inbox_file
         return self.source_dir / self.inbox_file
+
+    def get_state_path(self) -> Path | None:
+        """Resolve the configured private global-state path, or ``None``.
+
+        Expands ``~`` and ``$VAR``/``${VAR}`` references in ``state_file`` and
+        resolves a relative path against ``source_dir`` (the Sphinx source dir /
+        project base -- note in Sphinx mode this is the directory containing
+        ``conf.py``, which may be a ``docs/`` subdirectory rather than the repo
+        root). A relative path therefore lands inside the project tree unless an
+        absolute or ``~``/``$HOME``-anchored path is given, which is the usual
+        way to point at a personal location outside the shared tree.
+
+        Returns:
+            The absolute state-file path, or ``None`` when ``state_file`` is
+            unset (so the caller falls back to the default resolution order).
+        """
+        raw = (self.state_file or "").strip()
+        if not raw:
+            return None
+        expanded = resolve_env_vars(raw)
+        path = Path(expanded).expanduser()
+        if not path.is_absolute():
+            path = self.source_dir / path
+        return path
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
@@ -506,6 +650,7 @@ def load_config(
             user_config = load_toml(user_config_path)
             _apply_toml_config(config, user_config.get("doto", {}))
             _apply_calendar_config(config, user_config.get("calendar", {}))
+            _apply_state_config(config, user_config.get("state", {}))
         except Exception as exc:
             _warn_config_error(user_config_path, exc)
 
@@ -528,6 +673,7 @@ def load_config(
                 project_config = load_toml(project_toml)
                 _apply_toml_config(config, project_config.get("doto", {}))
                 _apply_calendar_config(config, project_config.get("calendar", {}))
+                _apply_state_config(config, project_config.get("state", {}))
             except Exception as exc:
                 _warn_config_error(project_toml, exc)
 
@@ -555,6 +701,8 @@ def _apply_toml_config(config: DotoConfig, toml_config: dict[str, Any]) -> None:
         config.json_file = Path(toml_config["json_file"])
     if "inbox_file" in toml_config:
         config.inbox_file = Path(toml_config["inbox_file"])
+    if "state_file" in toml_config:
+        config.state_file = str(toml_config["state_file"])
     if "default_priority" in toml_config:
         config.default_priority = toml_config["default_priority"]
     if "default_status" in toml_config:
@@ -583,6 +731,20 @@ def _apply_toml_config(config: DotoConfig, toml_config: dict[str, Any]) -> None:
         config.priorities = list(toml_config["priorities"])
     if "user" in toml_config:
         config.user = toml_config["user"]
+    if "tui_add_fields" in toml_config:
+        value = toml_config["tui_add_fields"]
+        if isinstance(value, list):
+            config.tui_add_fields = [str(v) for v in value]
+        else:
+            config.tui_add_fields = str(value)
+    if "tui_add_defaults" in toml_config:
+        raw_defaults = toml_config["tui_add_defaults"]
+        if isinstance(raw_defaults, dict):
+            config.tui_add_defaults = {str(k): str(v) for k, v in raw_defaults.items()}
+    if "tui_auto_select_new_task" in toml_config:
+        config.tui_auto_select_new_task = bool(toml_config["tui_auto_select_new_task"])
+    if "tui_recent_done_days" in toml_config:
+        config.tui_recent_done_days = int(toml_config["tui_recent_done_days"])
 
 
 def _apply_calendar_config(config: DotoConfig, cal: dict[str, Any]) -> None:
@@ -600,6 +762,7 @@ def _apply_calendar_config(config: DotoConfig, cal: dict[str, Any]) -> None:
         "calendar",
         "event_mode",
         "direction",
+        "conflict_policy",
         "workday_start",
         "workday_end",
         "break_start",
@@ -618,6 +781,22 @@ def _apply_calendar_config(config: DotoConfig, cal: dict[str, Any]) -> None:
         cc.all_day_for_dateless = bool(cal["all_day_for_dateless"])
     if "event_duration_minutes" in cal:
         cc.event_duration_minutes = int(cal["event_duration_minutes"])
+
+
+def _apply_state_config(config: DotoConfig, state: dict[str, Any]) -> None:
+    """Apply the ``[state]`` TOML table to ``config.state_file``.
+
+    Recognizes ``file`` (preferred) or ``state_file`` as the key naming the
+    private global-state location. Unknown keys are ignored. The value is
+    stored verbatim; ``~``/``$VAR`` expansion happens later in
+    :meth:`DotoConfig.get_state_path` so an unset ``$VAR`` is not baked in at
+    load time.
+    """
+    if not state:
+        return
+    value = state.get("file", state.get("state_file"))
+    if value:
+        config.state_file = str(value)
 
 
 def _apply_sphinx_config(config: DotoConfig, sphinx_config: dict[str, Any]) -> None:
@@ -649,6 +828,7 @@ def _apply_env_config(config: DotoConfig) -> None:
     env_mappings: dict[str, tuple[str, Callable[[str], Any]]] = {
         "DOTO_JSON_FILE": ("json_file", Path),
         "DOTO_INBOX_FILE": ("inbox_file", Path),
+        "DOTO_STATE_FILE": ("state_file", str),
         "DOTO_DEFAULT_PRIORITY": ("default_priority", str),
         "DOTO_DEFAULT_STATUS": ("default_status", str),
         "DOTO_DEFAULT_ASSIGNEE": ("default_assignee", str),

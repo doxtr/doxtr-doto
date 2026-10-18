@@ -14,6 +14,8 @@
       task has no RACI data). Rendered via doxtr_doto.raci.render_raci_html,
       which is overridable by child themes.
     - progress: Progress percentage 0-100 (optional)
+    - estimate: Expected duration, pre-formatted compact string e.g. "1h30m"
+      (optional; empty when the task has no estimate)
     - is_overdue: Boolean indicating if task is past due
     - classes: Pre-computed CSS classes string
 #}
@@ -44,6 +46,9 @@
       <span class="doto-tag">{{ tag }}</span>
       {%- endfor %}
     </span>
+    {%- endif %}
+    {%- if estimate %}
+    <span class="doto-estimate" title="Estimated duration">{{ estimate }}</span>
     {%- endif %}
     {%- if progress is not none %}
     <div class="doto-progress" title="{{ progress | int }}% complete">

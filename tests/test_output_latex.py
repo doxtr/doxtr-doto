@@ -135,6 +135,34 @@ def test_doto_node_latex_uses_stacked_icon_macros(latex_build):
     assert r"\dotometaupdated{" in tex
 
 
+def test_doto_node_latex_default_box_renders_estimate_and_progress(latex_build):
+    """The single-task default LaTeX box shows estimate (compact) and progress."""
+    tex = latex_build(
+        ".. doto:: Sized Task\n   :id: TASK-LEP\n   :estimate: 1h30m\n   :progress: 50\n"
+    )
+    assert r"\dotometaestimate{1h30m}" in tex
+    assert r"\dotometaprogress{50\%}" in tex
+
+
+def test_doto_node_latex_compact_box_renders_estimate_and_progress(latex_build):
+    """The compact LaTeX box also carries estimate and progress fields."""
+    tex = latex_build(
+        ".. doto:: Sized Compact\n   :id: TASK-LEPC\n   :estimate: 4h\n   :progress: 25\n",
+        conf_extra="doto_latex_layout = 'compact'",
+    )
+    assert "4h" in tex
+    assert r"25\%" in tex
+    assert r"\faClock" in tex
+    assert r"\faChartBar" in tex
+
+
+def test_doto_node_latex_box_omits_estimate_when_unset(latex_build):
+    """A task without an estimate/progress emits neither box macro."""
+    tex = latex_build(".. doto:: Plain\n   :id: TASK-LPLAIN\n   :priority: high\n")
+    assert r"\dotometaestimate{" not in tex
+    assert r"\dotometaprogress{" not in tex
+
+
 def test_doto_node_latex_priority_colored_via_macro(latex_build):
     """Priority value uses the severity-colored macro rather than inline color."""
     tex = latex_build(".. doto:: Critical Task\n   :id: TASK-L05\n   :priority: critical\n")
@@ -151,6 +179,22 @@ def test_doto_list_latex_produces_longtable(latex_build):
     )
     assert r"\begin{longtable}" in tex
     assert "TASK-L10" in tex
+
+
+def test_doto_list_latex_renders_estimate_column(latex_build):
+    """estimate selected as a column renders through the docutils LaTeX path.
+
+    Regression guard mirroring the HTML column test: the estimate value is
+    produced by ``nodes._get_task_column_value`` in the real build, not only
+    the Jinja-absent fallback.
+    """
+    tex = latex_build(
+        ".. doto:: Sized\n   :id: TASK-LEST\n   :estimate: 1h30m\n\n"
+        ".. doto-list::\n"
+        "   :format: table\n"
+        "   :columns: id, estimate\n"
+    )
+    assert "1h30m" in tex
 
 
 def test_doto_list_latex_description_list(latex_build):

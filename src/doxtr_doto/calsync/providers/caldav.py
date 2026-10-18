@@ -12,9 +12,12 @@ imported lazily.
 
 from __future__ import annotations
 
+from datetime import date as _date
+from datetime import datetime as _dt
 from typing import TYPE_CHECKING, Any
 
 from doxtr_doto.calsync.ical import event_to_ical
+from doxtr_doto.calsync.model import EventKind, RemoteEvent
 from doxtr_doto.calsync.providers.base import (
     CalendarProvider,
     ProviderAuthError,
@@ -151,3 +154,135 @@ class CalDAVProvider(CalendarProvider):
             obj.delete()
         except Exception as exc:
             raise ProviderError(f"CalDAV delete failed for {uid}: {exc}") from exc
+
+    def list_events(self) -> list[RemoteEvent]:
+        """List the collection's events, parsed into :class:`RemoteEvent`.
+
+        Reads every VEVENT in the resolved calendar collection and parses it
+        with the ``icalendar`` library (already a ``[calendar]`` dependency).
+        DTSTART/DTEND that are DATE values (not DATETIME) map to all-day items;
+        timezone-aware datetimes are reduced to naive-local wall-clock to match
+        doto's model.
+
+        Error handling is deliberately asymmetric to avoid a data-loss trap:
+        the pull planner treats a *missing* remote item as a user deletion
+        (archiving the local task), so a transient read failure must **never**
+        look like "the event is gone". If the collection fetch itself fails we
+        raise :class:`ProviderError` so pull aborts rather than archiving every
+        task. Only genuinely unparseable *individual* objects are skipped, and
+        their count is surfaced in the raised error when every object fails.
+        """
+        assert self._calendar is not None, "connect() must be called first"
+        try:
+            import icalendar
+        except ModuleNotFoundError as exc:  # pragma: no cover - env dependent
+            raise ProviderError(_MISSING_MSG) from exc
+        # A failure to list the collection is a transport error -- abort rather
+        # than let an empty result masquerade as "every event was deleted".
+        try:
+            events = self._calendar.events()
+        except Exception as exc:
+            raise ProviderError(f"CalDAV list failed: {exc}") from exc
+
+        out: list[RemoteEvent] = []
+        skipped = 0
+        for obj in events:
+            # Reading an individual object's body is a per-object transport
+            # read; a failure here is NOT evidence the event was deleted, so we
+            # count it as unparseable (skip) rather than treat it as missing.
+            try:
+                data = obj.data
+            except Exception:
+                skipped += 1
+                continue
+            try:
+                cal = icalendar.Calendar.from_ical(data)
+            except Exception:
+                # Genuinely unparseable iCalendar payload: skip just this one.
+                skipped += 1
+                continue
+            href = ""
+            try:
+                href = str(obj.url) if obj.url else ""
+            except Exception:
+                href = ""
+            etag = ""
+            try:
+                etag = obj.etag or ""
+            except Exception:
+                etag = ""
+            for comp in cal.walk("vevent"):
+                out.append(_vevent_to_remote(comp, href=href, etag=etag))
+        # If we found objects but could parse none of them, something is wrong
+        # with the feed as a whole; abort rather than report an empty calendar
+        # (which pull would read as "all events deleted").
+        if skipped and not out:
+            raise ProviderError(
+                f"CalDAV list returned {skipped} object(s) but none could be read/parsed; "
+                "aborting to avoid treating them as deletions."
+            )
+        return out
+
+
+def _vevent_to_remote(comp: Any, *, href: str, etag: str) -> RemoteEvent:
+    """Map an ``icalendar`` VEVENT component into a :class:`RemoteEvent`.
+
+    DATE-valued DTSTART/DTEND (no time) become an all-day item; a
+    timezone-aware DATETIME is reduced to naive-local wall-clock to match
+    doto's naive-local time model. CATEGORIES, when present, are surfaced as
+    the RemoteEvent's ``categories`` (cheap to read here).
+    """
+
+    def _naive(value: Any) -> tuple[_dt | None, bool]:
+        if value is None:
+            return None, False
+        dt = getattr(value, "dt", value)
+        if isinstance(dt, _dt):
+            return (dt.replace(tzinfo=None) if dt.tzinfo else dt), False
+        if isinstance(dt, _date):
+            return _dt(dt.year, dt.month, dt.day), True
+        return None, False
+
+    start, start_all_day = _naive(comp.get("dtstart"))
+    end, _end_all_day = _naive(comp.get("dtend"))
+
+    def _text(key: str) -> str:
+        val = comp.get(key)
+        return str(val) if val is not None else ""
+
+    return RemoteEvent(
+        uid=_text("uid"),
+        remote_id="",
+        etag=etag,
+        summary=_text("summary"),
+        description=_text("description"),
+        start=start,
+        end=end,
+        all_day=start_all_day,
+        due=None,
+        kind=EventKind.EVENT,
+        status=_text("status") or None,
+        categories=_categories(comp),
+        raw=href or None,
+    )
+
+
+def _categories(comp: Any) -> list[str]:
+    """Extract iCalendar CATEGORIES from a VEVENT as a flat list of strings.
+
+    ``icalendar`` represents CATEGORIES either as a single value or a list of
+    values, each of which may itself be a comma-joined ``vCategory``; this
+    flattens whatever shape into a plain ``list[str]`` (empty when absent).
+    """
+    raw = comp.get("categories")
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[str] = []
+    for item in items:
+        cats = getattr(item, "cats", None)
+        if cats is not None:
+            out.extend(str(c) for c in cats)
+        else:
+            out.append(str(item))
+    return [c for c in (s.strip() for s in out) if c]

@@ -251,6 +251,64 @@ class TestDotoUpdate:
         data = json.loads(json_file.read_text())
         assert data["tasks"]["TASK-001"]["status"] == "in-progress"
 
+    def test_update_estimate_compact(self, cli_runner, single_task_project):
+        """--estimate accepts the compact duration syntax and stores minutes."""
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--estimate", "1h30m"],
+        )
+
+        assert result.exit_code == 0
+        json_file = single_task_project / ".doto" / "tasks.json"
+        data = json.loads(json_file.read_text())
+        assert data["tasks"]["TASK-001"]["estimate"] == 90
+
+    def test_update_estimate_bare_minutes(self, cli_runner, single_task_project):
+        """A bare integer --estimate is interpreted as whole minutes."""
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--estimate", "45"],
+        )
+
+        assert result.exit_code == 0
+        json_file = single_task_project / ".doto" / "tasks.json"
+        data = json.loads(json_file.read_text())
+        assert data["tasks"]["TASK-001"]["estimate"] == 45
+
+    def test_update_clear_estimate(self, cli_runner, single_task_project):
+        """--clear-estimate removes a previously set estimate."""
+        from doxtr_doto.cli.main import cli
+
+        cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--estimate", "4h"],
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--clear-estimate"],
+        )
+
+        assert result.exit_code == 0
+        json_file = single_task_project / ".doto" / "tasks.json"
+        data = json.loads(json_file.read_text())
+        assert data["tasks"]["TASK-001"]["estimate"] is None
+
+    def test_update_invalid_estimate(self, cli_runner, single_task_project):
+        """An unparseable --estimate is rejected without writing the store."""
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(single_task_project), "update", "TASK-001", "--estimate", "banana"],
+        )
+
+        assert result.exit_code != 0
+        assert "Invalid duration" in result.output
+
     def test_update_multiple_fields(self, cli_runner, single_task_project):
         """Test updating multiple fields at once."""
         from doxtr_doto.cli.main import cli

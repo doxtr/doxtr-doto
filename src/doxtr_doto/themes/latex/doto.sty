@@ -210,6 +210,8 @@
   \providecommand{\faExclamation}{}%
   \providecommand{\faCircleDot}{}%
   \providecommand{\faUsers}{\faUser}%
+  \providecommand{\faClock}{}%
+  \providecommand{\faChartBar}{}%
 }
 
 % Stacked icon: a Font Awesome icon on top with a small text label underneath.
@@ -237,6 +239,8 @@
 \newcommand{\dotometapriority}[1]{\dotostackedicon{\faFlag}{Priority}~#1}
 \newcommand{\dotometastatus}[1]{\dotostackedicon{\faCircleDot}{Status}~{\color{doto@text}#1}}
 \newcommand{\dotometaid}[1]{\dotostackedicon{\faExclamation}{ID}~{\color{doto@text}\texttt{\small #1}}}
+\newcommand{\dotometaestimate}[1]{\dotostackedicon{\faClock}{Estimate}~{\color{doto@text}#1}}
+\newcommand{\dotometaprogress}[1]{\dotostackedicon{\faChartBar}{Progress}~{\color{doto@text}#1}}
 
 % Inline metadata label (dark, readable on the light body background).
 \newcommand{\dotometalabel}[1]{{\color{doto@label}\textbf{#1}}}

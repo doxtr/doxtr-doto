@@ -181,6 +181,39 @@ def test_doto_list_table_has_headers(sphinx_build):
     assert "Status" in html
 
 
+def test_doto_list_table_renders_estimate_and_progress_columns(sphinx_build):
+    """estimate/progress selected as columns render through the docutils path.
+
+    Regression guard: the estimate/progress column values are produced by
+    ``nodes._get_task_column_value`` (the real build path), not only the
+    Jinja-absent fallback. A regression there would silently show empty cells.
+    """
+    _, html = sphinx_build(
+        ".. doto:: Sized task\n"
+        "   :id: TASK-EST\n"
+        "   :estimate: 1h30m\n"
+        "   :progress: 50\n\n"
+        ".. doto-list::\n"
+        "   :format: table\n"
+        "   :columns: id, estimate, progress\n"
+    )
+    assert "1h30m" in html
+    assert "50%" in html
+
+
+def test_doto_single_task_renders_estimate(sphinx_build):
+    """A single ``.. doto::`` with :estimate: emits the estimate span."""
+    _, html = sphinx_build(".. doto:: Estimated task\n   :id: TASK-EST1\n   :estimate: 4h\n")
+    assert "doto-estimate" in html
+    assert "4h" in html
+
+
+def test_doto_single_task_without_estimate_omits_span(sphinx_build):
+    """A task without :estimate: does not emit the estimate span."""
+    _, html = sphinx_build(".. doto:: No estimate\n   :id: TASK-EST2\n   :priority: high\n")
+    assert "doto-estimate" not in html
+
+
 def test_doto_list_empty_message(sphinx_build):
     """doto-list with no matching tasks shows the empty message."""
     _, html = sphinx_build(

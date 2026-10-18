@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 
 
 # Valid sort fields
-VALID_SORT_FIELDS = frozenset({"priority", "due", "status", "assignee", "created", "title", "id"})
+VALID_SORT_FIELDS = frozenset(
+    {"priority", "due", "estimate", "status", "assignee", "created", "title", "id"}
+)
 
 # Valid format types
 VALID_FORMATS = frozenset(e.value for e in ListFormat)

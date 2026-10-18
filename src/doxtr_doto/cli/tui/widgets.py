@@ -5,6 +5,23 @@ without rewriting the app. Row formatting is delegated to classmethods
 (``format_*``) that return Textual markup strings, keeping presentation logic
 isolated from mutation and layout.
 
+Scrolling the alt-views (list / kanban / calendar) distinguishes two kinds of
+cursor move. Continuous ``j``/``k`` navigation uses the *smart-scroll*
+algorithm (:meth:`AltLayoutView.scroll_to_cursor` /
+:meth:`AltLayoutView.target_scroll_y`), which only scrolls when the cursor
+comes within a margin of an edge and infers the move direction from the
+previous cursor line. *Discontinuous* jumps - switching kanban swim lanes,
+selecting a task by id in the list / kanban views, or a layout cycle that
+re-selects a task - cannot rely on direction inference (the cursor can land
+arbitrarily far from where it was), so they go through
+:meth:`AltLayoutView.ensure_cursor_visible`, which repositions the viewport so
+the *whole* selected item is on screen regardless of the previous position.
+Both paths are overridable seams; :class:`CalendarView` overrides them to keep
+its month grid pinned to the top (its day move / select-by-id reach their
+scroll through the subsequent rebuild rather than this seam, which is reached
+only when a layout cycle lands on the calendar), so a child theme can retune
+the scroll feel for either kind of move.
+
 This module imports ``textual`` directly; it is only imported from
 :mod:`doxtr_doto.cli.tui.app`, which is in turn only loaded when the optional
 ``textual`` dependency is installed.
@@ -13,7 +30,7 @@ This module imports ``textual`` directly; it is only imported from
 from __future__ import annotations
 
 import calendar as _calendar
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
@@ -28,7 +45,7 @@ from textual.widgets import DataTable, Static, Tree
 from doxtr_doto.cli.display import DisplayScope
 from doxtr_doto.cli.global_state import DEFAULT_WORKWEEK_DAYS
 from doxtr_doto.cli.session import format_duration
-from doxtr_doto.cli.tui.filtersort import pin_active_first
+from doxtr_doto.cli.tui.filtersort import TreeRow, flatten_tree, pin_active_first
 from doxtr_doto.cli.tui.theme import (
     escape_markup,
     escape_title,
@@ -206,7 +223,67 @@ class RepoTree(Tree[None]):
         return "[reverse]\u2714[/reverse] " if selected else "  "
 
 
-class TaskList(TitleHighlight, DataTable[str]):
+class TreePrefixMixin:
+    """Shared tree triangle + depth-indent prefix for the list widgets.
+
+    Holds the overridable tree glyph/indent class attributes and the
+    :meth:`format_tree_prefix` seam that :class:`TaskList` (table layout) and
+    :class:`ListView` (list layout) both draw their expand/collapse affordance
+    from, so the prefix logic lives in one place. Both widgets inherit this
+    mixin, and each can still override any ``TREE_*`` attribute or
+    :meth:`format_tree_prefix` *independently* via normal subclass attribute
+    resolution (a child theme reskins the table and list trees separately).
+    """
+
+    #: Number of leading spaces per nesting depth level drawn by
+    #: :meth:`format_tree_prefix`. A child theme can widen/narrow the tree
+    #: indent by subclassing and resetting this attribute.
+    TREE_INDENT: int = 2
+    #: The expand/collapse/leaf glyphs drawn by :meth:`format_tree_prefix`,
+    #: matching the repo explorer's Textual ``Tree`` look (expanded, collapsed,
+    #: leaf). Overridable per widget class so a child theme can reskin the tree
+    #: markers without reimplementing :meth:`format_tree_prefix`.
+    TREE_GLYPH_EXPANDED: str = "\u25be"  # ▾
+    TREE_GLYPH_COLLAPSED: str = "\u25b6"  # ▶
+    TREE_GLYPH_LEAF: str = " "
+
+    @classmethod
+    def format_tree_prefix(cls, depth: int, has_children: bool, expanded: bool) -> str:
+        """Return the tree triangle + depth indent prefix for a row title.
+
+        The single overridable seam for the parent/child tree affordance
+        (mirroring :meth:`TaskList.format_marker` / :meth:`TaskList.format_tags`):
+        it produces the leading glyph + indentation prepended to a row's title
+        so the list reads as an expandable tree. A child theme restyles the
+        tree by subclassing and resetting :attr:`TREE_INDENT` /
+        :attr:`TREE_GLYPH_EXPANDED` / :attr:`TREE_GLYPH_COLLAPSED` /
+        :attr:`TREE_GLYPH_LEAF`, or overriding this method wholesale - on
+        :class:`TaskList` or :class:`ListView` independently.
+
+        The prefix is width-stable: every row is indented ``depth`` levels and
+        then carries exactly one glyph cell (a triangle for a parent, a blank
+        for a leaf) followed by a space, so sibling titles line up regardless
+        of whether a given row has children.
+
+        Args:
+            depth: The row's nesting level (0 for a root).
+            has_children: Whether the row has visible children (draws a
+                triangle rather than the leaf blank).
+            expanded: Whether the row's children are shown (``▾`` vs ``▶``);
+                only meaningful when ``has_children`` is True.
+
+        Returns:
+            The Textual-markup-safe prefix string for the row title.
+        """
+        indent = " " * (cls.TREE_INDENT * max(depth, 0))
+        if has_children:
+            glyph = cls.TREE_GLYPH_EXPANDED if expanded else cls.TREE_GLYPH_COLLAPSED
+        else:
+            glyph = cls.TREE_GLYPH_LEAF
+        return f"{indent}{glyph} "
+
+
+class TaskList(TreePrefixMixin, TitleHighlight, DataTable[str]):
     """Middle pane: the task list.
 
     Each row carries a running indicator, a done checkbox, priority/tag
@@ -219,6 +296,17 @@ class TaskList(TitleHighlight, DataTable[str]):
     task via :meth:`target_ids`; when it is empty they fall back to the single
     cursor task. Selected rows are visually marked by :meth:`format_marker`,
     which a child theme can override.
+
+    Sub-tasks are nested under their ``parent`` (see
+    :class:`doxtr_doto.sync.json_store.TaskData`) as an expandable tree:
+    :meth:`rebuild` flattens the visible list through
+    :func:`doxtr_doto.cli.tui.filtersort.flatten_tree`, and each row is drawn
+    with a leading expand/collapse triangle + depth indentation produced by
+    the overridable :meth:`format_tree_prefix` seam. The set of *collapsed*
+    parent ids is owned by the app (session-scoped) and passed into each
+    :meth:`rebuild`; parents default to expanded. Which rows have children is
+    cached in :attr:`row_has_children` so the app can decide whether Space
+    toggles expansion (parent row) or multi-selection (leaf row).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -228,48 +316,85 @@ class TaskList(TitleHighlight, DataTable[str]):
         self.row_ids: list[str] = []
         #: Ids toggled into the multi-selection via Space.
         self.selected_ids: set[str] = set()
+        #: Per-row "has visible children" flag, one entry per :attr:`row_ids`
+        #: entry in the same order. Populated by :meth:`rebuild` so the app
+        #: can tell whether Space should toggle the row's tree expansion
+        #: (parent) or its multi-selection (leaf).
+        self.row_has_children: list[bool] = []
 
-    def rebuild(self, tasks: list[dict[str, Any]]) -> None:
-        """Rebuild the table rows from task dicts.
+    def rebuild(self, tasks: list[dict[str, Any]], collapsed_ids: set[str] | None = None) -> None:
+        """Rebuild the table rows from task dicts, nesting sub-tasks as a tree.
+
+        The visible list is flattened into a depth-first pre-order tree via
+        :func:`doxtr_doto.cli.tui.filtersort.flatten_tree` so each sub-task is
+        drawn indented under its ``parent`` with an expand/collapse triangle.
+        ``collapsed_ids`` is the app-owned (session-scoped) set of parent ids
+        whose children are hidden; parents not in it default to expanded.
 
         The current cursor selection is preserved by id across rebuilds when
         the previously selected task is still present. Any ids in the
         multi-selection that are no longer present are dropped. The active
-        (time-recorded) task is pinned to the top via :func:`pin_active_first`
-        (Feature A), applied here so the view is self-contained.
+        (time-recorded) task is already pinned to the top of ``tasks`` by the
+        caller's view pipeline (:func:`pin_active_first`, Feature A); this
+        method consumes that ordering as-is and does not re-pin, so a child
+        theme that overrides the pin step to a no-op is honoured. A running
+        sub-task under a collapsed ancestor stays visible because
+        :func:`~doxtr_doto.cli.tui.filtersort.flatten_tree` force-expands the
+        ancestor chain of any ``_running`` task.
 
         Args:
             tasks: Task dicts (as produced by
                 :func:`doxtr_doto.cli.tui.data.gather_tasks`).
+            collapsed_ids: The set of parent ids whose children are hidden
+                (default-expanded otherwise). None is treated as empty (all
+                parents expanded).
         """
         previous = self.selected_id()
         self.clear(columns=True)
         self.add_columns("", "", "", "Pri", "Status", "ID", "Title", "Tags")
         self.row_ids = []
-        # Feature A: pin the active (time-recorded) task to the TOP of the
-        # list, applied here (after any caller-side sort) so each view is
-        # self-contained; stable otherwise.
-        ordered = pin_active_first(tasks)
-        for task in ordered:
-            task_id = task.get("id", "")
-            self.add_row(*self.format_row(task, task_id in self.selected_ids))
+        self.row_has_children = []
+        # ``tasks`` is already active-pinned by the caller's view pipeline
+        # (pin_active_first, Feature A); consume that order as-is rather than
+        # re-pinning here, so a child theme that overrides the pin step is
+        # honoured. Flatten into the parent/child tree so sub-tasks nest under
+        # their parent (a running sub-task under a collapsed ancestor stays
+        # visible via flatten_tree's force-expand).
+        rows = flatten_tree(tasks, collapsed_ids)
+        for row in rows:
+            task_id = row.task.get("id", "")
+            self.add_row(*self.format_row(row, task_id in self.selected_ids))
             self.row_ids.append(task_id)
+            self.row_has_children.append(row.has_children)
         # Drop selections for tasks that no longer exist.
         self.selected_ids &= set(self.row_ids)
         if previous is not None and previous in self.row_ids:
             self.move_cursor(row=self.row_ids.index(previous))
 
     @classmethod
-    def format_row(cls, task: dict[str, Any], selected: bool = False) -> tuple[str, ...]:
+    def format_row(cls, row: TreeRow | dict[str, Any], selected: bool = False) -> tuple[str, ...]:
         """Return the display cells for a task row.
 
+        Accepts either a :class:`~doxtr_doto.cli.tui.filtersort.TreeRow` (the
+        tree-aware path :meth:`rebuild` uses, carrying depth / expansion) or a
+        bare task dict (treated as a depth-0 leaf, for pure-logic callers and
+        tests that do not build the tree). The Title cell is prefixed with the
+        expand/collapse triangle + depth indentation from the overridable
+        :meth:`format_tree_prefix` seam.
+
         Args:
-            task: A task dict.
+            row: A :class:`TreeRow` or a bare task dict.
             selected: Whether the task is in the multi-selection set.
 
         Returns:
             A tuple of Textual markup strings, one per column.
         """
+        if isinstance(row, TreeRow):
+            task = row.task
+            depth, has_children, expanded = row.depth, row.has_children, row.expanded
+        else:
+            task = row
+            depth, has_children, expanded = 0, False, False
         marker = cls.format_marker(selected)
         running = "[green]▶[/green]" if task.get("_running") else " "
         done = task.get("status") == DONE_STATUS
@@ -279,7 +404,8 @@ class TaskList(TitleHighlight, DataTable[str]):
         status = task.get("status") or ""
         status_cell = styled(status or "-", status_style(status))
         task_id = escape_markup(task.get("id", ""))
-        title = cls.escape_title(task.get("title", ""))
+        prefix = cls.format_tree_prefix(depth, has_children, expanded)
+        title = prefix + cls.escape_title(task.get("title", ""))
         tags = task.get("tags") or []
         tag_cell = cls.format_tags(tags)
         return (
@@ -335,6 +461,44 @@ class TaskList(TitleHighlight, DataTable[str]):
             return None
         return self.row_ids[row]
 
+    def select_id(self, task_id: str) -> bool:
+        """Move the row cursor to the row whose id equals ``task_id``.
+
+        Uses the :class:`~textual.widgets.DataTable` row cursor move
+        (:meth:`~textual.widgets.DataTable.move_cursor`) so the table's built-in
+        scroll-into-view runs, keeping the selected row visible exactly as
+        ``j``/``k`` navigation does. See :meth:`AltLayoutView.select_id` for the
+        overall contract.
+
+        Args:
+            task_id: The display id (bare or namespaced) to select.
+
+        Returns:
+            True when ``task_id`` is a current row and the cursor moved to it,
+            False when it is not present.
+        """
+        if task_id not in self.row_ids:
+            return False
+        self.move_cursor(row=self.row_ids.index(task_id))
+        return True
+
+    def cursor_has_children(self) -> bool:
+        """Return whether the current cursor row is an expandable parent.
+
+        Reads the per-row :attr:`row_has_children` flag (populated by
+        :meth:`rebuild` from the flattened tree) for the current cursor row,
+        so the app can decide whether Space toggles the row's tree expansion
+        (a parent) or its multi-selection (a leaf). False when there is no
+        selectable row.
+
+        Returns:
+            True when the cursor row has visible children, else False.
+        """
+        row = self.cursor_row
+        if row is None or row < 0 or row >= len(self.row_has_children):
+            return False
+        return self.row_has_children[row]
+
     def toggle_selected(self, task_id: str | None = None) -> None:
         """Toggle a task's membership in the multi-selection set.
 
@@ -371,7 +535,12 @@ class TaskList(TitleHighlight, DataTable[str]):
 
 
 class TaskDetails(TitleHighlight, Static):
-    """Right pane: task details and the session interval log."""
+    """Lower (bottom) pane: task details and the session interval log.
+
+    In the table layout this pane is stacked *below* the task list (inside the
+    ``#task-pane`` column, to the right of the repo tree); its share of the
+    height is set by the ``c`` -> ``d`` detail-size ratio.
+    """
 
     #: Allow the details pane to receive focus so Tab can cycle to it.
     can_focus = True
@@ -449,12 +618,18 @@ class TaskDetails(TitleHighlight, Static):
             lines.append(f"Assignee: {escape_markup(task['assignee'])}")
         if task.get("due"):
             lines.append(f"Due: {escape_markup(task['due'])}")
+        if task.get("parent"):
+            lines.append(f"Parent: {escape_markup(task['parent'])}")
         tags = task.get("tags") or []
         if tags:
             lines.append("Tags: " + cls.format_tags(tags))
         if task.get("body"):
             lines.append("")
-            lines.append(str(task["body"]))
+            # Markup-escape the body (matching the shared CLI card builder's
+            # plain-escaped body) so a value containing ``[`` / ``]`` - e.g. a
+            # Markdown link ``[text](url)`` - renders literally instead of its
+            # ``[text]`` run being parsed as a style tag and silently dropped.
+            lines.append(cls.format_body(task["body"]))
 
         lines.append("")
         lines.append("[bold]Sessions[/bold]")
@@ -464,6 +639,16 @@ class TaskDetails(TitleHighlight, Static):
             for start, stop, duration, is_open in intervals:
                 lines.append(cls.format_interval(start, stop, duration, is_open))
         return "\n".join(lines)
+
+    @classmethod
+    def format_body(cls, body: object) -> str:
+        """Escape a task body for the details pane (overridable seam).
+
+        Routed through a classmethod so a child theme can replace body
+        rendering (e.g. real hyperlinks, custom highlighting) without
+        overriding the whole :meth:`format_details`.
+        """
+        return escape_markup(str(body))
 
     @classmethod
     def format_tags(cls, tags: list[str]) -> str:
@@ -758,9 +943,15 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
     real scroll container - rather than a bare ``Static`` with
     ``overflow-y: auto`` - is what lets the content scroll at all: a plain
     ``Static`` never reports scrollable content, so once the cursor row went
-    past the visible height the user could not see it. After every cursor move
-    the view scrolls the highlighted row back into view via
-    :meth:`scroll_to_cursor` (driven by the overridable :meth:`cursor_line`).
+    past the visible height the user could not see it. After every *continuous*
+    (``j``/``k``) cursor move the view scrolls the highlighted row back into
+    view via :meth:`scroll_to_cursor` (driven by the overridable
+    :meth:`cursor_line`); after a *discontinuous* jump - a lane/column switch,
+    a select-by-id, or a layout cycle that re-selects a task - the view
+    repositions via :meth:`ensure_cursor_visible` instead, which guarantees the
+    whole selected item is on screen without inferring a (now stale) move
+    direction. (:class:`CalendarView` keeps its grid pinned either way; its day
+    move / select-by-id reach their scroll through the subsequent rebuild.)
 
     The contract every subclass provides is:
 
@@ -1051,6 +1242,168 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         target = self.max_scroll_y if to_bottom else 0
         self.scroll_to(y=target, animate=False)
 
+    def ensure_cursor_visible(self) -> None:
+        """Reposition the viewport so the *whole* cursor item is on screen.
+
+        The discontinuous-jump counterpart of :meth:`scroll_to_cursor` /
+        :meth:`scroll_cursor_to_edge` for the views that follow the shared
+        smart-scroll path (list / kanban). Where :meth:`scroll_to_cursor`
+        *infers* the move direction from :attr:`_last_cursor_line` (correct for
+        continuous ``j``/``k`` navigation, where the cursor steps one row at a
+        time), this method makes **no** direction assumption: it guarantees the
+        full cursor span ``[cursor_line .. cursor_line + span - 1]`` is visible
+        regardless of where the cursor was before.
+
+        That difference is the whole point of this seam. After a *discontinuous*
+        selection change - switching kanban swim lanes (via
+        :meth:`DotoApp._kanban_navigate` after the rebuild), selecting a task
+        by id (:meth:`select_id`), or a layout switch that re-selects a task
+        (:meth:`DotoApp._cycle_layout`) - the cursor can land arbitrarily far
+        from where it was, so the stale direction baseline makes
+        :meth:`scroll_to_cursor` take the wrong branch (or no branch) and leave
+        the selected item off screen. Example: the cursor is at the bottom of a
+        long ``open`` lane and the user switches to a one-card ``in-progress``
+        lane whose single card is at the top; :meth:`target_scroll_y` infers a
+        stale *downward* direction and does not scroll, so the selected card is
+        not visible. Repositioning here with no direction inference fixes that.
+
+        The target reuses the same clamp logic as :meth:`target_scroll_y` so a
+        whole multi-line item (a kanban card) is kept fully in view:
+
+        * the cursor item occupies ``[cursor_line .. item_bottom]`` where
+          ``item_bottom = cursor_line + span - 1`` and ``span`` is
+          :meth:`cursor_span`;
+        * an item that fits the frame is kept on screen with **minimal**
+          scroll: the offset is clamped into
+          ``[item_bottom - height + 1 .. cursor_line]`` - the deepest offset
+          that still shows the item's bottom, and the shallowest that still
+          shows its top - starting from the *current* :attr:`scroll_y`, so an
+          item that is already fully visible does not move the frame at all;
+        * an oversized item (``span > height``, impossible to fit) aligns its
+          *top* to the viewport top so the user sees the start of the item,
+          mirroring :meth:`target_scroll_y`'s oversized-card branch.
+
+        The smart-scroll baseline (:attr:`_last_cursor_line`) is re-anchored to
+        the landing line afterwards - like :meth:`scroll_cursor_to_edge` - so
+        the next ``j``/``k`` navigation infers its direction from where the
+        cursor actually is, not from the pre-jump line. A no-op until the view
+        is mounted (no region to reposition yet).
+
+        An overridable seam - like :meth:`scroll_to_cursor` /
+        :meth:`target_scroll_y` - so a child theme can retune or replace the
+        reposition behavior by subclassing and swapping the matching
+        ``*_view_class`` app attribute. :class:`CalendarView` overrides it to
+        stay consistent with its pinned-grid :meth:`scroll_to_cursor`.
+        """
+        self._last_cursor_line = self.cursor_line()
+        if not self.is_mounted:
+            return
+        target = self.target_visible_scroll_y(self.cursor_line())
+        if target is not None:
+            self.scroll_to(y=target, animate=False)
+
+    def _clamp_span_onto_screen(
+        self,
+        cursor_line: int,
+        span: int,
+        height: int,
+        start: int,
+        max_scroll: int,
+    ) -> int:
+        """Clamp a scroll offset so the whole cursor span stays on screen.
+
+        The shared whole-item clamp used by both scroll paths
+        (:meth:`target_scroll_y`'s multi-line branch and
+        :meth:`target_visible_scroll_y`), so the subtle, retune-prone geometry
+        lives in one place:
+
+        * ``lo = item_bottom - height + 1`` is the deepest offset that still
+          shows the item's bottom; ``hi = cursor_line`` is the shallowest that
+          still shows its top, so ``lo <= offset <= hi`` keeps every line of
+          the span ``[cursor_line .. cursor_line + span - 1]`` visible;
+        * ``start`` is clamped into ``[lo, hi]`` and then into the scrollable
+          range ``[0, max_scroll]`` - the caller passes the offset the clamp
+          should start from (``target_scroll_y`` its computed jump target,
+          ``target_visible_scroll_y`` the current :attr:`scroll_y` for minimal
+          movement);
+        * an oversized span (``span > height``) cannot fit, so the item's top
+          is aligned to the viewport top (``cursor_line``) to show its start.
+
+        Args:
+            cursor_line: The cursor's current 0-based content line (the top
+                line of the cursor item).
+            span: The cursor item's line span (``>= 1``).
+            height: The viewport height in lines.
+            start: The offset the clamp starts from before being pinned into
+                the visible range.
+            max_scroll: The maximum scrollable offset (``max_scroll_y``).
+
+        Returns:
+            The content-line offset that keeps the whole span on screen.
+        """
+        item_bottom = cursor_line + span - 1
+        if span > height:
+            # Oversized item: align its top to the viewport top (show its
+            # start) rather than pushing it off either edge.
+            target = cursor_line
+        else:
+            lo = item_bottom - height + 1
+            hi = cursor_line
+            target = min(max(start, lo), hi)
+        return max(0, min(max_scroll, target))
+
+    def target_visible_scroll_y(self, cursor_line: int) -> int | None:
+        """Return the offset that keeps the whole cursor span visible, or None.
+
+        The pure (modulo the mounted viewport geometry it reads) target
+        computation behind :meth:`ensure_cursor_visible`: unlike
+        :meth:`target_scroll_y` it takes no ``previous_line`` and infers no
+        move direction - it only guarantees the full cursor span
+        ``[cursor_line .. cursor_line + span - 1]`` is on screen with the
+        smallest possible scroll from the current :attr:`scroll_y`.
+
+        The clamp mirrors :meth:`target_scroll_y` - both delegate to the
+        shared :meth:`_clamp_span_onto_screen`:
+
+        * ``lo = item_bottom - height + 1`` puts the item's bottom at the
+          bottom edge; ``hi = cursor_line`` puts its top at the top edge, so
+          ``lo <= offset <= hi`` keeps every line of the span visible;
+        * the current :attr:`scroll_y` is clamped into ``[lo, hi]`` (so an item
+          already fully visible returns None - no move), then clamped to the
+          scrollable range ``[0, max_scroll_y]``;
+        * an oversized span (``span > height``) cannot fit, so the item's top
+          is aligned to the viewport top (``cursor_line``) to show its start.
+
+        Factored out of :meth:`ensure_cursor_visible` so the reposition target
+        can be unit-tested without a live terminal (the same way
+        :meth:`target_scroll_y` is) and overridden independently of the scroll
+        call. Overridable per view / by a child theme.
+
+        Args:
+            cursor_line: The cursor's current 0-based content line (the top
+                line of the cursor item).
+
+        Returns:
+            The content-line offset to scroll the top of the viewport to, or
+            None when the whole span is already visible (no scroll needed).
+        """
+        max_scroll = self.max_scroll_y
+        if max_scroll <= 0:
+            return None
+        height = self.size.height
+        if height <= 0:
+            return None
+        span = max(1, self.cursor_span())
+        current = int(self.scroll_y)
+        # Minimal scroll: start the clamp from the current offset so an item
+        # that is already fully visible stays put (``target == current``).
+        target = self._clamp_span_onto_screen(
+            cursor_line, span, height, start=current, max_scroll=max_scroll
+        )
+        if target == current:
+            return None
+        return target
+
     def target_scroll_y(self, cursor_line: int, previous_line: int) -> int | None:
         """Return the smart-scroll target offset, or None to stay put.
 
@@ -1126,27 +1479,14 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
             target = cursor_line - self.SCROLL_JUMP
         else:
             return None
-        # Guarantee the whole span is visible when it can be, by clamping the
-        # computed target between the two offsets that keep the item on screen:
-        #   lo = item_bottom - height + 1  -> item bottom at the bottom edge
-        #   hi = cursor_line               -> item top at the top edge
-        # ``lo <= target <= hi`` keeps every line in [cursor_line .. item_bottom]
-        # inside the viewport. This applies symmetrically to the move-down and
-        # move-up paths so a tall card can never sit partly below (down) or
-        # partly above (up) the frame.
-        if span > height:
-            # Oversized card: the whole span cannot fit, so deliberately align
-            # the item's top to the viewport top (show its start) rather than
-            # pushing it off either edge. ``cursor_line`` is both floor and
-            # ceiling here.
-            target = cursor_line
-        elif span > 1:
-            # Multi-line item that fits: clamp into [lo, hi] so top and bottom
-            # are both on screen.
-            lo = item_bottom - height + 1
-            hi = cursor_line
-            target = min(max(target, lo), hi)
-        else:
+        # Guarantee the whole span is visible when it can be. The multi-line
+        # and oversized branches share the same clamp as the discontinuous
+        # reposition via :meth:`_clamp_span_onto_screen` (lo = item bottom at
+        # the bottom edge, hi = item top at the top edge, oversized aligns the
+        # top), starting from the computed jump ``target`` so the SCROLL_JUMP
+        # look-ahead is preserved where it still fits. The one-line branch is
+        # kept separate: lo == hi there would defeat the look-ahead.
+        if span == 1:
             # One-line list / calendar: the item is a single line so lo == hi
             # (both equal ``cursor_line``) would defeat the SCROLL_JUMP
             # look-ahead. Preserve the original single-line nudge instead - the
@@ -1156,7 +1496,10 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
                 target = max(target, cursor_line - height + 1)
             else:
                 target = min(target, cursor_line)
-        return max(0, min(max_scroll, target))
+            return max(0, min(max_scroll, target))
+        return self._clamp_span_onto_screen(
+            cursor_line, span, height, start=target, max_scroll=max_scroll
+        )
 
     def selected_id(self) -> str | None:
         """Return the id of the view's current selection, or None.
@@ -1202,8 +1545,39 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         """
         raise NotImplementedError
 
+    def select_id(self, task_id: str) -> bool:
+        """Move the view's cursor to the row for ``task_id``, if present.
 
-class ListView(AltLayoutView):
+        The task-selection counterpart of :meth:`move_cursor` /
+        :meth:`move_cursor_to_edge`: instead of stepping or jumping to an edge
+        it places the cursor on the row whose *display* id equals ``task_id``
+        and scrolls it into view, reusing each view's existing cursor-move /
+        smart-scroll path rather than inventing new scrolling. It backs the
+        app-level :meth:`~doxtr_doto.cli.tui.app.DotoApp.select_task` seam used
+        to reveal a freshly added task
+        (:meth:`~doxtr_doto.cli.tui.app.DotoApp.action_add`).
+
+        The base implementation returns ``False`` (no task matched / this view
+        does not select by task id): :class:`TimeView`, whose selection keys on
+        a *day* rather than a task, deliberately inherits this no-op so an
+        auto-select request there is simply ignored. The task-centric views
+        (:class:`TaskList`, :class:`ListView`, :class:`KanbanView`,
+        :class:`CalendarView`) override it. An overridable seam so a child
+        theme can retune or replace the per-view selection by subclassing and
+        swapping the matching ``*_view_class`` / ``task_list_class`` app
+        attribute; keep the id-preservation behavior in :meth:`rebuild` intact.
+
+        Args:
+            task_id: The *display* id (bare or namespaced) to select.
+
+        Returns:
+            True when a matching row was found and the cursor moved to it,
+            False otherwise.
+        """
+        return False
+
+
+class ListView(TreePrefixMixin, AltLayoutView):
     """Single-column list view: one task per line, Enter reveals details.
 
     This is the ``list`` TUI layout (:attr:`doxtr_doto.enums.TuiLayout.LIST`):
@@ -1241,18 +1615,31 @@ class ListView(AltLayoutView):
         #: entry per ``row_ids`` entry, in the same order.
         self._row_markup: list[str] = []
 
-    def rebuild(self, tasks: list[dict[str, Any]]) -> None:
-        """Rebuild the list from task dicts, preserving the cursor by id.
+    def rebuild(self, tasks: list[dict[str, Any]], collapsed_ids: set[str] | None = None) -> None:
+        """Rebuild the list from task dicts, nesting sub-tasks as a tree.
+
+        Mirrors :meth:`TaskList.rebuild`: the visible list is flattened into a
+        depth-first pre-order parent/child tree via
+        :func:`doxtr_doto.cli.tui.filtersort.flatten_tree`, so each sub-task is
+        drawn indented under its ``parent`` with an expand/collapse triangle,
+        and the cursor is preserved by id across rebuilds. ``tasks`` is
+        consumed in the order the caller's view pipeline produced it (already
+        active-pinned via :func:`pin_active_first`, Feature A); this method
+        does not re-pin.
 
         Args:
             tasks: Task dicts (as produced by
                 :func:`doxtr_doto.cli.tui.data.gather_tasks`).
+            collapsed_ids: The set of parent ids whose children are hidden
+                (default-expanded otherwise). None is treated as empty.
         """
         previous = self.selected_id()
-        # Feature A: pin the active (time-recorded) task to the top, applied
-        # here so the list view is self-contained; stable otherwise.
-        ordered = pin_active_first(tasks)
-        self.row_ids = [str(task.get("id", "")) for task in ordered]
+        # ``tasks`` is already active-pinned by the caller's view pipeline
+        # (pin_active_first, Feature A); consume that order as-is rather than
+        # re-pinning here. Flatten into the parent/child tree so sub-tasks
+        # nest under their parent.
+        rows = flatten_tree(tasks, collapsed_ids)
+        self.row_ids = [str(row.task.get("id", "")) for row in rows]
         if previous is not None and previous in self.row_ids:
             self.cursor = self.row_ids.index(previous)
         else:
@@ -1260,8 +1647,8 @@ class ListView(AltLayoutView):
         # Cache each row's markup so cursor_line can measure wrapped heights.
         # format_line is called without the cursor highlight because the
         # highlight wrapper does not change the line's rendered width/height.
-        self._row_markup = [self.format_line(task, False) for task in ordered]
-        self.update_content(self.format_lines(ordered, self.cursor))
+        self._row_markup = [self.format_line(row, False) for row in rows]
+        self.update_content(self.format_lines(rows, self.cursor))
         self._sync_scroll_anchor()
         self.scroll_to_cursor()
 
@@ -1304,6 +1691,28 @@ class ListView(AltLayoutView):
             return
         self.cursor = len(self.row_ids) - 1 if to_bottom else 0
         self.scroll_cursor_to_edge(to_bottom)
+
+    def select_id(self, task_id: str) -> bool:
+        """Place the cursor on the row whose id equals ``task_id``.
+
+        Sets :attr:`cursor` to the matching row index and repositions it into
+        view via the discontinuous :meth:`~AltLayoutView.ensure_cursor_visible`
+        path (selecting by id is a jump, not a step, so the direction-inferring
+        :meth:`~AltLayoutView.scroll_to_cursor` could leave it off screen).
+        See :meth:`AltLayoutView.select_id` for the overall contract.
+
+        Args:
+            task_id: The display id (bare or namespaced) to select.
+
+        Returns:
+            True when ``task_id`` is a current row and the cursor moved to it,
+            False when it is not present.
+        """
+        if task_id not in self.row_ids:
+            return False
+        self.cursor = self.row_ids.index(task_id)
+        self.ensure_cursor_visible()
+        return True
 
     def _content_width(self) -> int:
         """Return the width (screen columns) rows wrap to, or a safe fallback.
@@ -1369,33 +1778,48 @@ class ListView(AltLayoutView):
         return line
 
     @classmethod
-    def format_lines(cls, tasks: list[dict[str, Any]], cursor: int) -> str:
+    def format_lines(cls, rows: Sequence[TreeRow | dict[str, Any]], cursor: int) -> str:
         """Return the full list markup, highlighting the cursor row.
 
         Args:
-            tasks: The task dicts to render.
+            rows: The rows to render - either
+                :class:`~doxtr_doto.cli.tui.filtersort.TreeRow` objects (the
+                tree-aware path :meth:`rebuild` uses) or bare task dicts (for
+                pure-logic callers/tests).
             cursor: The index of the highlighted row.
 
         Returns:
             Textual markup for the whole list (an empty-state line when there
             are no tasks).
         """
-        if not tasks:
+        if not rows:
             return "[dim]No tasks.[/dim]"
-        lines = [cls.format_line(task, index == cursor) for index, task in enumerate(tasks)]
+        lines = [cls.format_line(row, index == cursor) for index, row in enumerate(rows)]
         return "\n".join(lines)
 
     @classmethod
-    def format_line(cls, task: dict[str, Any], highlighted: bool) -> str:
+    def format_line(cls, row: TreeRow | dict[str, Any], highlighted: bool) -> str:
         """Return one task's single-line markup.
 
+        Accepts either a :class:`~doxtr_doto.cli.tui.filtersort.TreeRow`
+        (carrying depth / expansion for the tree prefix) or a bare task dict
+        (treated as a depth-0 leaf). The line is prefixed with the
+        expand/collapse triangle + depth indent from :meth:`format_tree_prefix`
+        so sub-tasks read as an indented tree, mirroring :meth:`TaskList`.
+
         Args:
-            task: A task dict.
+            row: A :class:`TreeRow` or a bare task dict.
             highlighted: Whether this row is under the cursor.
 
         Returns:
             Textual markup for the task's line.
         """
+        if isinstance(row, TreeRow):
+            task = row.task
+            depth, has_children, expanded = row.depth, row.has_children, row.expanded
+        else:
+            task = row
+            depth, has_children, expanded = 0, False, False
         running = "[green]\u25b6[/green]" if task.get("_running") else " "
         done = task.get("status") == DONE_STATUS
         checkbox = "[dim]\\[\u2713][/dim]" if done else "\\[ ]"
@@ -1404,7 +1828,8 @@ class ListView(AltLayoutView):
         status = task.get("status") or ""
         status_cell = styled((status or "-"), status_style(status))
         task_id = escape_markup(task.get("id", ""))
-        title = cls.escape_title(task.get("title", ""))
+        prefix = cls.format_tree_prefix(depth, has_children, expanded)
+        title = prefix + cls.escape_title(task.get("title", ""))
         line = f"{running} {checkbox} {pri_cell} {status_cell} [bold]{task_id}[/bold]  {title}"
         if highlighted:
             return f"[reverse]{line}[/reverse]"
@@ -1889,6 +2314,33 @@ class KanbanView(AltLayoutView):
         self.row = length - 1 if to_bottom else 0
         self.scroll_cursor_to_edge(to_bottom)
 
+    def select_id(self, task_id: str) -> bool:
+        """Place the cursor on the card whose id equals ``task_id``.
+
+        Scans the bucketed :attr:`columns` for a card with that display id and,
+        when found, sets :attr:`col` / :attr:`row` to it (mirrors the
+        find-by-id scan in :meth:`_restore_cursor`) and repositions it into
+        view via the discontinuous :meth:`~AltLayoutView.ensure_cursor_visible`
+        path (selecting by id can jump across lanes, so direction-inferring
+        :meth:`~AltLayoutView.scroll_to_cursor` could leave it off screen). See
+        :meth:`AltLayoutView.select_id` for the overall contract.
+
+        Args:
+            task_id: The display id (bare or namespaced) to select.
+
+        Returns:
+            True when a card with ``task_id`` was found and selected, False
+            otherwise.
+        """
+        for col_index, (_name, items) in enumerate(self.columns):
+            for row_index, task in enumerate(items):
+                if str(task.get("id", "")) == task_id:
+                    self.col = col_index
+                    self.row = row_index
+                    self.ensure_cursor_visible()
+                    return True
+        return False
+
     def move_column(self, delta: int) -> bool:
         """Move the *selection* to the next/previous column (swim lane).
 
@@ -1904,6 +2356,21 @@ class KanbanView(AltLayoutView):
 
         Returns False when the move would step off either edge of the board
         (no wrap), so the caller can treat an edge as a no-op.
+
+        A lane switch is a *discontinuous* jump (the new lane can be much
+        shorter than the old one, and the clamped row can land anywhere), so
+        the selected card must be repositioned into view via
+        :meth:`~AltLayoutView.ensure_cursor_visible` rather than the
+        direction-inferring :meth:`~AltLayoutView.scroll_to_cursor`: switching
+        from the bottom of a long lane to a one-card lane whose card is at the
+        top must scroll the viewport back to the top so the selected card is
+        visible, which the stale smart-scroll direction baseline would not do.
+        That reposition is owned by the app's :meth:`DotoApp._kanban_navigate`
+        *after* it rebuilds the board (the rebuild re-renders and re-runs the
+        direction-inferring smart scroll, so repositioning here would be
+        overwritten); this method keeps itself on the continuous
+        :meth:`~AltLayoutView.scroll_to_cursor` path for any future direct
+        caller that is not followed by a rebuild.
 
         Args:
             delta: Columns to move (``-1`` left, ``+1`` right).
@@ -3265,6 +3732,48 @@ class CalendarView(AltLayoutView):
             return
         self.region_cursor = max(0, min(len(tasks) - 1, self.region_cursor))
 
+    def select_id(self, task_id: str) -> bool:
+        """Focus the region/day holding ``task_id`` and put the cursor on it.
+
+        Scans the bucketed :attr:`buckets` for a task with that display id:
+
+        * a task in a *dated* bucket re-targets :attr:`selected` to that day,
+          focuses the :attr:`REGION_DUE` list, and points
+          :attr:`region_cursor` at the task (so the day's "Due" list highlights
+          it);
+        * a task in the :attr:`NO_DUE_KEY` bucket focuses the
+          :attr:`REGION_NO_DUE` list and points the cursor at it.
+
+        The app re-renders the view via
+        :meth:`~doxtr_doto.cli.tui.app.DotoApp._rebuild_alt_views` after this,
+        which re-clamps the cursor and scrolls, so no new scrolling logic is
+        introduced here. See :meth:`AltLayoutView.select_id` for the overall
+        contract.
+
+        Args:
+            task_id: The display id (bare or namespaced) to select.
+
+        Returns:
+            True when a task with ``task_id`` was found and selected, False
+            otherwise.
+        """
+        for key, items in self.buckets.items():
+            for index, task in enumerate(items):
+                if str(task.get("id", "")) == task_id:
+                    if key == self.NO_DUE_KEY:
+                        self.focus_region = self.REGION_NO_DUE
+                    else:
+                        self.selected = key
+                        try:
+                            day = _date.fromisoformat(key)
+                            self.year, self.month = day.year, day.month
+                        except ValueError:
+                            pass
+                        self.focus_region = self.REGION_DUE
+                    self.region_cursor = index
+                    return True
+        return False
+
     def assign_task_id(self) -> str | None:
         """Return the highlighted No-due task's id, or None (Feature C).
 
@@ -3335,6 +3844,28 @@ class CalendarView(AltLayoutView):
         # child theme is still pinned to the top).
         target = 0
         self.scroll_to(y=target, animate=False)
+
+    def ensure_cursor_visible(self) -> None:
+        """Keep the pinned month grid visible after a discontinuous selection.
+
+        Overrides the shared :meth:`AltLayoutView.ensure_cursor_visible` so the
+        calendar's discontinuous-jump reposition stays consistent with its
+        pinned-grid :meth:`scroll_to_cursor`. This override is reached when a
+        layout cycle lands on the calendar
+        (:meth:`DotoApp._cycle_layout` calls ``_active_view().ensure_cursor_visible()``):
+        it must not scroll the grid header off the top. Note the calendar's own
+        day move (:meth:`move_day`) and :meth:`select_id` reach their scroll
+        through the subsequent rebuild's :meth:`scroll_to_cursor`, not this
+        seam - they only mutate selection state and rely on
+        :meth:`DotoApp._rebuild_alt_views` to re-render and re-pin the grid.
+        Because the grid and the per-day detail list render into a single
+        :class:`~textual.widgets.Static`, the only offset that keeps the grid's
+        top line (content line 0) on screen is 0, exactly as
+        :meth:`scroll_to_cursor` documents - so this delegates to it rather
+        than running the span-clamp target computation the list/kanban views
+        use. A no-op until the view is mounted.
+        """
+        self.scroll_to_cursor()
 
     def selected_tasks(self) -> list[dict[str, Any]]:
         """Return the tasks due on the currently selected day.

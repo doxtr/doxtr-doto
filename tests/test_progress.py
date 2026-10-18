@@ -285,8 +285,8 @@ class TestProgressSchemaMigration:
     """Tests for schema migration v3 -> v4 adding progress field."""
 
     def test_schema_version_is_5(self):
-        """Current schema version is 5."""
-        assert SCHEMA_VERSION == 5
+        """Current schema version is at least 5 (progress migration landed in v5)."""
+        assert SCHEMA_VERSION >= 5
 
     def test_migration_adds_progress_field(self, tmp_path):
         """Migration from v3 adds progress field to existing tasks."""
@@ -316,7 +316,7 @@ class TestProgressSchemaMigration:
         store.load()
 
         # Check migration happened
-        assert store.version == 5
+        assert store.version == SCHEMA_VERSION
         assert store.get_task("TEST-001")["progress"] is None
         assert store.get_task("TEST-002")["progress"] is None
 

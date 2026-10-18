@@ -6,7 +6,7 @@ import json
 import sys
 from typing import TYPE_CHECKING, Any
 
-from doxtr_doto.date_utils import format_date_display, is_overdue
+from doxtr_doto.date_utils import format_date_display, task_is_overdue
 
 try:
     from rich import box
@@ -134,7 +134,7 @@ def build_task_detail_lines(task: dict[str, Any]) -> list[str]:
     )
     if task.get("due"):
         due_style = ""
-        if task.get("status") != "done" and is_overdue(task["due"]):
+        if task_is_overdue(task):
             due_style = "red bold"
         due_display = format_date_display(task["due"])
         lines.append(f"[bold]Due:[/bold] {_wrap_style(_rich_escape(due_display), due_style)}")
@@ -324,7 +324,7 @@ class OutputFormatter:
                     row.append(Text(str(value or "-"), style=style))
                 elif col == "due":
                     if value:
-                        overdue = is_overdue(value)
+                        overdue = task_is_overdue(task)
                         style = "red bold" if overdue else ""
                         display = format_date_display(value)
                         if overdue:
@@ -361,9 +361,7 @@ class OutputFormatter:
         self.console.print(table)
 
         # Summary
-        overdue_count = sum(
-            1 for t in tasks if t.get("due") and is_overdue(t["due"]) and t.get("status") != "done"
-        )
+        overdue_count = sum(1 for t in tasks if task_is_overdue(t))
         blocked = sum(1 for t in tasks if t.get("status") == "blocked")
         summary_parts = [f"{len(tasks)} task{'s' if len(tasks) != 1 else ''}"]
         if overdue_count:

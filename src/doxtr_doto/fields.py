@@ -1,8 +1,26 @@
 """Central registry of all DotoTask fields.
 
 All modules that need to enumerate task fields import from here.
-Adding a new field requires changes in exactly one place (plus
-the DotoTask dataclass and JSON schema migration).
+Registering a ``FieldDefinition`` below auto-propagates the field to the
+derived collections (merge, display columns, serialization, labels) and the
+``BY_*`` lookup maps. A new field, however, is NOT fully wired by the registry
+alone -- these additional touch-points must be updated by hand (a type checker
+will not flag them as stale):
+
+* :class:`doxtr_doto.collectors.DotoTask` -- add the attribute and include it
+  in ``to_dict`` / ``from_dict`` / ``to_sync_dict``.
+* :class:`doxtr_doto.sync.json_store.TaskData` -- add the TypedDict key.
+* :func:`doxtr_doto.sync.json_store` schema migration -- backfill the key and
+  bump ``SCHEMA_VERSION``.
+* :func:`doxtr_doto.directives.doto.DotoDirective` -- add the option and parse
+  it, if the field is author-settable.
+* Rendering seams, if the field is ``displayable``:
+  :func:`doxtr_doto.nodes._get_task_column_value` (docutils HTML/LaTeX path)
+  and :func:`doxtr_doto.template_loader._column_value_filter` (Jinja path).
+* Sorting, if the field should be sortable:
+  ``directives.doto_list.VALID_SORT_FIELDS`` plus the ``sort_key`` functions in
+  :func:`doxtr_doto.collectors._filter_tasks_impl` and
+  :func:`doxtr_doto.cli.commands.list`.
 
 This module provides:
 - FieldDefinition: Dataclass describing a single task field
@@ -103,6 +121,21 @@ TASK_FIELDS: tuple[FieldDefinition, ...] = (
         # time. Parsing/formatting is centralized in
         # :mod:`doxtr_doto.date_utils`; see the "Due dates with time" README
         # section.
+        default=None,
+    ),
+    FieldDefinition(
+        name="estimate",
+        rst_name="estimate",
+        json_name="estimate",
+        display_label="Estimate",
+        mergeable=True,
+        displayable=True,
+        # Expected duration the task should take, stored as a whole number of
+        # minutes (``int``). Authored with the compact duration syntax (``5m``,
+        # ``4h``, ``1h30m``); parsing/formatting is centralized in
+        # :mod:`doxtr_doto.date_utils` (``parse_duration`` /
+        # ``format_duration_minutes``). Consumed by calendar-sync to size the
+        # projected event, overriding the global ``event_duration_minutes``.
         default=None,
     ),
     FieldDefinition(

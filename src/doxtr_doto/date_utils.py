@@ -11,9 +11,13 @@ This module provides:
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import date, datetime, time, timedelta
-from typing import Union
+from typing import TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 DateLike = Union[str, date, datetime, "DotoDate", None]
 
@@ -34,6 +38,136 @@ _ISO_FORMAT = "%Y-%m-%d"
 # A date with no time is still a pure date and behaves identically to before.
 _HOUR_SHORTHAND_RE = re.compile(r"^(?P<hour>\d{1,2})h$", re.IGNORECASE)
 _TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?$")
+
+# A task may carry an *estimate* of how long it is expected to take (used by
+# calendar-sync to size the event, and surfaced as a display column). The
+# estimate is modelled as a whole number of minutes and accepts a compact,
+# human-friendly duration syntax so an author can write ``5m``, ``10m``,
+# ``4h`` or a combined ``1h30m``:
+#   * ``<n>m``        minutes, e.g. ``5m``, ``90m``
+#   * ``<n>h``        hours, e.g. ``4h``
+#   * ``<n>h<n>m``    hours + minutes, e.g. ``1h30m``
+#   * ``<n>``         a bare integer is interpreted as minutes (``30`` -> 30m)
+# Whitespace between components is tolerated (``1h 30m``) and matching is
+# case-insensitive. The value is stored canonically as an ``int`` number of
+# minutes; :func:`format_duration_minutes` renders it back to the compact form.
+_DURATION_RE = re.compile(
+    r"^\s*(?:(?P<hours>\d+)\s*h)?\s*(?:(?P<minutes>\d+)\s*m)?\s*$",
+    re.IGNORECASE,
+)
+_BARE_INT_RE = re.compile(r"^\s*(?P<minutes>\d+)\s*$")
+
+
+def parse_duration(value: str | int | float | None) -> int | None:
+    """Parse an estimate/duration into a whole number of minutes.
+
+    Accepts the compact duration syntax documented on :data:`_DURATION_RE`
+    (``5m``, ``10m``, ``4h``, ``1h30m``) as well as a bare integer (treated as
+    minutes) or a numeric ``int``/``float`` passed through directly (a float is
+    truncated to whole minutes).
+
+    Args:
+        value: The duration string (e.g. ``"4h"``), a bare integer-as-string
+            (``"30"``), a numeric ``int``/``float`` number of minutes, or
+            ``None``/empty.
+
+    Returns:
+        The duration in whole minutes, or ``None`` for ``None``/empty input.
+
+    Raises:
+        ValueError: If a non-empty value is not a recognized duration or is
+            not strictly positive.
+        TypeError: If ``value`` is of an unsupported type (e.g. a list).
+    """
+    if value is None:
+        return None
+    # Accept numeric types directly. ``bool`` is a subclass of ``int`` but is
+    # never a meaningful duration, so reject it explicitly rather than reading
+    # ``True`` as 1 minute.
+    if isinstance(value, bool):
+        raise TypeError(f"Duration must be a number or string, not bool: {value!r}")
+    if isinstance(value, (int, float)):
+        # ``int(float('inf'))`` raises ``OverflowError`` (and ``int(nan)`` a
+        # ``ValueError``). A hand-edited or foreign ``tasks.json`` can carry a
+        # non-finite float via JSON's non-standard ``Infinity``/``NaN`` tokens,
+        # so reject it as a plain ``ValueError`` that the forgiving
+        # :func:`parse_duration_safe` wrapper already catches.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"Duration must be a finite number, got {value!r}.")
+        minutes = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        bare = _BARE_INT_RE.match(text)
+        if bare is not None:
+            minutes = int(bare.group("minutes"))
+        else:
+            match = _DURATION_RE.match(text)
+            if match is None or (match.group("hours") is None and match.group("minutes") is None):
+                raise ValueError(
+                    f"Invalid duration '{value}'. Expected e.g. '5m', '90m', "
+                    "'4h', '1h30m', or a bare number of minutes."
+                )
+            hours = int(match.group("hours") or 0)
+            mins = int(match.group("minutes") or 0)
+            minutes = hours * 60 + mins
+    else:
+        raise TypeError(f"Duration must be a number or string, not {type(value).__name__}")
+    if minutes <= 0:
+        raise ValueError(f"Duration must be a positive number of minutes, got {minutes}.")
+    return minutes
+
+
+def parse_duration_safe(value: str | int | float | None) -> int | None:
+    """Parse a duration, returning ``None`` for invalid/missing input.
+
+    The forgiving counterpart to :func:`parse_duration`: it never raises, so
+    render/sync seams that must not fail on malformed stored data (which may be
+    hand-edited or produced by a foreign tool, so of any type) can call it
+    directly.
+
+    Args:
+        value: Duration string, bare-int string, numeric ``int``/``float``
+            minutes, or ``None`` -- or any other value, which yields ``None``.
+
+    Returns:
+        The duration in whole minutes, or ``None`` when missing/invalid.
+    """
+    try:
+        return parse_duration(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def format_duration_minutes(minutes: int | None) -> str:
+    """Render a minute count as the compact duration syntax.
+
+    The inverse of :func:`parse_duration`: it produces the canonical form that
+    round-trips back through the parser (``5`` -> ``"5m"``, ``60`` -> ``"1h"``,
+    ``90`` -> ``"1h30m"``).
+
+    Forgiving by design: a ``None`` or any non-positive / non-integer input
+    (e.g. a hand-edited or foreign ``"estimate": "4h"`` stored string) yields
+    ``""`` rather than raising, so render and RST-write seams that pass a stored
+    value straight through cannot crash on malformed data.
+
+    Args:
+        minutes: Duration in whole minutes, or ``None``.
+
+    Returns:
+        The compact string (e.g. ``"1h30m"``), or ``""`` for ``None``/
+        non-positive/non-integer input.
+    """
+    # ``bool`` is an ``int`` subclass but never a meaningful duration; exclude it.
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        return ""
+    hours, mins = divmod(int(minutes), 60)
+    if hours and mins:
+        return f"{hours}h{mins}m"
+    if hours:
+        return f"{hours}h"
+    return f"{mins}m"
 
 
 def parse_time_token(token: str) -> time:
@@ -538,6 +672,31 @@ def is_overdue(value: DateLike) -> bool:
     """
     d = DotoDate.parse_safe(value)
     return d.is_overdue() if d else False
+
+
+def task_is_overdue(task: Mapping[str, object]) -> bool:
+    """Return whether a dict-backed task is overdue.
+
+    A task is overdue when it has a due date in the past *and* is not done.
+    This is the single source of truth for the overdue rule on the plain-dict
+    task shape used across the CLI (list table, stats, bulk update), so the
+    ``status != "done"`` guard lives in exactly one place rather than being
+    re-spelled -- sometimes as the literal ``"done"`` -- at each call site.
+
+    The object-backed equivalent is :meth:`collectors.DotoTask.is_overdue`.
+
+    Args:
+        task: A task mapping with optional ``"due"`` and ``"status"`` keys.
+
+    Returns:
+        True if the task has a past due date and its status is not ``done``.
+    """
+    from doxtr_doto.constants import DONE_STATUS
+
+    due = task.get("due")
+    if not due or task.get("status") == DONE_STATUS:
+        return False
+    return is_overdue(due)  # type: ignore[arg-type]
 
 
 def is_due_soon(value: DateLike, days: int = 7) -> bool:

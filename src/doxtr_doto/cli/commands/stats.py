@@ -12,7 +12,7 @@ from doxtr_doto.constants import (
     PRIORITY_DISPLAY_ORDER,
     STATUS_DISPLAY_ORDER,
 )
-from doxtr_doto.date_utils import is_overdue, parse_date_safe
+from doxtr_doto.date_utils import parse_date_safe, task_is_overdue
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
@@ -101,14 +101,7 @@ def stats(
 
     # Overdue tasks
     today = date.today()
-    overdue = [
-        t
-        for t in tasks
-        if t.get("due")
-        and is_overdue(t["due"])
-        and t.get("status") != "done"
-        and not t.get("archived")
-    ]
+    overdue = [t for t in tasks if task_is_overdue(t) and not t.get("archived")]
     stats_data["overdue"] = len(overdue)
 
     # Tasks due this week

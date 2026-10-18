@@ -13,7 +13,7 @@
 - **Bidirectional sync** - Keep RST files and JSON storage in sync with 3-way merge
 - **Auto-archiving** - Automatically archive completed tasks (on by default). Archived tasks are removed from their RST file, preserved in JSON, and shown on a dedicated archive page; reopening restores a task to the same place in its original file.
 - **CLI tool** - Manage tasks from the command line
-- **Interactive TUI** - Optional 3-pane terminal UI (`doto tui`) with configurable task-list layout views (table / list / kanban / calendar / time, cycled with `v` / `V` and persisted as your default). The kanban board draws framed, fixed-size **square cards** (long bodies clipped with an ellipsis), marks the selected card with a highlighted **frame**, and (like the list and calendar layouts) opens a **card viewer popup** on `Enter` (full task detail with a scrollable body) from which `e` opens the edit dialog; the table layout instead reveals details in its details pane. The calendar view's `Tab` cycles through the month grid, the day's `Due` task list, and the `No due date` list so you can edit / close those tasks in place, with `A` assigning the selected day as a highlighted undated task's due date. Also: live work/focus timers, a top-right elapsed-time display (the whole day's accumulated work time with the current session in parentheses, plus the highlighted task's total), editable due dates, a repo-aware **add-task modal** (choose which repository a new task is created in), a **filter & sort pop-up** (`F`: hide completed, due today/this week, by tag or priority; sort by due/priority/tag/`next`, remembered across sessions), the **active (time-recorded) task pinned to the top** of every view, Vim and arrow-key navigation, a **two-key "stream" keymap** that groups related actions under memorable prefixes (`s` state, `t` time, `c` config, `S` stats) with a **context-sensitive hint bar** pinned to the bottom (pressing a prefix repaints the bar with that domain's sub-keys, so the scheme is self-documenting), a flat `w` to start/stop working (sets a doto in-progress and starts its focus timer in one press), and a once-per-day kickstart nudge
+- **Interactive TUI** - Optional 3-pane terminal UI (`doto tui`) with configurable task-list layout views (table / list / kanban / calendar / time, cycled with `v` / `V` and persisted as your default). The kanban board draws framed, fixed-size **square cards** (long bodies clipped with an ellipsis), marks the selected card with a highlighted **frame**, and (like the list and calendar layouts) opens a **card viewer popup** on `Enter` (full task detail with a scrollable body) from which `e` opens the edit dialog; the table layout instead reveals details in its details pane. The calendar view's `Tab` cycles through the month grid, the day's `Due` task list, and the `No due date` list so you can edit / close those tasks in place, with `A` assigning the selected day as a highlighted undated task's due date. Also: live work/focus timers, a top-right elapsed-time display (the whole day's accumulated work time with the current session in parentheses, plus the highlighted task's total), editable due dates, a repo-aware **add-task modal** (choose which repository a new task is created in), a **filter & sort pop-up** (`F`: hide completed, due today/this week, by tag or priority; sort by due/priority/tag/`next`, remembered across sessions), the **active (time-recorded) task pinned to the top** of every view, Vim and arrow-key navigation, a **two-key "stream" keymap** that groups related actions under memorable prefixes (`e` edit/delete entry or series, `s` state, `t` time, `c` config, `S` stats) with a **context-sensitive hint bar** pinned to the bottom (pressing a prefix repaints the bar with that domain's sub-keys, so the scheme is self-documenting), a flat `w` to start/stop working (sets a doto in-progress and starts its focus timer in one press), and a once-per-day kickstart nudge
 - **Theming** - Customizable HTML and LaTeX output
 - **Charts** - Task summaries with built-in SVG charts, or richer [plotly](https://plotly.com/python/) charts (pie, bar, stacked-bar, progress, burndown)
 - **Doxtr integration** - Optional integration with doxtr-pdf-theme-core: semantic-palette-derived task colors and automatic landscape rotation for wide task tables
@@ -105,6 +105,7 @@ Creates a task with structured metadata.
 | `:priority:` | enum | `medium` | `low`, `medium`, `high`, `critical` |
 | `:status:` | enum | `open` | `open`, `in-progress`, `blocked`, `done` |
 | `:due:` | date | None | Due date (`YYYY-MM-DD`), optionally with a time — see [Due dates with time](#due-dates-with-time) |
+| `:estimate:` | duration | None | Expected duration (`5m`, `4h`, `1h30m`, or bare minutes); used by [calendar-sync](#calendar-sync) to size the event |
 | `:tags:` | list | None | Comma-separated categories |
 | `:depends-on:` | list | None | Comma-separated task IDs |
 | `:raci:` | string | None | RACI roles as `role name` pairs (see [RACI Roles](#raci-roles)) |
@@ -162,6 +163,11 @@ Displays a filtered list of tasks.
 **Filter Options:** `:assignee:`, `:priority:`, `:status:`, `:tags:`, `:due-before:`, `:due-after:`, `:exclude-status:`
 
 **Display Options:** `:sort:`, `:order:`, `:limit:`, `:format:` (table/list/cards/kanban/calendar/email), `:show-archived:`, `:columns:`, `:icon-mode:` (icon/icon-text/text), `:visible-tasks:` (email view scroll cap)
+
+Selectable `:columns:` include `id`, `title`, `priority`, `status`, `assignee`,
+`due`, `tags`, `created`, `updated`, `progress`, and `estimate`. `estimate` and
+`progress` are also valid `:sort:` keys and sort numerically (shortest/lowest
+first; tasks without a value sort last).
 
 Task IDs and titles in every list format are clickable links to the task box.
 The `:icon-mode:` option overrides the global `doto_list_icon_mode` config for
@@ -326,7 +332,7 @@ doto_chart_engine = "svg"
 doto_latex_layout = "default"
 
 # xlink resolution (optional)
-# When True (default) and sphinxcontrib-xlink is installed AND listed in your
+# When True (default) and doxtr-xlink is installed AND listed in your
 # extensions, the :assignee: field's value is scanned for :xlink:`key` tokens
 # and each is resolved to the person/entity display name (and linked in
 # HTML/PDF) at render time. Only the :assignee: field resolves today (title and
@@ -358,13 +364,64 @@ list_columns = ["id", "title", "status", "priority", "assignee"]
 # Valid values
 statuses = ["open", "in-progress", "blocked", "done"]
 priorities = ["low", "medium", "high", "critical"]
+
+# TUI add-task modal: which fields the `a` modal shows (preset
+# "minimal" | "default" | "all", or an explicit ordered list of field names).
+# In an explicit list you may also include "repo" to position the repository
+# picker (e.g. tui_add_fields = ["repo", "title", "due"]); presets keep the
+# picker just under the title.
+tui_add_fields = "default"
+
+# TUI add-task modal: auto-select the newly created task after the `a` modal
+# submits. When true (the default) the freshly added task becomes the
+# highlighted row in whichever view is showing and is scrolled into view; set
+# to false to keep the previous selection after adding a task.
+tui_auto_select_new_task = true
+
+# Recent-done filter (TUI filter/sort pop-up, `F`): the default window, in
+# days, used to hide `done` tasks whose completion is older than N days (so the
+# list stays focused on recent work). On by default; toggle it or change N in
+# the pop-up and your choice is remembered across launches. Tasks completed
+# before doto recorded completion timestamps are always shown. Default: 10.
+tui_recent_done_days = 10
+
+# Keep your work clock (working hours) OUT of a shared checkout. The global
+# state file (work clock, active session, favorites, repo registry) is written
+# to this private path instead of the shared .doto/config.json. Supports ~ and
+# $VAR / ${VAR}; a relative path is anchored to the project base (the Sphinx
+# source dir, which may be a `docs/` subdirectory -- not necessarily the repo root).
+state_file = "~/private/doto-state.json"
+
+# Per-field defaults prefilled in the TUI add-task modal. `due` accepts
+# relative exprs ("tomorrow", "+7d", "friday"); `repo` matches a repo by name.
+[doto.tui_add_defaults]
+assignee = "alice"
+due = "tomorrow"
 ```
+
+The `state_file` setting also accepts a dedicated table form, and can be set
+via the environment:
+
+```toml
+[state]
+file = "~/private/doto-state.json"
+```
+
+> **Why this exists.** In a repo shared with your team, the global state file
+> holds your **work clock** (clock-in/clock-out hours). If that file lives in
+> (or is committed under) the shared tree, teammates can see your working
+> hours. Pointing `state_file` at a personal location keeps your hours
+> private. Resolution precedence is `$DOTO_CONFIG` → `state_file` /
+> `DOTO_STATE_FILE` → portable `.doto/config.json` (found by walking up) →
+> `~/.config/doto/config.json`. When `state_file` is unset, behaviour is
+> unchanged.
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `DOTO_JSON_FILE` | Path to tasks.json |
+| `DOTO_STATE_FILE` | Path to the private global-state file (work clock, active session, favorites, repo registry); overrides `state_file` |
 | `DOTO_DEFAULT_PRIORITY` | Default priority for new tasks |
 | `DOTO_DEFAULT_STATUS` | Default status for new tasks |
 | `DOTO_USER` | Current user for RACI auto-defaults |
@@ -428,7 +485,7 @@ doto update AUTH-001 --raci "consulted carol, informed dave"
 
 **TUI:**
 
-The edit screen (press `e` on a task) shows four input fields — Responsible,
+The edit screen (press `e e` on a task) shows four input fields — Responsible,
 Accountable, Consulted, Informed — each accepting comma-separated names with
 auto-complete from known assignees.
 
@@ -462,7 +519,7 @@ People names used in RACI roles are automatically persisted as known assignees
 
 ## Resolving xlinks
 
-If [`sphinxcontrib-xlink`](https://pypi.org/project/sphinxcontrib-xlink/) is
+If [`doxtr-xlink`](https://pypi.org/project/doxtr-xlink/) is
 installed and listed in your `extensions`, doto resolves `:xlink:`key`` tokens
 in the task `:assignee:` field to the referenced entity's display name at render
 time, linking it in HTML and PDF output. Only the `:assignee:` field resolves
@@ -486,7 +543,7 @@ raw `:xlink:` token, so bidirectional sync stays byte-stable.
 This is opt-outable and degrades gracefully:
 
 - Set `doto_resolve_xlinks = False` to always render the raw `:xlink:` token.
-- When `sphinxcontrib-xlink` is not installed (or not in `extensions`), doto
+- When `doxtr-xlink` is not installed (or not in `extensions`), doto
   renders the raw token unchanged — no crash, no warning spam.
 
 Custom HTML templates for a single task (`doto.html`) and the cards list view
@@ -536,6 +593,8 @@ doto update web-app#14 --status in-progress
 
 # Update a task
 doto update TASK-001 --status in-progress
+doto update TASK-001 --estimate 1h30m             # set a time estimate
+doto update TASK-001 --clear-estimate             # remove the estimate
 
 # Bulk update tasks with filters
 doto update --filter-status open --priority high --all
@@ -663,6 +722,32 @@ doto add "Monthly report {date}" --repeat "every month on last friday" --until +
 doto add "Quarterly review" --repeat "every 3 months on first monday" --until +2y
 ```
 
+**Start time, duration, and a custom start date.** A pattern may carry a
+start time (`at HH:MM`) and a per-occurrence duration (`for <duration>`), and
+`--from` / `-F` sets the series start date (instead of today):
+
+```bash
+# A 2-hour sync every other Monday at 16:00, starting 2026-11-01
+doto add "Important Sync Meeting" \
+    --repeat "every 2 weeks on monday at 16:00 for 2h" \
+    --from 2026-11-01 \
+    -u 2027-10-10
+
+# Daily standup at 09:00 (no duration), starting next monday
+doto add "Standup" --repeat "every day at 09:00" --from next-monday --until +1m
+```
+
+- `at <time>` accepts `16:00`, `16h`, or `16:00:31`; each generated task's
+  `due` becomes a time-bearing `YYYY-MM-DDTHH:MM` so the calendar-sync and
+  due-with-time features pick it up.
+- `for <duration>` accepts `2h`, `90m`, `1h30m`, or a bare integer number of
+  minutes (e.g. `90`); it sets each task's `estimate` (in whole minutes).
+- `--from` accepts the same forms as any date (`2026-11-01`, `+1m`, `monday`,
+  `next-monday`, ...). Without `--from` the series still starts today, and a
+  pattern without `at` / `for` behaves exactly as before.
+- `--from` and `--until` both require `--repeat`; `--until` must be after the
+  resolved start date.
+
 **Supported recurrence patterns:**
 
 | Pattern | Example |
@@ -672,6 +757,9 @@ doto add "Quarterly review" --repeat "every 3 months on first monday" --until +2
 | Monthly (day) | `every month on 15`, `every 2 months on 1` |
 | Monthly (weekday) | `every month on first monday`, `every month on last friday` |
 | Quarterly | `every 3 months on first monday` |
+| With time | `every monday at 16:00` (adds a clock time to each `due`) |
+| With duration | `every monday for 2h` (sets each task's `estimate`) |
+| Time + duration | `every 2 weeks on monday at 16:00 for 2h` |
 
 **Title templating:** Use `{date}` in the title to include the occurrence date (e.g., "Weekly review {date}" → "Weekly review Aug 7").
 
@@ -693,12 +781,36 @@ doto series complete SER-001 --before 2025-08-15
 # Extend a series with a new end date
 doto series extend SER-001 +3m
 
+# Update a series from a chosen occurrence forward (FORWARD-ONLY):
+# re-stamp time/duration/title onto occurrences on or after the --from anchor.
+# --from takes a task id (its due date is the anchor) OR a date.
+doto series update SER-001 --from DOTO-002 --at 16:00 --for 2h
+doto series update SER-001 --from 2026-08-15 --repeat "every 2 weeks on monday"
+doto series update SER-001 --from DOTO-002 --title "Weekly sync {date}"
+
+# Clear the per-occurrence start time / duration going forward:
+doto series update SER-001 --from DOTO-002 --no-time --no-duration
+
+# Update only the stored pattern/title (re-stamp no tasks):
+doto series update SER-001 --metadata-only --at 09:00
+
+# Preview without writing:
+doto series update SER-001 --from DOTO-002 --for 90m --dry-run
+
 # Delete a series and all its tasks
 doto series delete SER-001
 
 # Delete series but keep the tasks
 doto series delete SER-001 --keep-tasks
 ```
+
+**`doto series update` is FORWARD-ONLY.** The `--from` anchor (a task id or a
+date) marks where the change begins: only occurrences whose due date is on or
+after the anchor are re-stamped, and done/archived occurrences are skipped.
+Occurrences *before* the anchor are never modified (even if in the past).
+Changing the calendar *shape* (`--repeat`) only re-stamps time/duration/title
+onto the **existing** forward dates — it does not move or add dates; use
+`doto series extend` to add dates.
 
 When viewing a task that's part of a series, the series info is displayed:
 
@@ -876,11 +988,13 @@ Layout:
 
 - **Left pane** - the repository tree (from the cached registry), favorites,
   and a Global/Local scope indicator.
-- **Middle pane** - the task list. Each row shows a running indicator
+- **Upper-right pane** - the task list. Each row shows a running indicator
   (`▶` for an open worklog), a done checkbox (`[ ]` / `[✓]`), and
   priority/status/tag badges (reusing the CLI's priority and status colors).
-- **Right pane** - the selected task's details and an itemized session log
-  (each `start → stop` interval with its duration, plus a live open row).
+- **Lower-right pane** - the selected task's details and an itemized session
+  log (each `start → stop` interval with its duration, plus a live open row),
+  stacked **below** the task list. Resize this split with `c d` (Config →
+  Detail size); see the "Task-list layout views" section below.
 - **Top-right elapsed display** - a right-aligned line showing the whole
   day's accumulated **work time** (summed across all of today's work-clock
   intervals) with the **current work session** - the time of the work-clock
@@ -898,10 +1012,19 @@ TUI never diverges from `doto add`, `doto done`, `doto start`, `doto stop`,
 
 Vim-style keybindings (with arrow-key equivalents). The TUI uses a **two-key
 "stream" keymap**: related actions are grouped under memorable domain prefixes
-(`s` state, `t` time, `c` config, `S` stats). Pressing a prefix repaints the
-bottom **hint bar** with that domain's sub-keys (newsboat-style `key:Label`
+(`e` edit, `s` state, `t` time, `c` config, `S` stats, `C` calendar sync). Pressing a
+prefix repaints the bottom **hint bar** with that domain's sub-keys (newsboat-style `key:Label`
 strip), so the scheme is self-documenting; `Esc` cancels a pending prefix and
 `<prefix> ?` opens that domain's help.
+
+> **Behavior change:** `e` is now a **prefix** (the Edit domain), not a flat
+> edit key. Press `e e` to edit the selected entry. Within the Edit domain,
+> **lowercase** second keys act on the single entry (`e e` edit, `e d` delete)
+> and **uppercase** second keys act on the whole series (`e E` edit series,
+> `e D` delete series). The series keys `e E` / `e D` — and the series-
+> navigation keys `e n` / `e p` — appear **only when the
+> selected task is part of a series**; for a standalone task the Edit domain
+> shows just `e e` and `e d`.
 
 Flat (single-press) keys:
 
@@ -911,10 +1034,11 @@ Flat (single-press) keys:
 | `Shift+↑` / `Shift+↓` | **Jump to the top / bottom** of the current list. Table / list: first / last row. **Kanban:** the first / last card of the **current swim lane** (the move stays inside the focused status column — it moves the *selection cursor*, not the card, so switching lanes with `h` / `l` and jumping again lands on the first / last card of the now-current lane). **Calendar:** the active region's first / last entry (the first / last day of the visible month in the grid region, or the first / last task in the focused `Due` / `No due date` list). **Time:** the first / last day. A no-op on an empty list / lane |
 | `Tab` | Cycle focus across the panes. Table layout: repo tree → task list → details. **Calendar:** cycle the view's regions and the details pane — month grid → `Due` task list → `No due date` task list → details → grid (so you can step from a selected day into its due / undated tasks). **Kanban:** move the selected card one swim lane **forward** (to the next status column — a status change), a no-op in the last column or into `(other)` |
 | `Shift+Tab` | Cycle focus across the panes in **reverse** (the exact mirror of `Tab`). Table: repo tree → details → task list. Calendar: the region/details cycle walked in reverse. **Kanban:** move the selected card one swim lane **back** (to the previous status column), a no-op from the first column |
-| `Space` | Select / deselect the current task (multi-select) |
-| `e` | Edit the selected task (modal over the single-task update logic) |
-| `a` | Add a task (modal over the existing add logic). The modal prompts for the title **and** which repository to create the task in (a type-to-filter selector defaulting to the current repo; omitted when only the current repo is available). When a task is added into another repository, its id prefix and sequencing come from that repository's own `.doto.toml`, not the directory doto was launched in |
+| `Space` | **Expand / collapse** the current row's sub-tasks when it is a parent (a ▾/▶ triangle like the repo tree); on a leaf row, **select / deselect** the task (multi-select) |
+| `e` | **Edit domain prefix** (was a flat edit key — now press `e e` to edit). `e` arms the two-key **Edit** stream (see the stream table below): `e e` edits the selected entry, `e d` deletes it, and — only when the selected task is part of a series — `e E` edits the whole series from the selected occurrence forward and `e D` deletes the series |
+| `a` | Add a task (modal over the existing add logic). The modal is **field-configurable** via `tui_add_fields` / `tui_add_defaults` (default = title + repo): choose a preset (`minimal` / `default` / `all`) or an explicit ordered field list. In an explicit list `repo` is an allowed orderable entry that positions the repository picker (e.g. `["repo", "title", "due"]`); in the presets the picker stays just under the title. Prefill fields (e.g. `due = "tomorrow"`, `repo` matched by name). It prompts for the configured fields **and** which repository to create the task in (a type-to-filter selector defaulting to the current repo; omitted when only the current repo is available). When a task is added into another repository, its id prefix and sequencing come from that repository's own `.doto.toml`, not the directory doto was launched in. After the task is created the list refreshes and, unless `tui_auto_select_new_task = false`, the new task is auto-selected (highlighted and scrolled into view) in whichever layout is active |
 | `A` | **Calendar:** assign the selected calendar day as the highlighted `No due date` task's due date (routed through the single-task update logic). A no-op when no undated task is highlighted; a no-op in other layouts |
+| `r` | **Add a recurring series** (modal over the same reusable series-build logic as `doto add --repeat`, so the TUI never diverges from the CLI). The dialog collects a title (supports `{date}`), a recurrence **pattern** (e.g. `every 2 weeks on monday`), an optional **start time** (`at`, e.g. `16:00`) and **duration** (`for`, e.g. `2h`), an optional **from** date (defaults to today), a required **until** date, and - when more than one repo is available - the target repository (defaulting to the current repo). Inputs are validated with the exact CLI parsers, so a bad pattern / time / duration / date keeps the dialog open with the error(s) shown. On submit the generated tasks get the time-bearing `due` and the `estimate` from the pattern, identical to the CLI |
 | `w` | **Start / stop working** on the selected task(s): sets the doto **in-progress** and starts its focus timer in one press (a second press stops the timer and leaves the status unchanged). If the configured `statuses` have no `in-progress`, it gracefully degrades to timer-only. Honors the multi-selection |
 | `d` | Mark the selected task(s) done (flat alias of `s d`) |
 | `D` | Cycle the status of the selected task(s) (flat alias of `s n`) |
@@ -923,7 +1047,7 @@ Flat (single-press) keys:
 | `Enter` | **List / kanban / calendar:** open the card viewer popup (full task detail with a scrollable body; `Enter`/`Esc` close it, `e` opens the edit dialog). In the calendar's `Due` / `No due date` regions this is the highlighted task. **Table:** reveal the selected task's details (focus the details pane) |
 | `h` / `l` (or `←` / `→`) | Kanban: **navigate the selection** to the previous / next swim lane (select a card in another status column, without changing any task). Calendar: select the previous / next day. Harmless no-op in the table / list layouts |
 | `/` | Filter / search tasks (title, id, or tag) |
-| `F` | Open the **filter & sort pop-up** (Feature below): hide completed tasks, show only tasks due today / due this week, filter by a chosen tag or priority, filter by one or more **repositories**, and sort by due date / priority / tag / `next` (the recommended-next ordering) ascending or descending. The last choice is **remembered** across sessions |
+| `F` | Open the **filter & sort pop-up** (Feature below): hide completed tasks, hide `done` tasks completed more than N days ago (default 10), show only tasks due today / due this week, filter by a chosen tag or priority, filter by one or more **repositories**, and sort by due date / priority / tag / `next` (the recommended-next ordering) ascending or descending. The last choice is **remembered** across sessions |
 | `R` | Rescan repositories |
 | `g` | Toggle Global / Local scope (the TUI **defaults to Global**) |
 | `?` | Open the top-level keybinding help (lists the flat keys and the stream domains) |
@@ -933,6 +1057,14 @@ Stream (two-key) keys — press the prefix, then a sub-key:
 
 | Stream | Action |
 |--------|--------|
+| `e e` | **Edit:** edit the selected entry (modal over the single-task update logic). `e` is now a prefix — a bare `e` no longer edits; press `e e` |
+| `e d` | **Edit:** delete the selected entry (lowercase = single entry). Opens a yes/no confirm dialog; on confirm the task is deleted and, when it belonged to a series, pruned from that series' occurrence list |
+| `e E` | **Edit:** edit the selected occurrence's **whole series from here forward** (uppercase = whole series). Shown **only when the selected task is part of a series**. The forward-only anchor is the selected occurrence's date: occurrences on / after it are re-stamped (time / duration / title), earlier ones are left unchanged. Routed through the same reusable `update_series` as `doto series update` |
+| `e D` | **Edit:** delete the selected occurrence's **whole series** (uppercase = whole series). Shown **only when the selected task is part of a series**. Opens a confirm dialog offering **Delete series + tasks** / **Keep tasks, remove series** / **Cancel** (parity with `doto series delete` / `--keep-tasks`) |
+| `e n` | **Edit:** jump to the **next** occurrence of the series (by due date). Shown **only when the selected task is part of a series**; clamps at the last occurrence (no wrap) |
+| `e p` | **Edit:** jump to the **previous** occurrence of the series (by due date). Shown **only when the selected task is part of a series**; clamps at the first occurrence (no wrap) |
+| `e P` | **Edit:** set parent — attach the selected entry (or the whole multi-selection) to a parent task picked from a pop-up. Always available (not series-only); the picker remembers the last chosen parent for quick repeat assignments. Rejects self/cycle parents and cross-repo parents (skipped with a notice) |
+| `e ?` | **Edit:** open the edit-domain help |
 | `s o` / `s i` / `s b` / `s d` | **State:** set the selected task(s) to open / in-progress / blocked / done. The sub-keys are **generated from the configured `statuses`** (first letter, lowercased); on a first-letter **collision** the later status takes its first unused letter from its own name (shown in the hint bar / help so the remap is never hidden) |
 | `s n` / `s p` | **State:** cycle to the next / previous status (wraps) |
 | `s ?` | **State:** open the state-domain help |
@@ -942,10 +1074,18 @@ Stream (two-key) keys — press the prefix, then a sub-key:
 | `t e` | **Time:** edit the **highlighted doto's recorded sessions** (add / edit / delete its focus-session intervals, persisted to that doto's owning repo store). A no-op in the `time` layout |
 | `t ?` | **Time:** open the time-domain help |
 | `c b` | **Config:** configure breaks + the work week (auto-deducted hours) |
+| `c d` | **Config:** set the table-layout detail-pane size (how much of the height the detail pane takes, an `n/d` ratio of the total; applied live and persisted) |
 | `c ?` | **Config:** open the config-domain help |
 | `S w` | **Stats:** open the work-statistics pop-up (per-period net/gross/break numbers + text bar charts; `d`/`w`/`m`/`y`, `g`, `←`/`→`). Available from any layout; anchors on the time view's selected day when the time layout is active, otherwise on today |
 | `S t` | **Stats:** open the per-doto time-reporting pop-up (worked time per doto / per repo as text bar charts; `d`/`w`/`m`/`y`, `g`, `←`/`→`). Available from any layout; anchors on the time view's selected day when the time layout is active, otherwise on today |
 | `S ?` | **Stats:** open the stats-domain help |
+| `C s` | **Calendar Sync:** sync **every displayed repository that has calendar sync enabled** (in Local scope: the current repo; in Global scope: all shown repos, narrowed by the active repo filter), each with its own `direction` / `conflict_policy` / calendar. Then refresh the task list. Mirrors `doto calsync sync` per repo. Runs in a background thread worker so the UI never freezes |
+| `C p` | **Calendar Sync:** one-way **push** (doto → calendar). Mirrors `doto calsync push` |
+| `C l` | **Calendar Sync:** one-way **pull** (calendar → doto), then refresh the view so imported/updated tasks appear. Mirrors `doto calsync pull` |
+| `C t` | **Calendar Sync:** show the current config + a dry-run **plan** (create / update / delete / unchanged counts). Computed from the local store (no network), so it runs inline. Mirrors `doto calsync status` |
+| `C i` | **Calendar Sync:** run the provider's interactive **login** (OAuth browser flow; CalDAV/Apple just verify the username/password). Mirrors `doto calsync login` |
+| `C o` | **Calendar Sync:** clear the cached provider **token** (logout). Mirrors `doto calsync logout` |
+| `C ?` | **Calendar Sync:** open the calendar-sync domain help |
 
 The context-sensitive **hint bar** at the very bottom advertises the stream
 prefixes plus a curated subset of flat keys when idle, and the pending
@@ -962,12 +1102,21 @@ the cursor to the first / last entry of the current list — in the kanban
 layout this is the first / last card of the **current** lane, so it respects
 whichever swim lane you have selected.
 
+`Space` is split by the shape of the current row, mirroring how tree UIs
+(including the repo explorer) treat it. On a **parent row** (one with
+sub-tasks, marked by a ▾ expanded / ▶ collapsed triangle) `Space` toggles
+whether that row's sub-tasks are shown; sub-tasks nest under their parent as a
+fully recursive, indented tree (Parent → Child → Child-of-Child → … to any
+depth), built from each task's `parent` link. On a **leaf row** (no sub-tasks)
 `Space` toggles whether the current task is part of a multi-selection
-(selected rows are marked in the task list). When one or more tasks are
-selected, `d` and `D` act on **all** selected tasks (completing or cycling
-each), then clear the selection; when nothing is selected they act on the
-single task under the cursor. `D` advances a task to the next status in the
-configured cycle (`statuses`, defaulting to `open → in-progress →
+(selected rows are marked in the task list). Parents start **expanded** so
+new sub-tasks are visible by default, and the expand/collapse state is kept
+for the current session (the tree nests in the **table** and **list** layouts;
+the kanban and calendar layouts stay bucketed/graphical). When one or more
+tasks are selected, `d` and `D` act on **all** selected tasks (completing or
+cycling each), then clear the selection; when nothing is selected they act on
+the single task under the cursor. `D` advances a task to the next status in
+the configured cycle (`statuses`, defaulting to `open → in-progress →
 blocked → done`), wrapping around at the end.
 
 ##### Task-list layout views (`v` / `V`)
@@ -979,7 +1128,18 @@ chosen layout is **persisted** to `~/.config/doto/config.json` (`tui_layout`),
 so it becomes your default on the next launch. Older config files that predate
 this field fall back to the default table view (backward compatible).
 
-- **`table`** (default) - the 3-pane table described above.
+- **`table`** (default) - the 3-pane table described above: the repo tree on
+  the left, and the task list stacked **above** the task-details pane on the
+  right. Resize that vertical split with `c d` (Config → Detail size): type an
+  `n/d` fraction for how much of the total height the **detail** pane takes
+  (`3/4` the default gives the detail pane 3/4 and the list 1/4, `1/2` an even
+  split, `1/4` a tall list with a glance of detail). The numerator must be a
+  positive integer smaller than the denominator; any malformed, equal, or
+  out-of-range value falls back to `3/4`. The chosen ratio is applied
+  immediately and **persisted** to `~/.config/doto/config.json`
+  (`tui_detail_ratio`), so it is restored on the next launch; older config
+  files that predate this field fall back to the `3/4` default (backward
+  compatible).
 - **`list`** - a single compact column, one task per line. The highlighted
   row's details appear in the shared details pane as you move with `j` / `k`
   (or `↓` / `↑`); pressing `Enter` activates the highlighted row to reveal
@@ -1187,13 +1347,27 @@ fields (they appear only in this viewer, never in the CLI card):
 The
 `list` and `kanban` views scroll so the highlighted row stays visible as the
 cursor moves (the `calendar` grid stays pinned, as noted above). Scrolling is
-**smart**: the view only starts scrolling once the
+**smart**: during continuous `j` / `k` navigation the view only starts
+scrolling once the
 cursor comes within a small margin of the top or bottom of the visible frame,
 and then jumps a block of rows in the direction you are moving rather than
 creeping one line at a time. Both the margin (default `2` rows) and the jump
 (default `5` tasks) are overridable class attributes on the shared
 `AltLayoutView` - `SCROLL_MARGIN` and `SCROLL_JUMP` - so a child theme can tune
 the feel by subclassing a view (or the base) and setting them.
+
+After a **discontinuous** selection change the view instead *repositions* so
+the whole selected task is always brought back on screen, with no direction
+guess: switching swim lanes (`h` / `l`), selecting a task by id, or cycling
+the layout (`v` / `V`) all guarantee the selected doto is visible. For example,
+switching from the bottom of a long `open` lane to a one-card `in-progress`
+lane scrolls the viewport back up so the single card is in view. This
+reposition is the overridable `ensure_cursor_visible` seam on `AltLayoutView`;
+the `calendar` overrides it to keep its month grid pinned to the top (cycling
+into the calendar layout keeps the grid header on screen, and a calendar day
+move reaches its scroll through the subsequent rebuild rather than this seam),
+so a child theme can retune the discontinuous-jump behavior alongside
+`SCROLL_MARGIN` / `SCROLL_JUMP`.
 
 Each view is its own overridable widget class with pure `format_*`
 classmethods, sharing an `AltLayoutView` base (the alt-view contract the app
@@ -1219,7 +1393,11 @@ where it builds its rows, so a child theme can override it.
 Press `F` to open a modal pop-up that configures how the task list is filtered
 and sorted:
 
-- **Filters:** hide completed (`done`) tasks, show only tasks due **today**,
+- **Filters:** hide completed (`done`) tasks, hide stale `done` tasks - those
+  completed more than N days ago (the **recent done** filter, **on by
+  default** with N from the `tui_recent_done_days` config key, default 10;
+  undated / legacy `done` tasks that carry no completion timestamp are always
+  shown) - show only tasks due **today**,
   show only tasks due **this week** (today through the coming Sunday), show
   only tasks carrying a chosen **tag** (from the known tags), show only
   tasks with a chosen **priority**, and show only tasks from one or more
@@ -1250,7 +1428,8 @@ task to the top**. Each step is a separate overridable call.
 
 The last filter **and** sort state is **remembered** across sessions: it is
 persisted to `~/.config/doto/config.json` (the `tui_hide_completed`,
-`tui_due_filter`, `tui_tag_filter`, `tui_priority_filter`, `tui_sort_key`,
+`tui_recent_done_enabled`, `tui_recent_done_days`, `tui_due_filter`,
+`tui_tag_filter`, `tui_priority_filter`, `tui_sort_key`,
 `tui_sort_order`, and `tui_repo_filter` fields) and restored on the next
 launch. Older config files that predate these fields fall back to no filter
 and no sort (backward compatible). The pop-up is its own overridable screen
@@ -1330,6 +1509,14 @@ speed up editing:
   date. An invalid date is reported inline and keeps the dialog open rather
   than writing a corrupt value to the store. The edit persists through the
   same code path as `doto update`, preserving RST↔JSON sync.
+- **Editable estimate** - the dialog includes an Estimate field (below Due)
+  that accepts the same compact duration syntax (`5m`, `90m`, `4h`, `1h30m`,
+  or a bare number of minutes) as `doto update --estimate`, parsed with the
+  very same `parse_duration` helper so the CLI and TUI never diverge. The
+  field is pre-populated from the stored estimate rendered back to compact
+  form (`90` shows as `1h30m`). Leaving it empty clears the estimate. An
+  invalid value is reported inline and keeps the dialog open rather than
+  writing a corrupt value to the store.
 - **Bash-style kill / yank** - every text field in the dialog (Title,
   Assignee, Tags, and the Body) shares a single kill ring. `Ctrl-K` deletes
   from the cursor to the end of the line and captures the removed text;
@@ -1470,9 +1657,10 @@ Supported providers:
 | Apple iCloud | `apple` | CalDAV with an **app-specific password** |
 | Generic CalDAV (Fastmail, Nextcloud, …) | `caldav` | CalDAV basic auth (username + password) |
 
-> **Direction:** only **push** (doto → calendar) is implemented today. The
-> engine is written to be direction-aware so two-way sync can be added later;
-> setting `direction = "two-way"` is rejected with a clear error for now.
+> **Direction:** doto supports both **push** (doto → calendar) and
+> **two-way** (calendar ↔ doto). Set `direction = "push"` (the default) for
+> one-way push, or `direction = "two-way"` to also pull calendar events into
+> doto. See [Two-way sync](#two-way-sync-calendar--doto) below.
 
 ### How tasks become calendar entries
 
@@ -1480,13 +1668,25 @@ Each task with a `:due:` is projected to one calendar item. doto owns only the
 items it creates (they carry a stable `doto-<id>@doxtr-doto` UID), so it never
 touches events you or other tools created.
 
+> **Google note — automatic recovery from a reserved identifier.** Google
+> Calendar keeps an event's UID reserved even after the event is deleted (it
+> lingers as a hidden *cancelled* tombstone). If a task id is reused after its
+> event was deleted, a fresh push would otherwise fail with a `409 "identifier
+> already exists"`. doto self-heals this transparently — it resurrects/overwrites
+> the existing item (via Google's `events.import`, falling back to an update)
+> instead of failing the sync, so the task simply re-adopts its calendar item.
+> This is specific to Google; the other providers are unaffected.
+
 - **`event_mode = "event"` (default)** — the task becomes a **VEVENT** visible
   in the calendar grid:
-  - A due **with a time** (`:due: 2026-08-15 09:00`) → a timed event of
-    `event_duration_minutes` (default 30).
+  - A due **with a time** (`:due: 2026-08-15 09:00`) → a timed event sized by
+    the task's `:estimate:` when set (e.g. `:estimate: 4h` → a 4-hour block),
+    otherwise `event_duration_minutes` (default 30).
   - A **date-only** due (`:due: 2026-08-15`) → an **all-day** event by default
-    (`all_day_for_dateless = true`), or a timed event starting at
-    `workday_start` when `all_day_for_dateless = false`.
+    (`all_day_for_dateless = true`; an all-day event has no duration, so
+    `:estimate:` is ignored here), or a timed event starting at
+    `workday_start` when `all_day_for_dateless = false` (also sized by
+    `:estimate:` when set, otherwise `event_duration_minutes`).
 - **`event_mode = "todo"`** — the task becomes a **VTODO** (a to-do item with a
   due date) instead of a visible timed event.
 
@@ -1520,7 +1720,8 @@ enabled = true
 provider = "google"          # google | microsoft | apple | caldav
 calendar = "primary"          # calendar id (Google/MS) or name/URL (CalDAV); blank = default
 event_mode = "event"          # event (VEVENT) | todo (VTODO)
-direction = "push"            # only push is implemented today
+direction = "push"            # push (doto -> calendar) | two-way (calendar <-> doto)
+conflict_policy = "local-wins"  # local-wins (default) | merge (git-style 3-way, two-way only)
 
 # Event projection (event_mode = "event")
 event_duration_minutes = 30
@@ -1550,7 +1751,8 @@ The `password` field supports `$VAR` / `${VAR}` environment-variable references
 | `doto calsync login` | Run the provider's OAuth2 browser flow (Google/Microsoft). For CalDAV/Apple it just verifies the username/password. |
 | `doto calsync logout` | Clear the cached OAuth token for the provider. |
 | `doto calsync push` | Push tasks to the calendar. `--dry-run`/`-n` previews without changing anything; `--exclude-done` keeps completed tasks off the calendar (and removes previously-synced ones). |
-| `doto calsync sync` | Alias for `push` (push-first). |
+| `doto calsync pull` | Import/reconcile calendar events into doto (calendar → doto). `--dry-run`/`-n` previews. New user-created events become tasks; a remote event you delete archives its task. |
+| `doto calsync sync` | Push-only by default; runs a full **two-way** sync (pull then push) when `direction = "two-way"`. `--dry-run` previews both directions. |
 
 A typical first run:
 
@@ -1567,6 +1769,73 @@ Sync is **incremental and idempotent**: doto records what it pushed (remote id,
 ETag, and a content hash) in `.doto/calsync.json`, keyed by `provider::calendar`.
 A second `push` with no task changes does nothing; changing a task updates its
 item; archiving a task, removing its due date, or deleting it removes the item.
+
+### Two-way sync (calendar → doto)
+
+With `direction = "two-way"`, `doto calsync sync` runs a **pull** pass
+(calendar → doto) and then the usual **push** pass (doto → calendar). You can
+also run the inbound pass on its own with `doto calsync pull`.
+
+What pull does:
+
+- **New user-created events** (events you or another tool created directly in
+  the calendar — i.e. *not* carrying a `doto-<id>@doxtr-doto` UID) are
+  **imported** as new doto tasks: the event summary becomes the task title,
+  its description becomes the task body (doto's own `[doto:…]` back-reference
+  marker, if present, is stripped — including when a provider stores the
+  description as HTML and separates or glues the marker with `<br>` tags, as
+  the Google web UI does), and its start/date becomes the task `:due:`
+  (date-only for all-day events, otherwise keeping the time). For a **timed**
+  event, its duration (end − start) becomes the task `:estimate:` when it
+  differs from the calendar's default `event_duration_minutes`, so a slot you
+  sized on the calendar (e.g. 10:45–11:30 → `45m`) sets the task's expected
+  duration. The task is created with status `open`.
+- **doto-owned events** (ones push created) are left alone by pull — they
+  round-trip through push.
+- **Changed** imported events update the corresponding task's title, body, and
+  due on the next pull.
+- **Deleted** events: if an event doto previously imported is gone from the
+  calendar, doto treats it as a user deletion and **archives** the
+  corresponding task (a soft delete — the task is never hard-deleted, so it is
+  recoverable).
+
+Imported remote items are tracked in `.doto/calsync.json` by their calendar
+UID, so pull is **idempotent**: re-running with no remote changes does nothing.
+
+**Ordering.** Pull runs **before** push so that freshly imported events exist
+as tasks before push plans its work (otherwise push could mistake a brand-new
+import for a task that was deleted locally).
+
+**Conflict policy.** When both a task *and* its doto-owned calendar event
+changed since the last sync, how the two edits are reconciled is controlled by
+`conflict_policy` in the `[calendar]` table (only consulted for `direction =
+"two-way"`):
+
+- **`conflict_policy = "local-wins"` (default).** doto is the system of record
+  for the items it owns: the remote edit is discarded and push overwrites the
+  calendar item with the local state, so local work is never lost. A
+  remote-only edit of a doto event (the local task unchanged) is likewise
+  discarded on the next push. Conflicts are reported so you can reconcile a
+  discarded remote edit by hand.
+- **`conflict_policy = "merge"`.** doto performs a **git-style three-way merge**
+  of the two edits against the last-synced state:
+  - A field changed on only one side takes that side (so a note you type into
+    the calendar app flows back into the task body, a local edit still reaches
+    the calendar, and resizing the event's end time updates the task
+    `:estimate:`).
+  - The multi-line **body** is merged **line by line**, so non-overlapping edits
+    on both sides are combined.
+  - A region that genuinely diverged on both sides is written with git-style
+    `<<<<<<<` / `=======` / `>>>>>>>` conflict markers for you to resolve (the
+    scalar `title` / `due` / `estimate` keep the local value and are flagged).
+    The merged result is written locally **and re-pushed**, so both sides
+    converge.
+  - Merged tasks (and any that need manual conflict resolution) are listed in
+    the sync output.
+
+  The three-way merge needs the last-synced values as a common ancestor; those
+  are recorded on every push, so merging is fully accurate from the first sync
+  after a task has been pushed once.
 
 ### Per-provider setup
 

@@ -14,6 +14,7 @@ same tasks to multiple calendars without collisions. Writes are atomic
 
 from __future__ import annotations
 
+import builtins
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,23 @@ class RemoteRef:
         href: CalDAV resource URL (empty for API-based providers).
         content_hash: Hash of the projected event last successfully pushed.
         remote_id: Provider-native id (Google/MS event id); empty for CalDAV.
+        inbound_hash: Inbound-equivalent hash of the pushed item, i.e. the
+            :func:`~doxtr_doto.calsync.ical.remote_content_hash` of a
+            ``RemoteEvent`` built from the event doto last pushed. Stored as the
+            baseline the two-way conflict detector compares a live remote hash
+            against, so an untouched remote compares *equal* (no spurious
+            conflict). Defaults to the empty string; state files written before
+            two-way conflict detection load it as empty (backward compatible).
+        base_title: Last-synced ``title`` value -- the common-ancestor baseline
+            for the three-way **merge** conflict policy. Empty on state written
+            before merge support (the merge then falls back to a two-way
+            reconcile with no ancestor, which still never loses text).
+        base_body: Last-synced ``body`` value (merge ancestor for the
+            line-level body merge).
+        base_due: Last-synced ``due`` value as an ISO string (merge ancestor).
+        base_estimate: Last-synced ``estimate`` value as a compact duration
+            string (merge ancestor for the scalar estimate merge). Empty when
+            the task had no estimate (so the event used the default duration).
         updated: ISO timestamp of the last successful push.
     """
 
@@ -41,6 +59,11 @@ class RemoteRef:
     href: str = ""
     content_hash: str = ""
     remote_id: str = ""
+    inbound_hash: str = ""
+    base_title: str = ""
+    base_body: str = ""
+    base_due: str = ""
+    base_estimate: str = ""
     updated: str = ""
 
     def to_dict(self) -> dict[str, str]:
@@ -50,6 +73,11 @@ class RemoteRef:
             "href": self.href,
             "content_hash": self.content_hash,
             "remote_id": self.remote_id,
+            "inbound_hash": self.inbound_hash,
+            "base_title": self.base_title,
+            "base_body": self.base_body,
+            "base_due": self.base_due,
+            "base_estimate": self.base_estimate,
             "updated": self.updated,
         }
 
@@ -61,6 +89,57 @@ class RemoteRef:
             href=str(data.get("href", "")),
             content_hash=str(data.get("content_hash", "")),
             remote_id=str(data.get("remote_id", "")),
+            inbound_hash=str(data.get("inbound_hash", "")),
+            base_title=str(data.get("base_title", "")),
+            base_body=str(data.get("base_body", "")),
+            base_due=str(data.get("base_due", "")),
+            base_estimate=str(data.get("base_estimate", "")),
+            updated=str(data.get("updated", "")),
+        )
+
+
+@dataclass
+class ImportedRef:
+    """What doto knows about a remote item it imported into the task store.
+
+    This is the inbound (pull) counterpart to :class:`RemoteRef`: it records
+    that a *user-created* remote event (not a doto-owned one) was turned into a
+    local task, so a subsequent pull recognizes it instead of re-importing it,
+    and a now-missing remote item can be reconciled against its local task.
+
+    Keyed in state by the remote item's iCalUID.
+
+    Attributes:
+        task_id: The local doto task id created for this remote item.
+        content_hash: Hash of the remote item's salient fields at import time
+            (used to detect inbound changes on later pulls).
+        remote_id: Provider-native id (empty for CalDAV).
+        etag: Last-seen server ETag.
+        updated: ISO timestamp of the import / last inbound reconcile.
+    """
+
+    task_id: str
+    content_hash: str = ""
+    remote_id: str = ""
+    etag: str = ""
+    updated: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "task_id": self.task_id,
+            "content_hash": self.content_hash,
+            "remote_id": self.remote_id,
+            "etag": self.etag,
+            "updated": self.updated,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ImportedRef:
+        return cls(
+            task_id=str(data.get("task_id", "")),
+            content_hash=str(data.get("content_hash", "")),
+            remote_id=str(data.get("remote_id", "")),
+            etag=str(data.get("etag", "")),
             updated=str(data.get("updated", "")),
         )
 
@@ -80,12 +159,27 @@ class CalSyncState:
             "updated": "<iso>",
             "namespaces": {
                 "google::primary": {
+                    # per task: uid, etag, href, content_hash, remote_id,
+                    # inbound_hash, and the merge-ancestor snapshot
+                    # (base_title/base_body/base_due/base_estimate).
                     "<task_id>": {"uid": ..., "etag": ..., "content_hash": ...},
+                    ...
+                },
+                ...
+            },
+            "imported": {
+                "google::primary": {
+                    "<remote_ical_uid>": {"task_id": ..., "content_hash": ...},
                     ...
                 },
                 ...
             }
         }
+
+    ``namespaces`` tracks what push wrote (keyed by local task id); ``imported``
+    tracks what pull brought in (keyed by remote iCalUID). The ``imported`` map
+    is optional on disk -- state files written before two-way sync load fine
+    and default it to empty, so the state version stays at 1.
     """
 
     def __init__(self, path: Path) -> None:
@@ -105,6 +199,8 @@ class CalSyncState:
         # Defensive: ensure required keys exist.
         self._data.setdefault("version", CALSYNC_STATE_VERSION)
         self._data.setdefault("namespaces", {})
+        # ``imported`` was added for two-way (pull) sync; older files omit it.
+        self._data.setdefault("imported", {})
 
     @staticmethod
     def _empty() -> dict[str, Any]:
@@ -112,6 +208,7 @@ class CalSyncState:
             "version": CALSYNC_STATE_VERSION,
             "updated": datetime.now().isoformat(),
             "namespaces": {},
+            "imported": {},
         }
 
     def _ns(self, provider: str, calendar: str) -> dict[str, Any]:
@@ -136,6 +233,49 @@ class CalSyncState:
     def task_ids(self, provider: str, calendar: str) -> list[str]:
         """Return all task ids with stored state for a provider+calendar."""
         return list(self._ns(provider, calendar).keys())
+
+    # -- Imported (pull) remote items --------------------------------------
+    def _imported_ns(self, provider: str, calendar: str) -> dict[str, Any]:
+        assert self._data is not None, "call load() first"
+        key = _namespace(provider, calendar)
+        imported: dict[str, Any] = self._data["imported"].setdefault(key, {})
+        return imported
+
+    def get_imported(self, provider: str, calendar: str, remote_uid: str) -> ImportedRef | None:
+        """Return the :class:`ImportedRef` for a remote iCalUID, or None."""
+        raw = self._imported_ns(provider, calendar).get(remote_uid)
+        return ImportedRef.from_dict(raw) if raw else None
+
+    def set_imported(self, provider: str, calendar: str, remote_uid: str, ref: ImportedRef) -> None:
+        """Store/replace the :class:`ImportedRef` for a remote iCalUID."""
+        self._imported_ns(provider, calendar)[remote_uid] = ref.to_dict()
+
+    def delete_imported(self, provider: str, calendar: str, remote_uid: str) -> None:
+        """Remove the imported-item record for a remote iCalUID."""
+        self._imported_ns(provider, calendar).pop(remote_uid, None)
+
+    def imported_uids(self, provider: str, calendar: str) -> list[str]:
+        """Return all tracked remote iCalUIDs imported for a provider+calendar."""
+        return list(self._imported_ns(provider, calendar).keys())
+
+    def imported_task_ids(self, provider: str, calendar: str) -> builtins.set[str]:
+        """Return the local task ids created by pull (imported remote items).
+
+        These are tasks that *originate* from a user-created calendar event, so
+        the push pass must not re-create them as doto-owned events (that would
+        duplicate the item on the calendar). See
+        :func:`doxtr_doto.calsync.engine.build_plan`.
+
+        The ``builtins.set`` annotation is deliberate: this class defines a
+        ``set`` *method*, which shadows the ``set`` builtin in the class-body
+        annotation scope, so the fully-qualified name is required.
+        """
+        out: builtins.set[str] = set()
+        for uid in self.imported_uids(provider, calendar):
+            ref = self.get_imported(provider, calendar, uid)
+            if ref is not None and ref.task_id:
+                out.add(ref.task_id)
+        return out
 
     def save(self) -> None:
         """Atomically persist state to disk."""

@@ -13,12 +13,113 @@ import pytest
 from doxtr_doto.date_utils import (
     DotoDate,
     format_date_display,
+    format_duration_minutes,
     is_due_soon,
     is_overdue,
     normalize_date,
     parse_date,
     parse_date_safe,
+    parse_duration,
+    parse_duration_safe,
 )
+
+
+class TestDurationParsing:
+    """Tests for the estimate/duration parser and formatter."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("5m", 5),
+            ("10m", 10),
+            ("90m", 90),
+            ("4h", 240),
+            ("1h30m", 90),
+            ("1h 30m", 90),
+            ("2h", 120),
+            ("30", 30),
+            (30, 30),
+            ("1H", 60),
+            ("  2h  ", 120),
+        ],
+    )
+    def test_parse_duration_valid(self, value, expected):
+        assert parse_duration(value) == expected
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_parse_duration_empty_is_none(self, value):
+        assert parse_duration(value) is None
+
+    @pytest.mark.parametrize("value", ["abc", "0", "-5", "5x", "h", "m", "1.5h", "m5"])
+    def test_parse_duration_invalid_raises(self, value):
+        with pytest.raises(ValueError):
+            parse_duration(value)
+
+    def test_parse_duration_safe_never_raises(self):
+        assert parse_duration_safe("garbage") is None
+        assert parse_duration_safe("4h") == 240
+        assert parse_duration_safe(None) is None
+
+    @pytest.mark.parametrize(
+        ("minutes", "expected"),
+        [
+            (5, "5m"),
+            (60, "1h"),
+            (90, "1h30m"),
+            (240, "4h"),
+            (None, ""),
+            (0, ""),
+            (-5, ""),
+        ],
+    )
+    def test_format_duration_minutes(self, minutes, expected):
+        assert format_duration_minutes(minutes) == expected
+
+    @pytest.mark.parametrize("text", ["5m", "90m", "4h", "1h30m"])
+    def test_round_trip(self, text):
+        """format(parse(x)) is the canonical form that re-parses identically."""
+        minutes = parse_duration(text)
+        assert parse_duration(format_duration_minutes(minutes)) == minutes
+
+    @pytest.mark.parametrize("minutes", [5, 60, 65, 90, 120, 121, 1440])
+    def test_minute_round_trip_noncanonical(self, minutes):
+        """A stored minute count re-parses to itself after formatting, even for
+        non-canonical authored values (65 -> "1h5m" -> 65; 120 -> "2h" -> 120)."""
+        assert parse_duration(format_duration_minutes(minutes)) == minutes
+
+    def test_float_coerced_to_minutes(self):
+        assert parse_duration(90.0) == 90
+        assert parse_duration(90.9) == 90  # truncated
+        assert parse_duration_safe(90.0) == 90
+
+    @pytest.mark.parametrize("value", [True, False, [1], {"a": 1}])
+    def test_non_numeric_non_str_rejected(self, value):
+        with pytest.raises((TypeError, ValueError)):
+            parse_duration(value)
+
+    @pytest.mark.parametrize(
+        "value", [[1], {"a": 1}, object(), 90.0, float("inf"), float("-inf"), float("nan")]
+    )
+    def test_parse_duration_safe_never_raises_on_any_type(self, value):
+        # Contract: the forgiving seam returns a value or None, never raises,
+        # regardless of input type (foreign/hand-edited stored data). Includes
+        # non-finite floats, which reach ``int()`` and would otherwise raise
+        # ``OverflowError``/``ValueError`` outside the caught set.
+        result = parse_duration_safe(value)
+        assert result is None or isinstance(result, int)
+
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+    def test_parse_duration_rejects_non_finite_float(self, value):
+        # The strict parser rejects non-finite floats as a plain ValueError so
+        # the forgiving wrapper can catch it (not an uncaught OverflowError).
+        with pytest.raises(ValueError):
+            parse_duration(value)
+
+    @pytest.mark.parametrize("value", ["4h", True, [1], 90.0, None])
+    def test_format_duration_minutes_tolerates_non_int(self, value):
+        # format must never crash on a non-int stored value; non-ints -> "".
+        out = format_duration_minutes(value)  # type: ignore[arg-type]
+        assert isinstance(out, str)
 
 
 class TestDotoDateParsing:

@@ -8,7 +8,13 @@ from doxtr_doto.calsync.state import CalSyncState, RemoteRef
 class TestRemoteRef:
     def test_round_trip_dict(self):
         ref = RemoteRef(
-            uid="u", etag="e", href="h", content_hash="c", remote_id="r", updated="2026-01-01"
+            uid="u",
+            etag="e",
+            href="h",
+            content_hash="c",
+            remote_id="r",
+            inbound_hash="ih",
+            updated="2026-01-01",
         )
         assert RemoteRef.from_dict(ref.to_dict()) == ref
 
@@ -16,6 +22,12 @@ class TestRemoteRef:
         ref = RemoteRef.from_dict({"uid": "u"})
         assert ref.uid == "u"
         assert ref.etag == ""
+
+    def test_from_dict_without_inbound_hash_is_backward_compatible(self):
+        # Old state files (written before two-way conflict tracking) omit
+        # inbound_hash; they must load with inbound_hash == "".
+        ref = RemoteRef.from_dict({"uid": "u", "etag": "e", "content_hash": "c", "remote_id": "r"})
+        assert ref.inbound_hash == ""
 
 
 class TestCalSyncState:

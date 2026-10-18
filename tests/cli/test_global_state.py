@@ -75,6 +75,10 @@ class TestGlobalState:
         assert state.tui_sort_key is None
         assert state.tui_sort_order is None
         assert state.tui_repo_filter is None
+        assert state.tui_recent_done_enabled is None
+        assert state.tui_recent_done_days is None
+        assert state.tui_detail_ratio is None
+        assert state.tui_modal_width_ratio is None
 
     def test_to_dict_shape(self):
         state = GlobalState()
@@ -90,12 +94,17 @@ class TestGlobalState:
             "last_prompt_date",
             "tui_layout",
             "tui_hide_completed",
+            "tui_conflicts_only",
             "tui_due_filter",
             "tui_tag_filter",
             "tui_priority_filter",
             "tui_sort_key",
             "tui_sort_order",
             "tui_repo_filter",
+            "tui_recent_done_enabled",
+            "tui_recent_done_days",
+            "tui_detail_ratio",
+            "tui_modal_width_ratio",
         }
         assert data["work_clock"] == {"worklogs": []}
         assert data["breaks"] == []
@@ -159,6 +168,45 @@ class TestGlobalState:
         assert rebuilt.tui_sort_key == "priority"
         assert rebuilt.tui_sort_order == "desc"
         assert rebuilt.tui_repo_filter == ["web", "api"]
+
+    def test_recent_done_fields_round_trip(self):
+        # The recent-done filter's on/off state and N-day window survive a
+        # to_dict/from_dict round-trip.
+        state = GlobalState(
+            tui_recent_done_enabled=True,
+            tui_recent_done_days=30,
+        )
+        data = state.to_dict()
+        assert data["tui_recent_done_enabled"] is True
+        assert data["tui_recent_done_days"] == 30
+        rebuilt = GlobalState.from_dict(data)
+        assert rebuilt.tui_recent_done_enabled is True
+        assert rebuilt.tui_recent_done_days == 30
+
+    def test_recent_done_disabled_state_round_trip(self):
+        # Explicitly-disabled (enabled=False) persists distinctly from "unset".
+        state = GlobalState(tui_recent_done_enabled=False, tui_recent_done_days=10)
+        rebuilt = GlobalState.from_dict(state.to_dict())
+        assert rebuilt.tui_recent_done_enabled is False
+        assert rebuilt.tui_recent_done_days == 10
+
+    def test_detail_ratio_round_trip(self):
+        # The table-layout detail-pane ratio survives a to_dict/from_dict
+        # round-trip; None means no saved preference.
+        state = GlobalState(tui_detail_ratio="5/8")
+        data = state.to_dict()
+        assert data["tui_detail_ratio"] == "5/8"
+        assert GlobalState.from_dict(data).tui_detail_ratio == "5/8"
+        assert GlobalState.from_dict({}).tui_detail_ratio is None
+
+    def test_modal_width_ratio_round_trip(self):
+        # The edit/note pop-up width ratio survives a to_dict/from_dict
+        # round-trip; None means no saved preference.
+        state = GlobalState(tui_modal_width_ratio="1/2")
+        data = state.to_dict()
+        assert data["tui_modal_width_ratio"] == "1/2"
+        assert GlobalState.from_dict(data).tui_modal_width_ratio == "1/2"
+        assert GlobalState.from_dict({}).tui_modal_width_ratio is None
 
     def test_repo_filter_round_trip(self):
         # The repo filter is persisted as a list of repository names and

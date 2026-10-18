@@ -94,6 +94,81 @@ class TestEventProjection:
         ev = project_task_to_event("T3", task, cal)
         assert ev.start == datetime(2026, 8, 15, 8, 0)
 
+    def test_estimate_sets_event_duration(self):
+        # A per-task :estimate: (stored as whole minutes) sizes the event,
+        # overriding the global event_duration_minutes default (30).
+        cal = _event_cfg()
+        task = {
+            "title": "deep work",
+            "due": "2026-08-15T08:00",
+            "status": "open",
+            "estimate": 90,
+        }
+        ev = project_task_to_event("T-est", task, cal)
+        assert ev.start == datetime(2026, 8, 15, 8, 0)
+        assert ev.end == datetime(2026, 8, 15, 9, 30)
+
+    def test_estimate_as_duration_string(self):
+        # The projection parses a human duration string too (not just an int),
+        # so a task carrying the raw "4h" form still projects a 4h block.
+        cal = _event_cfg()
+        task = {
+            "title": "big",
+            "due": "2026-08-15T13:00",
+            "status": "open",
+            "estimate": "4h",
+        }
+        ev = project_task_to_event("T-est2", task, cal)
+        assert ev.end - ev.start == datetime(2026, 8, 15, 17, 0) - datetime(2026, 8, 15, 13, 0)
+
+    def test_no_estimate_falls_back_to_config_default(self):
+        cal = _event_cfg(event_duration_minutes=45)
+        task = {"title": "x", "due": "2026-08-15T09:00", "status": "open"}
+        ev = project_task_to_event("T-def", task, cal)
+        assert ev.end - ev.start == datetime(2026, 8, 15, 9, 45) - datetime(2026, 8, 15, 9, 0)
+
+    def test_malformed_estimate_falls_back_to_default(self):
+        # Malformed stored data must never break a push: fall back to default.
+        cal = _event_cfg()
+        task = {
+            "title": "x",
+            "due": "2026-08-15T09:00",
+            "status": "open",
+            "estimate": "garbage",
+        }
+        ev = project_task_to_event("T-bad", task, cal)
+        assert ev.end - ev.start == datetime(2026, 8, 15, 9, 30) - datetime(2026, 8, 15, 9, 0)
+
+    def test_estimate_makes_event_overlap_break_and_pushes(self):
+        # The estimate-driven duration is what makes the interval cross the
+        # break window, so the start must be pushed to break_end. A task due
+        # 11:30 with a 2h estimate would end 13:30 and overlap 12:00-13:00, so
+        # it is nudged to start 13:00 / end 15:00. This exercises the
+        # estimate->duration value feeding the break-overlap nudge.
+        cal = _event_cfg()  # break 12:00-13:00
+        task = {"title": "x", "due": "2026-08-15T11:30", "status": "open", "estimate": 120}
+        ev = project_task_to_event("T-estbrk", task, cal)
+        assert ev.start == datetime(2026, 8, 15, 13, 0)
+        assert ev.end == datetime(2026, 8, 15, 15, 0)
+
+    def test_estimate_short_enough_to_end_at_break_start_not_pushed(self):
+        # Counterpart: a 30min estimate due 11:30 ends exactly at 12:00 (break
+        # start). The break window is half-open, so ending AT break_start does
+        # not overlap and the event is left in place.
+        cal = _event_cfg()
+        task = {"title": "x", "due": "2026-08-15T11:30", "status": "open", "estimate": 30}
+        ev = project_task_to_event("T-estnobrk", task, cal)
+        assert ev.start == datetime(2026, 8, 15, 11, 30)
+        assert ev.end == datetime(2026, 8, 15, 12, 0)
+
+    def test_float_estimate_from_foreign_store_does_not_break_push(self):
+        # A float estimate (e.g. written by a foreign JSON producer) must be
+        # tolerated by the forgiving projector, not raise.
+        cal = _event_cfg()
+        task = {"title": "x", "due": "2026-08-15T09:00", "status": "open", "estimate": 90.0}
+        ev = project_task_to_event("T-float", task, cal)
+        assert ev.end - ev.start == datetime(2026, 8, 15, 10, 30) - datetime(2026, 8, 15, 9, 0)
+
     def test_break_boundary_at_break_end_not_pushed(self):
         cal = _event_cfg()
         task = {"title": "ok", "due": "2026-08-15T13:00", "status": "open"}
@@ -151,6 +226,29 @@ class TestEventProjection:
         assert ev.all_day is False
         assert ev.start == datetime(2026, 8, 15, 9, 30)
 
+    def test_dateless_non_allday_sized_by_estimate(self):
+        # A date-only due with all_day_for_dateless=False becomes a *timed*
+        # event at workday_start, and that event IS sized by the estimate
+        # (not the all-day span). Guards the documented date-only + estimate
+        # interaction that previously had no coverage.
+        cal = _event_cfg(all_day_for_dateless=False, workday_start="09:00")
+        task = {"title": "Deadline", "due": "2026-08-15", "status": "open", "estimate": 120}
+        ev = project_task_to_event("T7-est", task, cal)
+        assert ev.all_day is False
+        assert ev.start == datetime(2026, 8, 15, 9, 0)
+        assert ev.end == datetime(2026, 8, 15, 11, 0)  # 2h from the estimate
+
+    def test_dateless_all_day_ignores_estimate(self):
+        # When all_day_for_dateless=True a date-only due is an all-day event,
+        # which has no duration, so a present estimate is ignored (always a
+        # one-day exclusive span regardless of the estimate size).
+        cal = _event_cfg(all_day_for_dateless=True)
+        task = {"title": "Deadline", "due": "2026-08-15", "status": "open", "estimate": 240}
+        ev = project_task_to_event("T6-est", task, cal)
+        assert ev.all_day is True
+        assert ev.start == datetime(2026, 8, 15, 0, 0)
+        assert ev.end == datetime(2026, 8, 16, 0, 0)  # one day, estimate ignored
+
     def test_tags_become_categories(self):
         cal = _event_cfg()
         task = {"title": "x", "due": "2026-08-15T10:00", "tags": ["a", "b"]}
@@ -192,6 +290,18 @@ class TestTodoProjection:
         assert ev.kind is EventKind.TODO
         assert ev.due == datetime(2026, 8, 15, 0, 0)
         assert ev.status == "NEEDS-ACTION"
+
+    def test_todo_ignores_estimate(self):
+        # A VTODO has a due instant but no duration, so an :estimate: must be
+        # irrelevant to the todo projection (the todo branch returns before the
+        # estimate/duration logic). Pinning this guards against a refactor that
+        # moves the estimate computation above the todo branch.
+        cal = _event_cfg(event_mode="todo")
+        task = {"title": "x", "due": "2026-08-15T09:00", "status": "open", "estimate": 240}
+        ev = project_task_to_event("T13e", task, cal)
+        assert ev.kind is EventKind.TODO
+        assert ev.due == datetime(2026, 8, 15, 9, 0)
+        assert ev.end is None  # todos carry no end/duration
 
 
 class TestProjectorExtensionPoint:

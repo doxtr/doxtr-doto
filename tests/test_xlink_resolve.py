@@ -1,4 +1,4 @@
-"""Tests for render-time ``:xlink:`` resolution (sphinxcontrib-xlink).
+"""Tests for render-time ``:xlink:`` resolution (doxtr-xlink).
 
 Covers the resolver parsing, token replacement, graceful no-xlink path, the
 HTML build resolution (with ``<a href>`` when a URL is present), the
@@ -142,7 +142,7 @@ def xlink_build(tmp_path):
     """Build a single HTML page with an xlink directory and return the HTML."""
 
     def _build(rst_content: str, conf_extra: str = "", *, with_xlink_dir: bool = True):
-        pytest.importorskip("sphinxcontrib.xlink")
+        pytest.importorskip("doxtr_xlink")
 
         src = tmp_path / "src"
         src.mkdir()
@@ -152,8 +152,7 @@ def xlink_build(tmp_path):
             _write_xlink_file(src / "xlinks")
 
         (src / "conf.py").write_text(
-            "extensions = ['doxtr_doto', 'sphinxcontrib.xlink']\n"
-            "master_doc = 'index'\n" + conf_extra + "\n"
+            "extensions = ['doxtr_doto', 'doxtr_xlink']\nmaster_doc = 'index'\n" + conf_extra + "\n"
         )
         (src / "index.rst").write_text("Test\n====\n\n" + rst_content)
 
@@ -208,7 +207,7 @@ def test_html_build_resolve_xlinks_false_keeps_raw_token(xlink_build):
 
 
 def test_html_build_without_xlink_extension_keeps_raw_token(tmp_path):
-    """Without sphinxcontrib.xlink in extensions, the raw token is rendered."""
+    """Without doxtr_xlink in extensions, the raw token is rendered."""
     src = tmp_path / "src"
     src.mkdir()
     out = tmp_path / "out"
@@ -283,7 +282,7 @@ def xlink_build_to(tmp_path):
     """
 
     def _build(rst_content, conf_extra="", *, builder="html"):
-        pytest.importorskip("sphinxcontrib.xlink")
+        pytest.importorskip("doxtr_xlink")
 
         src = tmp_path / "src"
         src.mkdir()
@@ -291,8 +290,7 @@ def xlink_build_to(tmp_path):
         _write_xlink_file_extended(src / "xlinks")
 
         (src / "conf.py").write_text(
-            "extensions = ['doxtr_doto', 'sphinxcontrib.xlink']\n"
-            "master_doc = 'index'\n" + conf_extra + "\n"
+            "extensions = ['doxtr_doto', 'doxtr_xlink']\nmaster_doc = 'index'\n" + conf_extra + "\n"
         )
         (src / "index.rst").write_text("Test\n====\n\n" + rst_content)
 

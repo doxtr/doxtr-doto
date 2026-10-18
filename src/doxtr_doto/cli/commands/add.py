@@ -484,6 +484,13 @@ def _build_task_data(
     shell_complete=complete_date,
     help="End date for recurring tasks (required with --repeat).",
 )
+@click.option(
+    "--from",
+    "-F",
+    "from_date",
+    shell_complete=complete_date,
+    help="Series start date for recurring tasks (default: today; requires --repeat).",
+)
 @click.option("--dry-run", "-n", is_flag=True, help="Show output without writing.")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
 @click.option("--raci", help='RACI roles (e.g. "responsible alice, accountable bob").')
@@ -504,6 +511,7 @@ def add(
     interactive: bool,
     repeat_pattern: str | None,
     until_date: str | None,
+    from_date: str | None,
     dry_run: bool,
     json_output: bool,
     raci: str | None,
@@ -519,6 +527,14 @@ def add(
         doto add "Sprint planning" --repeat "every 2 weeks on monday" --until +6m
 
         doto add "Monthly report {date}" --repeat "every month on last friday" --until +1y
+
+    A pattern may carry a start time (``at HH:MM``) and a duration
+    (``for <duration>``), and --from sets the series start date (default:
+    today):
+
+        doto add "Important Sync Meeting" \\
+            --repeat "every 2 weeks on monday at 16:00 for 2h" \\
+            --from 2026-11-01 -u 2027-10-10
 
     Use {date} in the title to include the occurrence date.
 
@@ -553,6 +569,7 @@ def add(
             title_template=title_str,
             repeat_pattern=repeat_pattern,
             until_date=until_date,
+            from_date=from_date,
             assignee=assignee,
             priority=priority,
             status=status,
@@ -565,6 +582,9 @@ def add(
 
     if until_date:
         raise click.UsageError("--until requires --repeat for recurring tasks.")
+
+    if from_date:
+        raise click.UsageError("--from requires --repeat for recurring tasks.")
 
     if not task_id:
         task_id = ctx.store.generate_id(
@@ -594,6 +614,16 @@ def add(
         raci=raci,
     )
 
+    from doxtr_doto.cli.id_resolver import cross_repo_deps
+
+    offending = cross_repo_deps(ctx, ctx.store, list(task_data.get("depends_on", [])))
+    if offending:
+        raise click.ClickException(
+            "Cross-repo dependencies are not supported: "
+            f"{', '.join(offending)}. A dependency must live in the same "
+            "repository as the task."
+        )
+
     if dry_run:
         formatter.print("Would add task:")
         formatter.format_task_detail({"id": task_id, **task_data})
@@ -617,6 +647,7 @@ def _add_recurring_tasks(
     title_template: str,
     repeat_pattern: str,
     until_date: str | None,
+    from_date: str | None,
     assignee: str | None,
     priority: str | None,
     status: str | None,
@@ -625,16 +656,30 @@ def _add_recurring_tasks(
     rst_file: str | None,
     dry_run: bool,
 ) -> None:
-    """Create a recurring task series."""
+    """Create a recurring task series (the ``doto add --repeat`` path).
+
+    A thin wrapper over :func:`doxtr_doto.cli.tui.actions.add_series`: this
+    function owns the CLI-specific concerns -- parsing the pattern / dates,
+    validating them, enforcing the occurrence limit, the ``--dry-run`` preview
+    and the success printing -- while :func:`add_series` owns the actual
+    occurrence/series building (shared with the TUI add-series dialog so the
+    two never diverge).
+
+    The ``--from`` date (``from_date``) sets the series start date (parsed via
+    :func:`parse_relative_date`); without it the series starts today. The
+    pattern may carry ``at HH:MM`` / ``for <duration>`` suffixes that
+    :func:`parse_recurrence` turns into the pattern's ``start_time`` /
+    ``duration_minutes`` (applied to each task's ``due`` / ``estimate``).
+    """
     from doxtr_doto.cli.recurrence import (
-        format_date_for_title,
         generate_occurrences,
         parse_recurrence,
+        render_series_title,
     )
+    from doxtr_doto.cli.tui import actions
 
     formatter = ctx.formatter
     config = ctx.config
-    store = ctx.store
 
     # Require --until for recurring tasks
     if not until_date:
@@ -646,17 +691,22 @@ def _add_recurring_tasks(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    # Parse dates
-    start = date.today()
+    # Resolve the start date: --from when given, else today.
+    if from_date:
+        start_str = parse_relative_date(from_date)
+        # Drop any time component; a series start is a calendar date.
+        start = date.fromisoformat(start_str.split("T")[0])
+    else:
+        start = date.today()
     end_str = parse_relative_date(until_date)
-    end = date.fromisoformat(end_str)
+    end = date.fromisoformat(end_str.split("T")[0])
 
     if end <= start:
         raise click.ClickException(
-            f"End date ({end_str}) must be after today ({start.isoformat()})."
+            f"End date ({end.isoformat()}) must be after start date ({start.isoformat()})."
         )
 
-    # Generate occurrences
+    # Generate occurrences (preview + limit check share this list)
     occurrences = list(generate_occurrences(pattern, start, end))
 
     if not occurrences:
@@ -701,75 +751,38 @@ def _add_recurring_tasks(
         formatter.print(f"Would create series with {len(occurrences)} tasks:")
         formatter.print(f"  Pattern: {pattern.describe()}")
         formatter.print(f"  From:    {start.isoformat()}")
-        formatter.print(f"  Until:   {end_str}")
+        formatter.print(f"  Until:   {end.isoformat()}")
         formatter.print(f"  Title:   {title_template}")
         formatter.print("")
         formatter.print("Occurrences:")
         for occ in occurrences[:10]:
-            if "{date}" in title_template:
-                title = title_template.replace("{date}", format_date_for_title(occ))
-            else:
-                title = title_template
+            title = render_series_title(title_template, occ)
             formatter.print(f"  {occ.isoformat()}: {title}")
         if len(occurrences) > 10:
             formatter.print(f"  ... and {len(occurrences) - 10} more")
         return
 
-    # Generate series ID
-    series_id = store.generate_series_id()
-
-    # Create tasks
-    task_ids = []
-    for occurrence_date in occurrences:
-        task_id = store.generate_id(
-            prefix=config.id_prefix,
-            sequential=config.id_sequential,
-        )
-
-        # Format title with date if template contains {date}
-        if "{date}" in title_template:
-            title = title_template.replace("{date}", format_date_for_title(occurrence_date))
-        else:
-            title = title_template
-
-        task_data = {
-            "title": title,
-            "due": occurrence_date.isoformat(),
-            "series_id": series_id,
-            **task_defaults,
-        }
-
-        store.add_task(task_id, task_data)
-        task_ids.append(task_id)
-
-    # Create series record
-    store.add_series(
-        series_id=series_id,
+    # Build the series via the shared reusable helper (also used by the TUI).
+    result = actions.add_series(
+        ctx,
         title_template=title_template,
-        pattern=pattern.to_dict(),
-        start_date=start.isoformat(),
-        end_date=end_str,
-        task_ids=task_ids,
+        pattern=pattern,
+        start_date=start,
+        end_date=end,
         task_defaults=task_defaults,
     )
 
-    store.save()
-
-    from doxtr_doto.cli import known_names
-
-    known_names.remember_task_names(task_defaults.get("assignee"), task_defaults.get("tags", []))
-
-    formatter.print_success(f"Created series {series_id} with {len(task_ids)} tasks")
+    formatter.print_success(f"Created series {result.series_id} with {len(result.task_ids)} tasks")
     formatter.print(f"  Pattern: {pattern.describe()}")
-    formatter.print(f"  Until:   {end_str}")
+    formatter.print(f"  Until:   {end.isoformat()}")
     if not formatter.quiet:
         formatter.print("")
         formatter.print("First few tasks:")
-        for task_id in task_ids[:5]:
-            task = store.get_task(task_id)
+        for task_id in result.task_ids[:5]:
+            task = ctx.store.get_task(task_id)
             if task:
                 formatter.print(
                     f"  {task_id}: {task.get('title', '')} (due: {task.get('due', '')})"
                 )
-        if len(task_ids) > 5:
-            formatter.print(f"  ... and {len(task_ids) - 5} more")
+        if len(result.task_ids) > 5:
+            formatter.print(f"  ... and {len(result.task_ids) - 5} more")

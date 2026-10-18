@@ -474,16 +474,17 @@ def visit_doto_node_html(self: HTML5Translator, node: doto_node) -> None:
     # is unchanged). Formatting is centralized in date_utils so a child theme
     # that overrides the template still receives a sensibly-formatted value and
     # never has to re-parse the ISO ``T`` form.
-    from doxtr_doto.date_utils import format_date_display
+    from doxtr_doto.date_utils import format_date_display, format_duration_minutes
 
     due = format_date_display(node.get("due", ""))
     tags = node.get("tags", [])
     progress = node.get("progress")
+    estimate = format_duration_minutes(node.get("estimate"))
     raci = node.get("raci")
     is_overdue = node.get("is_overdue", False)
 
     # Resolve any :xlink: tokens in the assignee at render time (graceful no-op
-    # when sphinxcontrib-xlink is absent/disabled). The stored value is never
+    # when doxtr-xlink is absent/disabled). The stored value is never
     # mutated. When the token resolves to a URL, pass it as assignee_href so the
     # template can emit a real link.
     app = getattr(self.builder, "app", None)
@@ -520,6 +521,7 @@ def visit_doto_node_html(self: HTML5Translator, node: doto_node) -> None:
             "due": due,
             "tags": tags,
             "progress": progress,
+            "estimate": estimate,
             "raci_html": raci_html,
             "is_overdue": is_overdue,
             "classes": classes,
@@ -644,6 +646,8 @@ class _DotoBoxFields:
         tags: Tag strings.
         is_overdue: Whether the task is overdue (wraps ``due`` in the overdue
             macro).
+        estimate: Expected-duration display string (compact form, may be empty).
+        progress: Progress percentage (``None`` when absent).
         raci: Raw RACI payload (``None`` when absent).
     """
 
@@ -657,6 +661,8 @@ class _DotoBoxFields:
     updated: str
     tags: list[str]
     is_overdue: bool
+    estimate: str
+    progress: int | None
     raci: Any
 
 
@@ -673,7 +679,7 @@ def _doto_box_fields(node: doto_node) -> _DotoBoxFields:
     Returns:
         A :class:`_DotoBoxFields` with every field the emitters need.
     """
-    from doxtr_doto.date_utils import format_date_display
+    from doxtr_doto.date_utils import format_date_display, format_duration_minutes
 
     return _DotoBoxFields(
         task_id=node.get("task_id", ""),
@@ -688,6 +694,10 @@ def _doto_box_fields(node: doto_node) -> _DotoBoxFields:
         updated=node.get("updated", ""),
         tags=node.get("tags", []),
         is_overdue=node.get("is_overdue", False),
+        # Pre-format the estimate to the compact duration string (``""`` when
+        # unset) so both emitters render the same text the HTML card shows.
+        estimate=format_duration_minutes(node.get("estimate")),
+        progress=node.get("progress"),
         raci=node.get("raci"),
     )
 
@@ -696,10 +706,10 @@ def _emit_doto_box_body_default(self: LaTeXTranslator, node: doto_node) -> None:
     """Emit the default (roomy) task-box body via the ``\\dotometa*`` macros.
 
     Renders each metadata group on its own row (id/priority, status,
-    assignee/due, created/updated, tags, raci) as stacked icon-over-label
-    cells. This is the original default-layout body, factored out so the layout
-    dispatch in :func:`visit_doto_node_latex` stays small and a child theme can
-    swap only one layout. Output is byte-identical to the pre-Feature-D path.
+    assignee/due, created/updated, tags, estimate/progress, raci) as stacked
+    icon-over-label cells. This is the original default-layout body, factored
+    out so the layout dispatch in :func:`visit_doto_node_latex` stays small and
+    a child theme can swap only one layout.
 
     Args:
         self: LaTeXTranslator instance.
@@ -751,6 +761,17 @@ def _emit_doto_box_body_default(self: LaTeXTranslator, node: doto_node) -> None:
         tag_text = ", ".join(_latex_escape(t) for t in tags)
         self.body.append(f"\\dotometatags{{{tag_text}}}\n\n")
 
+    estimate = fields.estimate
+    progress = fields.progress
+    if estimate or progress is not None:
+        if estimate:
+            self.body.append(f"\\dotometaestimate{{{_latex_escape(estimate)}}}")
+        if progress is not None:
+            if estimate:
+                self.body.append("\\hfill ")
+            self.body.append(f"\\dotometaprogress{{{int(progress)}\\%}}")
+        self.body.append("\n\n")
+
     raci = fields.raci
     if raci:
         from doxtr_doto.raci import render_raci_compact
@@ -764,7 +785,8 @@ def _emit_doto_box_body_compact(self: LaTeXTranslator, node: doto_node) -> None:
     r"""Emit the compact task-box body via the ``\dotocompact*`` macros.
 
     Lays out the SAME fields as :func:`_emit_doto_box_body_default` (id,
-    priority, status, assignee, due, created, updated, tags, raci) much more
+    priority, status, assignee, due, created, updated, tags, estimate,
+    progress, raci) much more
     densely: a single-line header (title + id + priority + status) via
     ``\dotocompactheader``, a thin ``\dotocompactrule`` separator, then the
     remaining fields as inline ``\dotocompactfield{icon}{value}`` pairs joined
@@ -823,6 +845,15 @@ def _emit_doto_box_body_compact(self: LaTeXTranslator, node: doto_node) -> None:
         _add("updated", _latex_escape(updated))
     if tags:
         _add("tags", ", ".join(_latex_escape(t) for t in tags))
+
+    estimate = fields.estimate
+    if estimate:
+        # No field-level FA macro for estimate in LIST_FIELD_FA_LATEX (it is
+        # not a list column icon); use the clock glyph the box macro also uses.
+        pairs.append(f"\\dotocompactfield{{\\faClock}}{{{_latex_escape(estimate)}}}")
+    progress = fields.progress
+    if progress is not None:
+        pairs.append(f"\\dotocompactfield{{\\faChartBar}}{{{int(progress)}\\%}}")
 
     raci = fields.raci
     if raci:
@@ -1497,6 +1528,13 @@ def _get_task_column_value(task: Any, column: str) -> str:
         from doxtr_doto.raci import render_raci_compact
 
         return render_raci_compact(getattr(task, "raci", None))
+    elif column == "progress":
+        progress = getattr(task, "progress", None)
+        return f"{progress}%" if progress is not None else ""
+    elif column == "estimate":
+        from doxtr_doto.date_utils import format_duration_minutes
+
+        return format_duration_minutes(getattr(task, "estimate", None))
     return ""
 
 
@@ -1830,7 +1868,7 @@ def _latex_assignee(self: LaTeXTranslator, assignee: str) -> str:
     r"""Resolve :xlink: tokens in a LaTeX assignee value and escape it.
 
     Resolution is render-time only (the stored value is untouched) and degrades
-    gracefully to the escaped raw text when sphinxcontrib-xlink is absent or
+    gracefully to the escaped raw text when doxtr-xlink is absent or
     disabled. When a token resolves to a URL the escaped display text is wrapped
     in ``\sphinxhref{url}{text}`` (the same macro xlink uses for its own LaTeX
     links).

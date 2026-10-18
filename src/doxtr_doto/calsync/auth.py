@@ -23,6 +23,36 @@ from typing import Any
 
 CONFIG_ENV_VAR = "DOTO_CONFIG"
 
+#: Provider-name/alias -> cached-token name. Several user-facing provider names
+#: are aliases of the same backend (Apple/iCloud both use the CalDAV token;
+#: Outlook/MS/Graph all map to the Microsoft token), so logout must normalize
+#: an alias to the name the token was saved under. Centralized here so the CLI
+#: (``doto calsync logout``) and the TUI (``C o``) cannot drift.
+_TOKEN_NAME_ALIASES: dict[str, str] = {
+    "apple": "caldav",
+    "icloud": "caldav",
+    "outlook": "microsoft",
+    "ms": "microsoft",
+    "graph": "microsoft",
+}
+
+
+def canonical_token_name(provider: str) -> str:
+    """Return the cached-token name for a provider name/alias.
+
+    Folds user-facing aliases (``apple``/``icloud`` -> ``caldav``;
+    ``outlook``/``ms``/``graph`` -> ``microsoft``) onto the name the token was
+    actually saved under, so :func:`clear_token` targets the right file. A
+    provider with no alias (e.g. ``google``, ``caldav``) is returned unchanged.
+
+    Args:
+        provider: The configured provider name or an alias.
+
+    Returns:
+        The canonical token name to pass to :func:`clear_token` / token I/O.
+    """
+    return _TOKEN_NAME_ALIASES.get(provider, provider)
+
 
 def token_dir() -> Path:
     """Return (and create, 0700) the directory holding OAuth token caches."""

@@ -18,6 +18,7 @@ class MockTask:
     tags: list[str] | None = None
     depends_on: list[str] | None = None
     progress: int | None = None
+    estimate: int | None = None
     created: str | None = None
     updated: str | None = None
     _is_overdue: bool = False
@@ -437,6 +438,16 @@ class TestJinjaFilters:
 
         task_no_progress = MockTask(progress=None)
         assert _column_value_filter(task_no_progress, "progress") == ""
+
+    def test_column_value_filter_estimate(self):
+        """column_value filter should render estimate as a compact duration."""
+        from doxtr_doto.template_loader import _column_value_filter
+
+        task = MockTask(estimate=90)
+        assert _column_value_filter(task, "estimate") == "1h30m"
+
+        task_no_estimate = MockTask(estimate=None)
+        assert _column_value_filter(task_no_estimate, "estimate") == ""
 
 
 class TestTemplateExists:

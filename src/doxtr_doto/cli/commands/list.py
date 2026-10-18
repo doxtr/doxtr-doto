@@ -96,6 +96,14 @@ def sort_tasks(
                     keys.append("9999-99-99")
             elif field == "created" or field == "updated":
                 keys.append(value or "")
+            elif field == "estimate" or field == "progress":
+                # Numeric fields: compare as numbers, not lexicographically
+                # (so 90 < 120). The sentinel flips with ``reverse`` so a
+                # missing value always sorts last, in both directions.
+                if value is None:
+                    keys.append(-1 if reverse else 10**9)
+                else:
+                    keys.append(value)
             else:
                 keys.append(str(value or "").lower())
         return tuple(keys)
@@ -156,6 +164,12 @@ def format_csv(tasks: list[dict[str, Any]], columns: list[str]) -> str:
 )
 @click.option("--due-before", help="Filter by due date before (YYYY-MM-DD).")
 @click.option("--due-after", help="Filter by due date after (YYYY-MM-DD).")
+@click.option(
+    "--conflicts",
+    "conflicts_only",
+    is_flag=True,
+    help="Show only tasks with an unresolved calendar-sync conflict.",
+)
 @click.option("--archived", is_flag=True, help="Include archived tasks.")
 @click.option(
     "--format",
@@ -194,6 +208,7 @@ def list_tasks(
     tags: str | None,
     due_before: str | None,
     due_after: str | None,
+    conflicts_only: bool,
     archived: bool,
     output_format: str,
     sort_by: str | None,
@@ -222,6 +237,8 @@ def list_tasks(
 
         doto list --format tree
 
+        doto list --conflicts        # tasks with an unresolved sync conflict
+
         doto list -r               # aggregated view across cached repos
 
         doto list --rescan         # rediscover repos, then aggregate
@@ -245,6 +262,7 @@ def list_tasks(
         "due_before": due_before,
         "due_after": due_after,
         "include_archived": archived,
+        "sync_conflict": True if conflicts_only else None,
     }
 
     if recursive:

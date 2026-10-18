@@ -327,6 +327,75 @@ class TestSeriesExtend:
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
+    @pytest.fixture
+    def timed_series_project(self, cli_project):
+        """Create a project with a time + duration bearing series."""
+        json_file = cli_project / ".doto" / "tasks.json"
+        json_file.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "updated": "2026-07-26T10:00:00",
+                    "tasks": {
+                        "TASK-001": {
+                            "title": "Sync",
+                            "status": "open",
+                            "due": "2026-07-01T16:00",
+                            "estimate": 120,
+                            "series_id": "SERIES-001",
+                            "archived": False,
+                        },
+                    },
+                    "series": {
+                        "SERIES-001": {
+                            "title_template": "Sync",
+                            "pattern": {
+                                "type": "daily",
+                                "interval": 1,
+                                "start_time": "16:00",
+                                "duration_minutes": 120,
+                            },
+                            "start_date": "2026-07-01",
+                            "end_date": "2026-07-01",
+                            "task_ids": ["TASK-001"],
+                            "created": "2026-06-25T10:00:00",
+                        },
+                    },
+                }
+            )
+        )
+        return cli_project
+
+    def test_series_extend_carries_time_and_duration(self, cli_runner, timed_series_project):
+        """Extended occurrences get the pattern's time-bearing due + estimate."""
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(timed_series_project),
+                "series",
+                "extend",
+                "SERIES-001",
+                "2026-07-04",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        json_file = timed_series_project / ".doto" / "tasks.json"
+        data = json.loads(json_file.read_text())
+        # The newly created tasks (not the original TASK-001) carry time + est.
+        new_tasks = [
+            t
+            for tid, t in data["tasks"].items()
+            if tid != "TASK-001" and t.get("series_id") == "SERIES-001"
+        ]
+        assert new_tasks, "expected extended tasks"
+        for task in new_tasks:
+            assert task["due"].endswith("T16:00")
+            assert task["estimate"] == 120
+
 
 class TestSeriesDeleteBehavior:
     """Tests for series deletion behavior."""

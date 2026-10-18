@@ -439,3 +439,50 @@ class TestEdgeCases:
 
         # Should return all non-archived tasks
         assert len(result) == 3
+
+
+class TestEstimateSort:
+    """Sorting by the estimate field must be numeric, not lexicographic."""
+
+    def _tasks(self) -> dict[str, DotoTask]:
+        return {
+            "A": DotoTask(id="A", title="a", estimate=90),
+            "B": DotoTask(id="B", title="b", estimate=120),
+            "C": DotoTask(id="C", title="c", estimate=5),
+            "D": DotoTask(id="D", title="d", estimate=None),
+        }
+
+    def test_sort_estimate_ascending_is_numeric(self):
+        invalidate_filter_cache()
+        display = DisplayOptions.from_dict({"sort": ["estimate"], "order": "asc"})
+        result = filter_tasks(self._tasks(), {}, display)
+        ids = [t.id for t in result]
+        # 5 < 90 < 120, then None (no estimate) sorts last.
+        assert ids == ["C", "A", "B", "D"]
+
+    def test_sort_estimate_descending(self):
+        invalidate_filter_cache()
+        display = DisplayOptions.from_dict({"sort": ["estimate"], "order": "desc"})
+        result = filter_tasks(self._tasks(), {}, display)
+        ids = [t.id for t in result]
+        # 120 > 90 > 5, None sorts last under desc too.
+        assert ids[:3] == ["B", "A", "C"]
+        assert ids[3] == "D"
+
+
+class TestCliEstimateSort:
+    """The CLI list sort_key must compare estimate numerically."""
+
+    def test_cli_sort_estimate_numeric(self):
+        from doxtr_doto.cli.commands.list import sort_tasks
+
+        tasks = [
+            {"id": "A", "estimate": 90},
+            {"id": "B", "estimate": 120},
+            {"id": "C", "estimate": 5},
+            {"id": "D", "estimate": None},
+        ]
+        result = sort_tasks(tasks, ["estimate"], reverse=False)
+        ids = [t["id"] for t in result]
+        # Numeric: 5 < 90 < 120; a lexicographic bug would give "120" < "90".
+        assert ids == ["C", "A", "B", "D"]

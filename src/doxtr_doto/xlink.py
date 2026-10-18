@@ -1,6 +1,6 @@
-"""Render-time resolution of ``:xlink:`key``` tokens via sphinxcontrib-xlink.
+"""Render-time resolution of ``:xlink:`key``` tokens via doxtr-xlink.
 
-The doto ``:assignee:`` field can carry :mod:`sphinxcontrib.xlink` references,
+The doto ``:assignee:`` field can carry :mod:`doxtr_xlink` references,
 e.g.::
 
     .. doto:: Document the decision
@@ -15,9 +15,9 @@ change in ``fields.py`` with no edits to this module or the render seams.
 
 By default doto stores and renders those field values as the raw literal string
 (``":xlink:`yourdirectory-person-alice-bobbington`"``). When the optional
-``sphinxcontrib-xlink`` package is installed *and* enabled, this module resolves
+``doxtr-xlink`` package is installed *and* enabled, this module resolves
 such tokens to the human-readable display name (and link URL where meaningful)
-using xlink's own resolver API, exactly like the plotly path in
+using doxtr-xlink's own resolver API, exactly like the plotly path in
 :mod:`doxtr_doto.charts` degrades gracefully when its optional dependency is
 absent.
 
@@ -39,7 +39,7 @@ theme or downstream project swap behavior without touching render code:
   unavailable/disabled). Monkeypatch or reassign this to plug in a custom
   resolver (e.g. a project-specific directory, or a stubbed resolver in tests)
   without editing any render seam. The Sphinx build path uses
-  ``sphinxcontrib.xlink._get_xlink_data``; the app-less CLI/TUI path uses
+  ``doxtr_xlink._get_xlink_data``; the app-less CLI/TUI path uses
   :func:`_appless_resolver` which scans the ``.xlink`` directory directly.
 
 Keeping these the lone seams means a swap is a one-function change and callers
@@ -104,7 +104,7 @@ def _normalize_key(raw_key: str) -> str:
 
     Accepts xlink's ``Label <key>`` form (returning ``key``) or a bare key
     (returned as-is). Mirrors the key extraction in
-    :func:`sphinxcontrib.xlink.roles.xlink_role` so doto resolves the same key
+    :func:`doxtr_xlink.roles.xlink_role` so doto resolves the same key
     xlink would.
     """
     match = re.search(r"^(?P<label>.*?)\s*<(?P<key>[^<>]+)>$", raw_key)
@@ -119,8 +119,8 @@ def _xlink_enabled(app: Sphinx | None) -> bool:
     All three conditions must hold (graceful degradation otherwise):
 
     1. ``doto_resolve_xlinks`` config is truthy.
-    2. ``sphinxcontrib.xlink`` is listed in ``app.config.extensions``.
-    3. ``sphinxcontrib.xlink`` is importable with a usable resolver symbol.
+    2. ``doxtr_xlink`` is listed in ``app.config.extensions``.
+    3. ``doxtr_xlink`` is importable with a usable resolver symbol.
     """
     if app is None:
         return False
@@ -129,7 +129,7 @@ def _xlink_enabled(app: Sphinx | None) -> bool:
     if not get_config(app, "resolve_xlinks"):
         return False
     extensions = getattr(app.config, "extensions", []) or []
-    if "sphinxcontrib.xlink" not in extensions:
+    if "doxtr_xlink" not in extensions:
         return False
     return _import_xlink_resolver() is not None
 
@@ -142,7 +142,7 @@ def _import_xlink_resolver() -> Callable[..., tuple[Any, Any]] | None:
     :func:`doxtr_doto.charts.plotly_available`.
     """
     try:
-        from sphinxcontrib.xlink import _get_xlink_data
+        from doxtr_xlink import _get_xlink_data
     except Exception:
         return None
     if not callable(_get_xlink_data):
@@ -166,7 +166,7 @@ def _appless_resolver(xlink_dir: str) -> Callable[[str], tuple[str | None, str |
         A ``(key) -> (title, url)`` callable.
     """
     # ``.xlink`` grammar: ``key :: title :: url`` lines (``#`` comments / blanks
-    # skipped). This intentionally mirrors sphinxcontrib-xlink's own ``.xlink``
+    # skipped). This intentionally mirrors doxtr-xlink's own ``.xlink``
     # file grammar and must track upstream if that grammar changes.
     table: dict[str, tuple[str, str]] = {}
     if os.path.isdir(xlink_dir):
@@ -212,7 +212,7 @@ def _get_resolver_fn(
     Two modes:
 
     * Sphinx build (``app`` given, xlink enabled): wraps
-      ``sphinxcontrib.xlink._get_xlink_data(app, key)``.
+      ``doxtr_xlink._get_xlink_data(app, key)``.
     * App-less (``xlink_dir`` given, no app): uses :func:`_appless_resolver` to
       scan the ``.xlink`` directory directly (CLI/TUI).
 

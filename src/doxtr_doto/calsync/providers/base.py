@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from doxtr_doto.calsync.model import CalendarEvent
+    from doxtr_doto.calsync.model import CalendarEvent, RemoteEvent
     from doxtr_doto.cli.config import CalendarConfig
 
 
@@ -89,3 +89,36 @@ class CalendarProvider(abc.ABC):
         :meth:`update_event` (CalDAV URL or provider-native id); when empty the
         provider resolves the item from ``uid``.
         """
+
+    def list_events(self) -> list[RemoteEvent]:
+        """Return the remote items in the configured calendar (for pull).
+
+        Used by the two-way (pull) pass to discover user-created events and to
+        detect remote-side changes/deletions. Providers that only support push
+        may leave this unimplemented; the engine's pull planner raises a clear
+        error in that case.
+
+        Implementations MUST honor the inbound contract so the engine can reason
+        about items provider-agnostically:
+
+        * ``RemoteEvent.uid`` MUST be the item's **iCalUID**, not the
+          provider-native id (Google/MS event id). The engine keys imported
+          state and doto-ownership checks on the iCalUID; a native id would
+          break both. The native id goes in ``remote_id``.
+        * **Exclude** cancelled / tombstoned items -- a cancelled event must
+          not appear here, or the pull planner would import it as a task.
+        * Return **naive-local** datetimes for ``start`` / ``end`` / ``due``
+          (strip any timezone at the wire boundary), matching doto's
+          naive-local time model.
+
+        Returns:
+            A list of provider-neutral :class:`RemoteEvent` snapshots.
+
+        Raises:
+            ProviderError: On a transport/protocol failure.
+            NotImplementedError: If the provider cannot list events.
+        """
+        raise NotImplementedError(
+            f"{self.name!r} provider does not support reading events "
+            "(pull / two-way sync is unavailable for this provider)."
+        )

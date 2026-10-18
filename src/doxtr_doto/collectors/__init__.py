@@ -68,6 +68,10 @@ class DotoTask:
         due: Due date in ISO format: ``YYYY-MM-DD`` (date-only) or
             ``YYYY-MM-DDTHH:MM[:SS]`` when it carries an optional naive-local
             time.
+        estimate: Expected duration of the task, as a whole number of minutes
+            (``None`` when unset). Authored with the compact duration syntax
+            (``5m``, ``4h``, ``1h30m``); used by calendar-sync to size the
+            projected event.
         tags: List of tags for categorization.
         depends_on: List of task IDs this task depends on.
         body: Extended task description/notes.
@@ -94,6 +98,7 @@ class DotoTask:
     priority: str = DEFAULT_PRIORITY
     status: str = DEFAULT_STATUS
     due: str | None = None  # ISO: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] (optional time)
+    estimate: int | None = None  # expected duration in whole minutes; None = not set
     tags: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     body: str = ""
@@ -148,6 +153,7 @@ class DotoTask:
             "priority": self.priority,
             "status": self.status,
             "due": self.due,  # Already ISO format string
+            "estimate": self.estimate,
             "tags": self.tags,
             "depends_on": self.depends_on,
             "body": self.body,
@@ -171,6 +177,7 @@ class DotoTask:
             priority=data.get("priority", DEFAULT_PRIORITY),
             status=data.get("status", DEFAULT_STATUS),
             due=data.get("due"),  # Already ISO format string
+            estimate=data.get("estimate"),
             tags=data.get("tags", []),
             depends_on=data.get("depends_on", []),
             body=data.get("body", ""),
@@ -235,6 +242,7 @@ class DotoTask:
             "priority": self.priority,
             "status": self.status,
             "due": due_str,
+            "estimate": self.estimate,
             "tags": self.tags,
             "depends_on": self.depends_on,
             "body": self.body,
@@ -380,6 +388,7 @@ class DotoCollector(EnvironmentCollector):
                 priority=node.get("priority", DEFAULT_PRIORITY),
                 status=node.get("status", DEFAULT_STATUS),
                 due=node.get("due"),
+                estimate=node.get("estimate"),
                 tags=node.get("tags", []),
                 depends_on=node.get("depends_on", []),
                 body=node.get("body", ""),
@@ -738,6 +747,14 @@ def _filter_tasks_impl(
                     )
             elif sort_field == "assignee":
                 keys.append(task.assignee or "")
+            elif sort_field == "estimate":
+                # Numeric minutes; the sentinel flips with ``reverse`` so a
+                # task without an estimate always sorts last, in both
+                # directions (mirroring the ``due`` sentinel scheme).
+                if task.estimate is None:
+                    keys.append(-1 if reverse else 10**9)
+                else:
+                    keys.append(task.estimate)
             elif sort_field == "title":
                 keys.append(task.title.lower())
             elif sort_field == "id":

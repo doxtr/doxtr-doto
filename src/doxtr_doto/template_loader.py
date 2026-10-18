@@ -118,6 +118,10 @@ def _column_value_filter(task: Any, column: str) -> str:
     elif column == "progress":
         progress = getattr(task, "progress", None)
         return f"{progress}%" if progress is not None else ""
+    elif column == "estimate":
+        from doxtr_doto.date_utils import format_duration_minutes
+
+        return format_duration_minutes(getattr(task, "estimate", None))
     return ""
 
 

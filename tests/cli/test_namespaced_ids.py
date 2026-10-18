@@ -339,6 +339,47 @@ class TestNamespacedCommands:
         api_data = json.loads(api_store_path.read_text())
         assert api_data["tasks"]["A-1"]["status"] == "done"
 
+    def test_update_cross_repo_dependency_rejected(self, two_repos, runner):
+        # A dependency pointing at a task in a DIFFERENT repo is rejected: the
+        # parent/child and depends_on relations are in-store only.
+        web_store, _api, _web = two_repos
+        result = runner.invoke(
+            cli,
+            ["--json", str(web_store), "update", "T-1", "--depends-on", "api#A-1"],
+        )
+        assert result.exit_code != 0
+        assert "Cross-repo dependencies are not supported" in result.output
+        # The local task kept no dependency.
+        web_data = json.loads(web_store.read_text())
+        assert web_data["tasks"]["T-1"].get("depends_on") in (None, [])
+
+    def test_update_same_repo_dependency_ok(self, two_repos, runner):
+        # A bare (same-repo) dependency id is accepted.
+        web_store, _api, web = two_repos
+        # Add a sibling task in the web repo to depend on.
+        add = runner.invoke(cli, ["--json", str(web_store), "add", "Sibling", "--id", "T-2"])
+        assert add.exit_code == 0
+        result = runner.invoke(
+            cli,
+            ["--json", str(web_store), "update", "T-1", "--depends-on", "T-2"],
+        )
+        assert result.exit_code == 0
+        web_data = json.loads(web_store.read_text())
+        assert web_data["tasks"]["T-1"]["depends_on"] == ["T-2"]
+
+    def test_add_cross_repo_dependency_rejected(self, two_repos, runner):
+        # Creating a task with a cross-repo dependency is rejected and the task
+        # is not persisted.
+        web_store, _api, _web = two_repos
+        before = set(json.loads(web_store.read_text())["tasks"].keys())
+        result = runner.invoke(
+            cli,
+            ["--json", str(web_store), "add", "Blocked", "--depends-on", "api#A-1"],
+        )
+        assert result.exit_code != 0
+        assert "Cross-repo dependencies are not supported" in result.output
+        assert set(json.loads(web_store.read_text())["tasks"].keys()) == before
+
 
 class TestListAggregation:
     """Tests for 'doto list -r' aggregated multi-repo views."""

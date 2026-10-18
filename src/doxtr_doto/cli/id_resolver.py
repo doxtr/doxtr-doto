@@ -138,3 +138,44 @@ def resolve_task_ref(ctx: DotoContext, value: str) -> ResolvedTask | None:
         task_id=task_id,
         store=JsonTaskStore(store_path),
     )
+
+
+def cross_repo_deps(ctx: DotoContext, owner_store: JsonTaskStore, deps: list[str]) -> list[str]:
+    """Return the dependency refs that point OUTSIDE the owner's repository.
+
+    The dependency relation (``depends_on``), like the ``parent`` link, is an
+    in-store relation: each dependency id is stored and later resolved as a
+    *bare local id* against the owning task's own store (see
+    :func:`doxtr_doto.cli.commands.deps`). A namespaced ``repo#id`` dependency
+    that names a DIFFERENT repository can therefore never be resolved from the
+    owner store -- it would render as "(task not found)" -- so, mirroring the
+    ``cross_repo`` rejection in
+    :func:`doxtr_doto.cli.tui.actions.set_parent`, callers reject it rather
+    than store an unresolvable cross-repo edge.
+
+    Only namespaced (``repo#id``) entries are inspected: a bare id is intra
+    repo by definition and is always accepted here (its existence is the
+    caller's / store's concern, not this cross-repo guard). A namespaced entry
+    is flagged when its ``repo`` resolves to a store whose path differs from
+    ``owner_store``'s path, or when its ``repo`` cannot be resolved at all (an
+    unknown repo is, by definition, not the owner's).
+
+    Args:
+        ctx: The CLI context (provides the registry for repo resolution).
+        owner_store: The store that will hold the task carrying ``deps``.
+        deps: The candidate dependency ids (bare or ``repo#id``).
+
+    Returns:
+        The subset of ``deps`` that are cross-repo (in input order). Empty when
+        every entry is intra-repo / accepted.
+    """
+    offending: list[str] = []
+    for dep in deps:
+        repo_name, _task_id = split_task_ref(dep)
+        if repo_name is None:
+            # Bare id: intra-repo by definition.
+            continue
+        resolved = resolve_task_ref(ctx, dep)
+        if resolved is None or resolved.store.path != owner_store.path:
+            offending.append(dep)
+    return offending

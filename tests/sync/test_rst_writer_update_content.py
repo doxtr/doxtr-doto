@@ -24,8 +24,38 @@ from __future__ import annotations
 
 from doxtr_doto.sync.rst_writer import (
     _update_directive_content,
+    generate_directive_text,
     update_directive_in_content,
 )
+
+
+class TestEstimateSerialization:
+    """Estimate (stored as minutes) renders as the compact form in both the
+    CREATE and UPDATE RST paths, consistently."""
+
+    def test_create_emits_compact_estimate(self):
+        text = generate_directive_text({"id": "T-1", "title": "X", "estimate": 90})
+        assert "   :estimate: 1h30m" in text
+
+    def test_create_noncanonical_minutes_formatted(self):
+        text = generate_directive_text({"id": "T-1", "title": "X", "estimate": 65})
+        assert "   :estimate: 1h5m" in text
+
+    def test_create_none_estimate_omitted(self):
+        text = generate_directive_text({"id": "T-1", "title": "X", "estimate": None})
+        assert ":estimate:" not in text
+
+    def test_update_in_place_emits_compact_estimate(self):
+        # UPDATE path must format identically to CREATE (not emit a raw int).
+        block = ".. doto:: X\n   :id: T-1\n   :estimate: 5m\n"
+        result = _update_directive_content(block, {"estimate": 90})
+        assert "   :estimate: 1h30m" in result
+        assert "   :estimate: 90" not in result
+
+    def test_update_insert_new_emits_compact_estimate(self):
+        block = ".. doto:: X\n   :id: T-1\n   :status: open\n"
+        result = _update_directive_content(block, {"estimate": 240})
+        assert "   :estimate: 4h" in result
 
 
 class TestUpdateDoesNotCorruptDirective:

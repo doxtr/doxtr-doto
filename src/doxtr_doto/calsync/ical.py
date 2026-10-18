@@ -15,7 +15,8 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
-from doxtr_doto.calsync.model import CalendarEvent, EventKind
+from doxtr_doto.calsync.model import CalendarEvent, EventKind, RemoteEvent, timed_duration_minutes
+from doxtr_doto.date_utils import DotoDate
 
 _MISSING_MSG = (
     "Calendar sync requires the 'icalendar' package. Install the calendar extra: "
@@ -116,6 +117,77 @@ def content_hash(event: CalendarEvent) -> str:
         event.due.isoformat() if event.due else "",
         event.status or "",
         ",".join(sorted(event.categories)),
+    ]
+    payload = "\x1f".join(parts).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def remote_content_hash(event: RemoteEvent) -> str:
+    """Compute a stable content hash of a :class:`RemoteEvent` (inbound).
+
+    This is the pull-side counterpart to :func:`content_hash`. It hashes the
+    inbound-salient fields -- the ones the pull/merge planner maps onto a task
+    (summary, description, the resolved naive-local due, the all-day flag, and
+    for a timed event its duration in minutes) -- so re-reading an unchanged
+    remote item yields the same hash and a pull is idempotent, while a changed
+    **end time** (which maps onto the task ``estimate``) is detected. Volatile
+    fields (etag, remote id) are excluded.
+
+    Args:
+        event: The remote item to hash.
+
+    Returns:
+        A 16-char hex digest.
+    """
+    duration = event.inbound_estimate_minutes()
+    parts = [
+        event.summary,
+        event.description,
+        event.inbound_due() or "",
+        "1" if event.all_day else "0",
+        str(duration) if duration is not None else "",
+    ]
+    payload = "\x1f".join(parts).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def inbound_hash_of_pushed(event: CalendarEvent) -> str:
+    """Inbound-equivalent hash of an event doto just pushed.
+
+    This is the two-way conflict baseline: it hashes the *same salient fields*
+    :func:`remote_content_hash` uses, computed from the outbound
+    :class:`CalendarEvent` doto pushed, so that when the item is later read back
+    unchanged from the server its :func:`remote_content_hash` compares *equal*.
+    No spurious remote-change is then reported for a routine local-only edit.
+
+    The fields mirror :func:`remote_content_hash` exactly -- ``summary``,
+    ``description`` (verbatim, including the pushed ``[doto:...]`` marker, since
+    the server stores and returns it), the resolved naive-local inbound due
+    (``due`` for a TODO, else ``start``), the all-day flag, and the timed-event
+    duration in minutes -- so the two hashes line up field-for-field.
+
+    Args:
+        event: The event doto pushed (create/update).
+
+    Returns:
+        A 16-char hex digest comparable to :func:`remote_content_hash`.
+    """
+    anchor = event.due or event.start
+    if anchor is None:
+        inbound_due = ""
+    elif event.all_day:
+        inbound_due = anchor.date().isoformat()
+    else:
+        inbound_due = DotoDate(anchor.date(), anchor.time()).isoformat()
+    # Timed-event duration in minutes via the shared helper (mirrors
+    # RemoteEvent.inbound_estimate_minutes so a read-back compares equal).
+    duration = timed_duration_minutes(event.all_day, event.start, event.end)
+    parts = [
+        event.summary,
+        event.description,
+        inbound_due,
+        "1" if event.all_day else "0",
+        str(duration) if duration is not None else "",
     ]
     payload = "\x1f".join(parts).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]

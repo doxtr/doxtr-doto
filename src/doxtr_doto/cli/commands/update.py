@@ -27,23 +27,19 @@ if TYPE_CHECKING:
 def _is_task_overdue(task: dict[str, Any]) -> bool:
     """Check if a task is overdue.
 
+    Thin wrapper over :func:`doxtr_doto.date_utils.task_is_overdue`, the single
+    source of truth for the "past due and not done" rule, kept so the
+    ``--filter-overdue`` call site reads clearly.
+
     Args:
         task: Task data dictionary.
 
     Returns:
         True if task has a due date in the past and is not done.
     """
-    due = task.get("due")
-    if not due:
-        return False
-    status = task.get("status", "open")
-    if status == "done":
-        return False
-    # Route through date_utils so a time-bearing due (``YYYY-MM-DDTHH:MM``)
-    # parses and compares correctly instead of crashing date.fromisoformat.
-    from doxtr_doto.date_utils import is_overdue as _is_overdue
+    from doxtr_doto.date_utils import task_is_overdue
 
-    return _is_overdue(due)
+    return task_is_overdue(task)
 
 
 def _build_updates(
@@ -54,13 +50,15 @@ def _build_updates(
     status: str | None,
     due: str | None,
     clear_due: bool,
-    add_tags: str | None,
-    remove_tags: str | None,
-    depends_on: str | None,
-    add_depends: str | None,
-    remove_depends: str | None,
-    body: str | None,
-    edit: bool,
+    estimate: str | None = None,
+    clear_estimate: bool = False,
+    add_tags: str | None = None,
+    remove_tags: str | None = None,
+    depends_on: str | None = None,
+    add_depends: str | None = None,
+    remove_depends: str | None = None,
+    body: str | None = None,
+    edit: bool = False,
     raci: str | None = None,
 ) -> dict[str, Any]:
     """Build the updates dictionary for a task.
@@ -73,6 +71,8 @@ def _build_updates(
         status: New status or None.
         due: New due date or None.
         clear_due: Whether to clear the due date.
+        estimate: New time estimate (duration string) or None.
+        clear_estimate: Whether to clear the time estimate.
         add_tags: Tags to add (comma-separated) or None.
         remove_tags: Tags to remove (comma-separated) or None.
         depends_on: Dependencies to set (comma-separated) or None.
@@ -103,6 +103,19 @@ def _build_updates(
         updates["due"] = None
     elif due is not None:
         updates["due"] = parse_relative_date(due)
+
+    if clear_estimate:
+        updates["estimate"] = None
+    elif estimate is not None:
+        from doxtr_doto.date_utils import parse_duration
+
+        # ``estimate`` is a Click string option, so ``parse_duration`` can only
+        # raise ``ValueError`` here (``TypeError`` is reserved for non-string,
+        # non-numeric inputs, which the CLI never produces).
+        try:
+            updates["estimate"] = parse_duration(estimate)
+        except ValueError as err:
+            raise click.BadParameter(str(err), param_hint="--estimate") from err
 
     # Handle tags
     if add_tags or remove_tags:
@@ -179,6 +192,11 @@ def _build_updates(
     help="New due date (YYYY-MM-DD or relative: +7d, friday), optional time: 'friday 16:00'.",
 )
 @click.option("--clear-due", is_flag=True, help="Clear the due date.")
+@click.option(
+    "--estimate",
+    help="New time estimate (e.g. '5m', '90m', '4h', '1h30m', or a bare number of minutes).",
+)
+@click.option("--clear-estimate", is_flag=True, help="Clear the time estimate.")
 @click.option("--add-tags", shell_complete=complete_tag, help="Tags to add (comma-separated).")
 @click.option(
     "--remove-tags", shell_complete=complete_tag, help="Tags to remove (comma-separated)."
@@ -257,6 +275,8 @@ def update(
     status: str | None,
     due: str | None,
     clear_due: bool,
+    estimate: str | None,
+    clear_estimate: bool,
     add_tags: str | None,
     remove_tags: str | None,
     depends_on: str | None,
@@ -329,6 +349,8 @@ def update(
             status=status,
             due=due,
             clear_due=clear_due,
+            estimate=estimate,
+            clear_estimate=clear_estimate,
             add_tags=add_tags,
             remove_tags=remove_tags,
             depends_on=depends_on,
@@ -408,6 +430,8 @@ def update(
         status=status,
         due=due,
         clear_due=clear_due,
+        estimate=estimate,
+        clear_estimate=clear_estimate,
         add_tags=add_tags,
         remove_tags=remove_tags,
         depends_on=depends_on,
@@ -462,6 +486,8 @@ def update(
             status=status,
             due=due,
             clear_due=clear_due,
+            estimate=estimate,
+            clear_estimate=clear_estimate,
             add_tags=add_tags,
             remove_tags=remove_tags,
             depends_on=depends_on,
@@ -472,6 +498,16 @@ def update(
             raci=raci,
         )
         if updates:
+            if "depends_on" in updates:
+                from doxtr_doto.cli.id_resolver import cross_repo_deps
+
+                offending = cross_repo_deps(ctx, store, list(updates["depends_on"]))
+                if offending:
+                    raise click.ClickException(
+                        "Cross-repo dependencies are not supported: "
+                        f"{', '.join(offending)}. A dependency must live in the "
+                        "same repository as the task."
+                    )
             store.update_task(tid, updates)
             updated_ids.append(tid)
 
@@ -512,6 +548,8 @@ def _update_single_task(
     status: str | None,
     due: str | None,
     clear_due: bool,
+    estimate: str | None,
+    clear_estimate: bool,
     add_tags: str | None,
     remove_tags: str | None,
     depends_on: str | None,
@@ -545,6 +583,8 @@ def _update_single_task(
         status=status,
         due=due,
         clear_due=clear_due,
+        estimate=estimate,
+        clear_estimate=clear_estimate,
         add_tags=add_tags,
         remove_tags=remove_tags,
         depends_on=depends_on,
@@ -558,6 +598,19 @@ def _update_single_task(
     # Check if any updates
     if not updates:
         raise click.UsageError("No updates specified.")
+
+    # Reject cross-repo dependencies (see cross_repo_deps): a dependency must
+    # live in the same repository as the task, mirroring the parent link.
+    if "depends_on" in updates:
+        from doxtr_doto.cli.id_resolver import cross_repo_deps
+
+        offending = cross_repo_deps(ctx, store, list(updates["depends_on"]))
+        if offending:
+            raise click.ClickException(
+                "Cross-repo dependencies are not supported: "
+                f"{', '.join(offending)}. A dependency must live in the same "
+                "repository as the task."
+            )
 
     # Apply updates
     store.update_task(local_id, updates)

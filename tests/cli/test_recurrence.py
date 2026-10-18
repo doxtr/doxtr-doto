@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, time
 
 import pytest
 
@@ -16,9 +16,12 @@ from doxtr_doto.cli.recurrence import (
     _days_in_month,
     _nth_weekday_of_month,
     _ordinal_suffix,
+    build_occurrence_due,
+    build_series_task_data,
     format_date_for_title,
     generate_occurrences,
     parse_recurrence,
+    render_series_title,
 )
 
 
@@ -531,6 +534,21 @@ class TestFormatDateForTitle:
         assert "05" not in result or " 5" in result
 
 
+class TestRenderSeriesTitle:
+    """Tests for render_series_title (shared by add + series build)."""
+
+    def test_templated_title_substitutes_date(self):
+        """A ``{date}`` placeholder is replaced with the formatted date."""
+        result = render_series_title("Weekly review {date}", date(2025, 8, 7))
+        assert result == f"Weekly review {format_date_for_title(date(2025, 8, 7))}"
+        assert "{date}" not in result
+
+    def test_non_templated_title_unchanged(self):
+        """A title without ``{date}`` is returned verbatim."""
+        result = render_series_title("Standup", date(2025, 8, 7))
+        assert result == "Standup"
+
+
 class TestWeekdayConstants:
     """Tests for weekday constants."""
 
@@ -544,3 +562,160 @@ class TestWeekdayConstants:
         """WEEKDAY_NAMES is inverse of WEEKDAYS."""
         for name, num in WEEKDAYS.items():
             assert WEEKDAY_NAMES[num] == name
+
+
+class TestParseRecurrenceTimeDuration:
+    """Tests for the optional ``at <time>`` / ``for <duration>`` suffixes."""
+
+    def test_at_time_only(self):
+        """A trailing ``at HH:MM`` sets start_time, leaving duration unset."""
+        pattern = parse_recurrence("every monday at 16:00")
+        assert pattern.type == RecurrenceType.WEEKLY
+        assert pattern.weekday == 0
+        assert pattern.start_time == time(16, 0)
+        assert pattern.duration_minutes is None
+
+    def test_for_duration_only(self):
+        """A trailing ``for <duration>`` sets duration, leaving time unset."""
+        pattern = parse_recurrence("every day for 2h")
+        assert pattern.type == RecurrenceType.DAILY
+        assert pattern.start_time is None
+        assert pattern.duration_minutes == 120
+
+    def test_at_time_and_for_duration(self):
+        """Both ``at`` and ``for`` (time before duration) are parsed."""
+        pattern = parse_recurrence("every 2 weeks on monday at 16:00 for 2h")
+        assert pattern.type == RecurrenceType.WEEKLY
+        assert pattern.interval == 2
+        assert pattern.weekday == 0
+        assert pattern.start_time == time(16, 0)
+        assert pattern.duration_minutes == 120
+
+    def test_time_shorthand_and_seconds(self):
+        """The ``HHh`` shorthand and ``HH:MM:SS`` forms parse for ``at``."""
+        assert parse_recurrence("every day at 16h").start_time == time(16, 0)
+        assert parse_recurrence("every day at 16:00:31").start_time == time(16, 0, 31)
+
+    def test_duration_compact_forms(self):
+        """The compact duration forms parse for ``for``."""
+        assert parse_recurrence("every day for 90m").duration_minutes == 90
+        assert parse_recurrence("every day for 1h30m").duration_minutes == 90
+
+    def test_month_on_day_not_confused_by_split(self):
+        """``every month on 15`` (day-of-month) still parses with a suffix."""
+        pattern = parse_recurrence("every month on 15 at 09:00")
+        assert pattern.type == RecurrenceType.MONTHLY
+        assert pattern.day_of_month == 15
+        assert pattern.start_time == time(9, 0)
+
+    def test_plain_pattern_has_no_time_or_duration(self):
+        """A pattern without ``at`` / ``for`` leaves both fields None."""
+        pattern = parse_recurrence("every 2 weeks on monday")
+        assert pattern.start_time is None
+        assert pattern.duration_minutes is None
+
+    def test_invalid_time_raises(self):
+        """A malformed ``at`` token raises ValueError."""
+        with pytest.raises(ValueError):
+            parse_recurrence("every day at 99:99")
+
+    def test_invalid_duration_raises(self):
+        """A malformed ``for`` token raises ValueError."""
+        with pytest.raises(ValueError):
+            parse_recurrence("every day for banana")
+
+
+class TestRecurrencePatternSerializationTimeDuration:
+    """Round-trip + describe tests for the time/duration fields."""
+
+    def test_to_dict_includes_time_and_duration(self):
+        """to_dict serializes start_time as HH:MM and duration as int."""
+        pattern = parse_recurrence("every monday at 16:00 for 2h")
+        data = pattern.to_dict()
+        assert data["start_time"] == "16:00"
+        assert data["duration_minutes"] == 120
+
+    def test_to_dict_none_when_unset(self):
+        """to_dict stores None for an unset time/duration."""
+        data = parse_recurrence("every monday").to_dict()
+        assert data["start_time"] is None
+        assert data["duration_minutes"] is None
+
+    def test_round_trip(self):
+        """from_dict(to_dict(p)) preserves time + duration."""
+        pattern = parse_recurrence("every 2 weeks on monday at 16:00:31 for 90m")
+        restored = RecurrencePattern.from_dict(pattern.to_dict())
+        assert restored.start_time == time(16, 0, 31)
+        assert restored.duration_minutes == 90
+        assert restored.weekday == 0
+        assert restored.interval == 2
+
+    def test_from_dict_backward_compatible(self):
+        """A legacy pattern dict (no time/duration keys) deserializes to None."""
+        legacy = {
+            "type": "weekly",
+            "interval": 1,
+            "weekday": 0,
+            "day_of_month": None,
+            "weekday_position": None,
+        }
+        restored = RecurrencePattern.from_dict(legacy)
+        assert restored.start_time is None
+        assert restored.duration_minutes is None
+
+    def test_describe_appends_time_and_duration(self):
+        """describe() appends ' at HH:MM' and ' for <duration>'."""
+        pattern = parse_recurrence("every 2 weeks on monday at 16:00 for 2h")
+        assert pattern.describe() == "every 2 weeks on monday at 16:00 for 2h"
+
+    def test_describe_time_only(self):
+        """describe() appends only the time when no duration is set."""
+        assert parse_recurrence("every monday at 09:00").describe() == "every monday at 09:00"
+
+    def test_describe_plain_unchanged(self):
+        """describe() is unchanged for a plain calendar pattern."""
+        assert parse_recurrence("every 2 weeks on monday").describe() == ("every 2 weeks on monday")
+
+
+class TestBuildOccurrenceDue:
+    """Tests for build_occurrence_due."""
+
+    def test_date_only_when_no_time(self):
+        """A pattern without start_time yields a date-only due."""
+        pattern = parse_recurrence("every monday")
+        assert build_occurrence_due(pattern, date(2026, 11, 2)) == "2026-11-02"
+
+    def test_time_bearing_when_start_time_set(self):
+        """A pattern with start_time yields a YYYY-MM-DDTHH:MM due."""
+        pattern = parse_recurrence("every monday at 16:00")
+        assert build_occurrence_due(pattern, date(2026, 11, 2)) == "2026-11-02T16:00"
+
+
+class TestBuildSeriesTaskData:
+    """Tests for build_series_task_data (shared by add + series extend)."""
+
+    def test_applies_time_and_estimate(self):
+        """The task gets a time-bearing due and estimate from the pattern."""
+        pattern = parse_recurrence("every monday at 16:00 for 2h")
+        task = build_series_task_data(
+            pattern, date(2026, 11, 2), "Sync", "SER-001", {"priority": "high"}
+        )
+        assert task["due"] == "2026-11-02T16:00"
+        assert task["estimate"] == 120
+        assert task["series_id"] == "SER-001"
+        assert task["priority"] == "high"
+        assert task["title"] == "Sync"
+
+    def test_no_estimate_when_no_duration(self):
+        """A plain calendar pattern does not set an estimate."""
+        pattern = parse_recurrence("every monday")
+        task = build_series_task_data(pattern, date(2026, 11, 2), "Sync", "SER-001", {})
+        assert "estimate" not in task
+        assert task["due"] == "2026-11-02"
+
+    def test_date_template_in_title(self):
+        """{date} in the title template is replaced with the occurrence date."""
+        pattern = parse_recurrence("every monday")
+        task = build_series_task_data(pattern, date(2026, 11, 2), "Report {date}", "SER-001", {})
+        assert "{date}" not in task["title"]
+        assert task["title"].startswith("Report")

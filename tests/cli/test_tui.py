@@ -307,6 +307,120 @@ def multi_lane_ctx(multi_lane_store_file, env):
     )
 
 
+@pytest.fixture
+def parent_store_file(tmp_path):
+    """A JSON store with three open tasks for the set-parent (``e P``) tests.
+
+    Three tasks (T-001/T-002/T-003) so a multi-selection of two children still
+    leaves at least one candidate parent after the children are excluded.
+    """
+    store_path = tmp_path / "repoParent" / ".doto" / "tasks.json"
+    store_path.parent.mkdir(parents=True)
+    data_dict = {
+        "version": 5,
+        "updated": "2024-01-01T00:00:00",
+        "tasks": {
+            "T-001": {"title": "First task", "status": "open", "worklogs": []},
+            "T-002": {"title": "Second task", "status": "open", "worklogs": []},
+            "T-003": {"title": "Third task", "status": "open", "worklogs": []},
+        },
+        "series": {},
+    }
+    store_path.write_text(json.dumps(data_dict))
+    return store_path
+
+
+@pytest.fixture
+def parent_ctx(parent_store_file, env):
+    """A DotoContext wired to the three-task set-parent store + isolated state."""
+    config = load_config(json_path=parent_store_file)
+    return DotoContext(
+        config=config,
+        store=JsonTaskStore(config.get_json_path()),
+        formatter=get_formatter(config),
+        global_store=GlobalStateStore(),
+    )
+
+
+@pytest.fixture
+def series_store_file(tmp_path):
+    """A JSON store with a 3-occurrence series plus a standalone task.
+
+    The three occurrences share a ``series_id`` (``SER-1``) and carry ascending
+    ``due`` dates, but their store ids are deliberately ordered so that id
+    order does NOT match due-date (occurrence) order: ``S-003`` is the
+    *earliest* meeting and ``S-001`` the *latest*. This lets the series-
+    navigation tests prove the jump follows occurrence (due-date) order rather
+    than id / insertion order. A standalone ``T-100`` (no ``series_id``) covers
+    the non-series no-op path.
+    """
+    store_path = tmp_path / "repoSeries" / ".doto" / "tasks.json"
+    store_path.parent.mkdir(parents=True)
+    data_dict = {
+        "version": 5,
+        "updated": "2024-01-01T00:00:00",
+        "tasks": {
+            "S-003": {
+                "title": "Weekly sync (first)",
+                "status": "open",
+                "priority": "medium",
+                "tags": [],
+                "worklogs": [],
+                "series_id": "SER-1",
+                "due": "2026-01-05",
+            },
+            "S-002": {
+                "title": "Weekly sync (second)",
+                "status": "open",
+                "priority": "medium",
+                "tags": [],
+                "worklogs": [],
+                "series_id": "SER-1",
+                "due": "2026-01-12",
+            },
+            "S-001": {
+                "title": "Weekly sync (third)",
+                "status": "open",
+                "priority": "medium",
+                "tags": [],
+                "worklogs": [],
+                "series_id": "SER-1",
+                "due": "2026-01-19",
+            },
+            "T-100": {
+                "title": "Standalone task",
+                "status": "open",
+                "priority": "low",
+                "tags": [],
+                "worklogs": [],
+            },
+        },
+        "series": {
+            "SER-1": {
+                "title_template": "Weekly sync",
+                "pattern": {"frequency": "weekly", "interval": 1},
+                "start_date": "2026-01-05",
+                "end_date": "2026-01-19",
+                "task_ids": ["S-003", "S-002", "S-001"],
+            }
+        },
+    }
+    store_path.write_text(json.dumps(data_dict))
+    return store_path
+
+
+@pytest.fixture
+def series_ctx(series_store_file, env):
+    """A DotoContext wired to the 3-occurrence series store and isolated state."""
+    config = load_config(json_path=series_store_file)
+    return DotoContext(
+        config=config,
+        store=JsonTaskStore(config.get_json_path()),
+        formatter=get_formatter(config),
+        global_store=GlobalStateStore(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Long-value fixtures (layout / overflow stress inputs)
 #
@@ -1120,6 +1234,171 @@ class TestActions:
         assert actions.find_task(ctx, "T-001")["title"] == "First task"
         assert actions.find_task(ctx, "T-999") is None
 
+    def test_set_parent_same_repo_ok(self, ctx, store_file):
+        """A valid parent in the SAME repo returns OK and sets the field."""
+        from doxtr_doto.enums import SetParentResult
+
+        result = actions.set_parent(ctx, "T-001", "T-002")
+        assert result == SetParentResult.OK
+        assert result == "ok"
+        assert _load(store_file)["tasks"]["T-001"]["parent"] == "T-002"
+
+    def test_set_parent_clear_removes_parent(self, ctx, store_file):
+        """The CLEAR_PARENT sentinel removes an existing parent link."""
+        from doxtr_doto.enums import SetParentResult
+
+        # Seed a parent, then clear it with the empty-string sentinel.
+        assert actions.set_parent(ctx, "T-001", "T-002") == SetParentResult.OK
+        assert _load(store_file)["tasks"]["T-001"]["parent"] == "T-002"
+        result = actions.set_parent(ctx, "T-001", actions.CLEAR_PARENT)
+        assert result == SetParentResult.CLEARED
+        assert result == "cleared"
+        # The parent field is now cleared; the former parent is untouched.
+        assert _load(store_file)["tasks"]["T-001"]["parent"] is None
+        assert _load(store_file)["tasks"]["T-002"].get("parent") is None
+
+    def test_set_parent_clear_on_unparented_is_idempotent(self, ctx, store_file):
+        """Clearing a task that has no parent still returns CLEARED (no error)."""
+        from doxtr_doto.enums import SetParentResult
+
+        assert _load(store_file)["tasks"]["T-001"].get("parent") is None
+        assert actions.set_parent(ctx, "T-001", actions.CLEAR_PARENT) == SetParentResult.CLEARED
+        assert _load(store_file)["tasks"]["T-001"]["parent"] is None
+
+    def test_set_parent_clear_unresolvable_child_not_found(self, ctx, store_file):
+        """Clearing a bogus child ref returns NOT_FOUND (no clear happens)."""
+        from doxtr_doto.enums import SetParentResult
+
+        assert actions.set_parent(ctx, "T-999", actions.CLEAR_PARENT) == SetParentResult.NOT_FOUND
+
+    def test_set_parent_unresolvable_ref_not_found(self, ctx, store_file):
+        """A bogus child or parent ref returns NOT_FOUND and writes nothing."""
+        from doxtr_doto.enums import SetParentResult
+
+        assert actions.set_parent(ctx, "T-999", "T-002") == SetParentResult.NOT_FOUND
+        assert actions.set_parent(ctx, "T-001", "T-999") == SetParentResult.NOT_FOUND
+        # No parent link was written on either real task.
+        tasks = _load(store_file)["tasks"]
+        assert tasks["T-001"].get("parent") is None
+        assert tasks["T-002"].get("parent") is None
+
+    def test_set_parent_cross_repo_rejected(self, tmp_path, env, store_file):
+        """A parent in a DIFFERENT repo returns CROSS_REPO and writes nothing."""
+        from doxtr_doto.cli.repo_registry import RepoRegistry
+        from doxtr_doto.enums import SetParentResult
+
+        # Sibling repoB (with task B-001) registered alongside the ctx repo.
+        other_root = tmp_path / "repoB"
+        other_store = other_root / ".doto" / "tasks.json"
+        other_store.parent.mkdir(parents=True)
+        other_store.write_text(
+            json.dumps(
+                {
+                    "version": 5,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {"B-001": {"title": "Other", "status": "open", "worklogs": []}},
+                    "series": {},
+                }
+            )
+        )
+        config = load_config(json_path=store_file)
+        ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        RepoRegistry(ctx.global_store).rescan(tmp_path)
+
+        result = actions.set_parent(ctx, "T-001", "repoB#B-001")
+        assert result == SetParentResult.CROSS_REPO
+        assert _load(store_file)["tasks"]["T-001"].get("parent") is None
+
+    def _two_repo_ctx(self, tmp_path, store_file):
+        """Build a ctx for the current repo with a sibling ``repoB`` registered.
+
+        Mirrors :meth:`test_set_parent_cross_repo_rejected`'s fixture so the
+        cross-repo *dependency* guard can be exercised the same way.
+        """
+        from doxtr_doto.cli.repo_registry import RepoRegistry
+
+        other_store = tmp_path / "repoB" / ".doto" / "tasks.json"
+        other_store.parent.mkdir(parents=True)
+        other_store.write_text(
+            json.dumps(
+                {
+                    "version": 5,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {"B-001": {"title": "Other", "status": "open", "worklogs": []}},
+                    "series": {},
+                }
+            )
+        )
+        config = load_config(json_path=store_file)
+        ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        RepoRegistry(ctx.global_store).rescan(tmp_path)
+        return ctx
+
+    def test_update_cross_repo_dependency_rejected(self, tmp_path, env, store_file):
+        """A ``depends_on`` entry in a DIFFERENT repo is rejected on update."""
+        from doxtr_doto.exceptions import DotoValidationError
+
+        ctx = self._two_repo_ctx(tmp_path, store_file)
+        with pytest.raises(DotoValidationError, match="Cross-repo dependencies"):
+            actions.update_task(ctx, "T-001", {"depends_on": ["repoB#B-001"]})
+        # Nothing was written.
+        assert _load(store_file)["tasks"]["T-001"].get("depends_on") in (None, [])
+
+    def test_update_same_repo_dependency_ok(self, tmp_path, env, store_file):
+        """A bare / same-repo ``depends_on`` entry is accepted on update."""
+        ctx = self._two_repo_ctx(tmp_path, store_file)
+        assert actions.update_task(ctx, "T-001", {"depends_on": ["T-002"]}) is True
+        assert _load(store_file)["tasks"]["T-001"]["depends_on"] == ["T-002"]
+
+    def test_add_cross_repo_dependency_rejected(self, tmp_path, env, store_file):
+        """A ``depends_on`` entry in a DIFFERENT repo is rejected on add."""
+        from doxtr_doto.exceptions import DotoValidationError
+
+        ctx = self._two_repo_ctx(tmp_path, store_file)
+        before = set(_load(store_file)["tasks"].keys())
+        with pytest.raises(DotoValidationError, match="Cross-repo dependencies"):
+            actions.add_task(ctx, "New task", depends_on="repoB#B-001")
+        # The task was not persisted (the guard runs before the store write).
+        assert set(_load(store_file)["tasks"].keys()) == before
+
+    def test_cross_repo_deps_helper(self, tmp_path, env, store_file):
+        """The pure cross_repo_deps helper flags only the out-of-repo refs."""
+        from doxtr_doto.cli.id_resolver import cross_repo_deps
+
+        ctx = self._two_repo_ctx(tmp_path, store_file)
+        # Bare ids and this repo's own namespaced ref are intra-repo; only the
+        # repoB ref and an unknown repo are flagged.
+        deps = ["T-002", "repoB#B-001", "ghost-repo#X-1"]
+        offending = cross_repo_deps(ctx, ctx.store, deps)
+        assert offending == ["repoB#B-001", "ghost-repo#X-1"]
+
+    def test_set_parent_self_is_cycle(self, ctx, store_file):
+        """Parenting a task to itself returns CYCLE and writes nothing."""
+        from doxtr_doto.enums import SetParentResult
+
+        assert actions.set_parent(ctx, "T-001", "T-001") == SetParentResult.CYCLE
+        assert _load(store_file)["tasks"]["T-001"].get("parent") is None
+
+    def test_set_parent_indirect_cycle_rejected(self, ctx, store_file):
+        """Seed A.parent=B, then set B.parent=A -> CYCLE (no write)."""
+        from doxtr_doto.enums import SetParentResult
+
+        # T-001's parent is T-002; now try to parent T-002 under T-001.
+        assert actions.set_parent(ctx, "T-001", "T-002") == SetParentResult.OK
+        assert actions.set_parent(ctx, "T-002", "T-001") == SetParentResult.CYCLE
+        # The second (rejected) assignment left T-002 unparented.
+        assert _load(store_file)["tasks"]["T-002"].get("parent") is None
+
     def test_rescan_repos(self, ctx, store_file):
         count = actions.rescan_repos(ctx, start_dir=store_file.parent.parent.parent)
         assert count >= 1
@@ -1208,6 +1487,60 @@ class TestEditDueParsing:
 
         with pytest.raises(ValueError, match="Invalid date"):
             EditTaskScreen.parse_due("not-a-date")
+
+
+class TestEditEstimateParsing:
+    """Unit tests for the edit dialog's estimate parsing (no rendering).
+
+    ``EditTaskScreen.parse_estimate`` reuses the exact ``doto update
+    --estimate`` / ``:estimate:`` directive parser
+    (:func:`doxtr_doto.date_utils.parse_duration`), so these assert the shared
+    compact-duration / clear / invalid behaviors without rendering the modal.
+    """
+
+    def test_compact_durations_resolve_to_minutes(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        assert EditTaskScreen.parse_estimate("90m") == 90
+        assert EditTaskScreen.parse_estimate("4h") == 240
+        assert EditTaskScreen.parse_estimate("1h30m") == 90
+
+    def test_bare_integer_is_minutes(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        assert EditTaskScreen.parse_estimate("45") == 45
+
+    def test_empty_clears_estimate(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        assert EditTaskScreen.parse_estimate("") is None
+        assert EditTaskScreen.parse_estimate("   ") is None
+
+    def test_matches_cli_parser(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+        from doxtr_doto.date_utils import parse_duration
+
+        # parse_estimate must reuse the same parser, so the two agree exactly.
+        assert EditTaskScreen.parse_estimate("1h30m") == parse_duration("1h30m")
+
+    def test_invalid_estimate_raises_valueerror(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        with pytest.raises(ValueError, match="Invalid duration"):
+            EditTaskScreen.parse_estimate("banana")
+
+    def test_build_fields_renders_stored_estimate(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        # Stored minutes round-trip back to the compact display form.
+        fields = EditTaskScreen.build_fields({"id": "T-1", "estimate": 90})
+        assert fields["estimate"] == "1h30m"
+
+    def test_build_fields_blank_estimate_when_unset(self):
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        fields = EditTaskScreen.build_fields({"id": "T-1"})
+        assert fields["estimate"] == ""
 
 
 class TestFilterOptions:
@@ -1342,6 +1675,46 @@ class TestAddTaskScreenRepoResolution:
         screen = AddTaskScreen(repos=repos, current=current)
         assert screen.repos is repos
         assert screen.current is current
+
+
+class TestAddSeriesScreenRepoResolution:
+    """Unit tests for :meth:`AddSeriesScreen.repo_for_value` (no rendering).
+
+    The screen is constructed directly (not through a running app) so the pure
+    value->repo mapping is exercised without the Pilot harness, mirroring
+    :class:`TestAddTaskScreenRepoResolution`.
+    """
+
+    def test_unknown_value_falls_back_to_current(self):
+        from doxtr_doto.cli.repo_registry import DiscoveredRepo
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        current = DiscoveredRepo(name="repoA", path="/tmp/repoA")
+        repos = [DiscoveredRepo(name="repoB", path="/tmp/repoB")]
+        screen = AddSeriesScreen(repos, current)
+        assert screen.repo_for_value("/nonexistent/path") is current
+
+    def test_known_value_resolves_to_matching_repo(self):
+        from doxtr_doto.cli.repo_registry import DiscoveredRepo
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        current = DiscoveredRepo(name="repoA", path="/tmp/repoA")
+        repo_b = DiscoveredRepo(name="repoB", path="/tmp/repoB")
+        screen = AddSeriesScreen([repo_b], current)
+        assert screen.repo_for_value("/tmp/repoB") is repo_b
+        assert screen.repo_for_value("/tmp/repoA") is current
+
+    def test_repo_options_lists_current_first(self):
+        from doxtr_doto.cli.repo_registry import DiscoveredRepo
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        current = DiscoveredRepo(name="repoA", path="/tmp/repoA")
+        repo_b = DiscoveredRepo(name="repoB", path="/tmp/repoB")
+        screen = AddSeriesScreen([repo_b], current)
+        options = screen.repo_options()
+        # Current repo is listed first, labelled (current).
+        assert options[0][1] == "/tmp/repoA"
+        assert "(current)" in options[0][0]
 
 
 class TestKillRing:
@@ -1521,7 +1894,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 title_input = app.screen.query_one("#edit-title-input", Input)
@@ -1543,7 +1916,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 assert app.screen.query_one("#edit-title-input", Input).value == "First task"
@@ -1563,7 +1936,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 # Clear assignee, set unsorted/duplicate tags, flip status.
@@ -1589,7 +1962,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 await pilot.press("escape")
@@ -1609,7 +1982,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 # Due field starts empty (T-001 has no due date).
@@ -1623,6 +1996,62 @@ class TestApp:
         # Persisted to the JSON store via the same path as ``doto update``.
         assert _load(store_file)["tasks"]["T-001"]["due"] == "2099-01-15"
 
+    def test_edit_modal_sets_estimate(self, ctx, store_file):
+        from textual.widgets import Input
+
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("e", "e")  # edit cursor T-001
+                await pilot.pause()
+                assert isinstance(app.screen, EditTaskScreen)
+                # Estimate field starts empty (T-001 has no estimate).
+                assert app.screen.query_one("#edit-estimate", Input).value == ""
+                app.screen.query_one("#edit-estimate", Input).value = "1h30m"
+                app.screen._submit()
+                await pilot.pause()
+                assert not isinstance(app.screen, EditTaskScreen)
+
+        _run(body())
+        # Stored canonically as whole minutes via the same path as
+        # ``doto update``.
+        assert _load(store_file)["tasks"]["T-001"]["estimate"] == 90
+
+    def test_edit_modal_clears_estimate(self, ctx, store_file):
+        from textual.widgets import Input
+
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        # Seed T-001 with an estimate so blanking the field must clear it
+        # through the collect_updates "new != old" gate (not just set it).
+        ctx.store.update_task("T-001", {"estimate": 90})
+        ctx.store.save()
+        assert _load(store_file)["tasks"]["T-001"]["estimate"] == 90
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("e", "e")  # edit cursor T-001
+                await pilot.pause()
+                assert isinstance(app.screen, EditTaskScreen)
+                # Pre-populated from the stored estimate in compact form.
+                assert app.screen.query_one("#edit-estimate", Input).value == "1h30m"
+                # Blank the field to clear the estimate.
+                app.screen.query_one("#edit-estimate", Input).value = ""
+                app.screen._submit()
+                await pilot.pause()
+                assert not isinstance(app.screen, EditTaskScreen)
+
+        _run(body())
+        # Cleared through the same path as ``doto update --clear-estimate``.
+        assert _load(store_file)["tasks"]["T-001"]["estimate"] is None
+
     def test_edit_modal_relative_due_date(self, ctx, store_file):
         from textual.widgets import Input
 
@@ -1633,7 +2062,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 app.screen.query_one("#edit-due", Input).value = "+7d"
                 app.screen._submit()
@@ -1653,7 +2082,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 app.screen.query_one("#edit-due", Input).value = "not-a-date"
@@ -1680,7 +2109,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 due = app.screen.query_one("#edit-due", Input)
                 assert due.value == "2099-01-15"  # pre-populated
@@ -1702,7 +2131,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 title_input = app.screen.query_one("#edit-title-input", Input)
@@ -1731,7 +2160,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 title_input = app.screen.query_one("#edit-title-input", Input)
                 title_input.focus()
@@ -1760,7 +2189,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 title_input = app.screen.query_one("#edit-title-input", Input)
                 title_input.focus()
@@ -1788,7 +2217,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 title_input = app.screen.query_one("#edit-title-input", Input)
                 body_area = app.screen.query_one("#edit-body-input", TextArea)
@@ -1821,7 +2250,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 title_input = app.screen.query_one("#edit-title-input", Input)
                 body_area = app.screen.query_one("#edit-body-input", TextArea)
@@ -1854,7 +2283,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 tags_input = app.screen.query_one("#edit-tags", Input)
                 assignee_input = app.screen.query_one("#edit-assignee", Input)
@@ -1888,7 +2317,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 title_input = app.screen.query_one("#edit-title-input", Input)
                 body_area = app.screen.query_one("#edit-body-input", TextArea)
@@ -1936,7 +2365,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, _ThemedEditScreen)
                 # The dialog rendered the child theme's widget subclasses.
@@ -1965,7 +2394,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 # Body widget is a (scrolling, wrapping) TextArea.
@@ -1988,7 +2417,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 area = app.screen.query_one("#edit-body-input", TextArea)
@@ -2000,6 +2429,231 @@ class TestApp:
         _run(body())
         assert _load(store_file)["tasks"]["T-001"]["body"] == "line one\nline two"
 
+    def test_edit_body_quick_key_opens_and_persists(self, ctx, store_file):
+        """The ``n`` quick key opens the focused body editor and writes the body."""
+        from textual.widgets import TextArea
+
+        from doxtr_doto.cli.tui.app import EditBodyScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("n")  # edit body of cursor T-001
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                area = app.screen.query_one("#editbody-input", TextArea)
+                assert area.soft_wrap is True
+                area.text = "## Notes\n\nSome **markdown** notes."
+                app.screen._submit()
+                await pilot.pause()
+                assert not isinstance(app.screen, EditBodyScreen)
+
+        _run(body())
+        assert _load(store_file)["tasks"]["T-001"]["body"] == "## Notes\n\nSome **markdown** notes."
+
+    def test_edit_body_quick_key_prepopulates_existing_body(self, ctx, store_file):
+        """The body editor is pre-filled with the task's current body."""
+        from textual.widgets import TextArea
+
+        from doxtr_doto.cli.tui.app import EditBodyScreen
+
+        actions.update_task(ctx, "T-001", {"body": "existing note"})
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("n")
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                area = app.screen.query_one("#editbody-input", TextArea)
+                assert area.text == "existing note"
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_edit_body_quick_key_cancel_is_noop(self, ctx, store_file):
+        """Cancelling the body editor leaves the stored body untouched."""
+        from textual.widgets import TextArea
+
+        from doxtr_doto.cli.tui.app import EditBodyScreen
+
+        actions.update_task(ctx, "T-001", {"body": "keep me"})
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("n")
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                area = app.screen.query_one("#editbody-input", TextArea)
+                area.text = "discarded"
+                await pilot.press("escape")  # cancel
+                await pilot.pause()
+                assert not isinstance(app.screen, EditBodyScreen)
+
+        _run(body())
+        assert _load(store_file)["tasks"]["T-001"]["body"] == "keep me"
+
+    def test_edit_body_quick_key_can_clear_body(self, ctx, store_file):
+        """Submitting an empty body clears it (empty string is a valid value)."""
+        from textual.widgets import TextArea
+
+        from doxtr_doto.cli.tui.app import EditBodyScreen
+
+        actions.update_task(ctx, "T-001", {"body": "remove me"})
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("n")
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                area = app.screen.query_one("#editbody-input", TextArea)
+                area.text = ""
+                app.screen._submit()
+                await pilot.pause()
+
+        _run(body())
+        assert _load(store_file)["tasks"]["T-001"]["body"] == ""
+
+    def test_card_viewer_note_key_opens_body_editor(self, ctx, store_file):
+        """Pressing ``n`` in the card viewer opens the focused body editor."""
+        from textual.widgets import TextArea
+
+        from doxtr_doto.cli.tui.app import CardViewerScreen, EditBodyScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("v")  # list layout (Enter opens the card viewer)
+                await pilot.pause()
+                await pilot.press("enter")  # open card viewer on T-001
+                await pilot.pause()
+                assert isinstance(app.screen, CardViewerScreen)
+                await pilot.press("n")  # viewer -> body editor
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                area = app.screen.query_one("#editbody-input", TextArea)
+                area.text = "note from viewer"
+                app.screen._submit()
+                await pilot.pause()
+
+        _run(body())
+        assert _load(store_file)["tasks"]["T-001"]["body"] == "note from viewer"
+
+    def test_edit_body_modal_width_follows_config(self, ctx, store_file):
+        """The body editor width tracks the configured ``tui_modal_width_ratio``."""
+        from textual.containers import Vertical
+
+        from doxtr_doto.cli.tui.app import EditBodyScreen
+
+        actions.save_modal_width_ratio(ctx, "1/2")
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("n")
+                await pilot.pause()
+                assert isinstance(app.screen, EditBodyScreen)
+                modal = app.screen.query_one("#editbody-modal", Vertical)
+                # 1/2 of a 120-column terminal -> 60 columns (outer box).
+                assert modal.outer_size.width == 60
+                # Resizing the terminal re-sizes the open modal (1/2 of 200).
+                await pilot.resize_terminal(200, 40)
+                await pilot.pause()
+                assert modal.outer_size.width == 100
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_edit_task_modal_width_follows_config(self, ctx, store_file):
+        """The edit-task modal width tracks the configured ratio (3/4 default)."""
+        from textual.containers import Vertical
+
+        from doxtr_doto.cli.tui.app import EditTaskScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("e", "e")
+                await pilot.pause()
+                assert isinstance(app.screen, EditTaskScreen)
+                modal = app.screen.query_one("#edit-modal", Vertical)
+                # Default 3/4 of a 120-column terminal -> 90 columns (outer box).
+                assert modal.outer_size.width == 90
+                # Resizing the terminal re-sizes the open modal (3/4 of 160).
+                await pilot.resize_terminal(160, 40)
+                await pilot.pause()
+                assert modal.outer_size.width == 120
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_card_viewer_width_follows_config(self, ctx, store_file):
+        """The card viewer (``Enter``) width tracks the configured ratio."""
+        from textual.containers import Vertical
+
+        from doxtr_doto.cli.tui.app import CardViewerScreen
+
+        actions.save_modal_width_ratio(ctx, "1/2")
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("v")  # list layout (Enter opens the card viewer)
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, CardViewerScreen)
+                modal = app.screen.query_one("#viewer-modal", Vertical)
+                # 1/2 of a 120-column terminal -> 60 columns (outer box).
+                assert modal.outer_size.width == 60
+                # Resizing the terminal re-sizes the open viewer (1/2 of 200).
+                await pilot.resize_terminal(200, 40)
+                await pilot.pause()
+                assert modal.outer_size.width == 100
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_configure_modal_width_persists_and_applies(self, ctx, store_file):
+        """``c m`` configurator persists the ratio and applies it live."""
+        from textual.widgets import Input
+
+        from doxtr_doto.cli.tui.app import ModalWidthScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("c")
+                await pilot.press("m")
+                await pilot.pause()
+                assert isinstance(app.screen, ModalWidthScreen)
+                app.screen.query_one("#modalwidth-input", Input).value = "1/2"
+                app.screen.dismiss(app.screen.collect_ratio())
+                await pilot.pause()
+                assert app.modal_width_ratio == "1/2"
+
+        _run(body())
+        assert ctx.global_store.load().tui_modal_width_ratio == "1/2"
+
     def test_edit_modal_priority_type_to_select(self, ctx, store_file):
         from textual.widgets import Select
 
@@ -2010,7 +2664,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 priority = app.screen.query_one("#edit-priority", Select)
@@ -2035,7 +2689,7 @@ class TestApp:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("e")  # edit cursor T-001
+                await pilot.press("e", "e")  # edit cursor T-001
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 status = app.screen.query_one("#edit-status", FilterableSelect)
@@ -2199,6 +2853,7 @@ class TestApp:
             "assignee": "",
             "tags": "",
             "due": "",
+            "estimate": "",
             "body": "",
             "raci_responsible": "",
             "raci_accountable": "",
@@ -2459,6 +3114,484 @@ class TestApp:
 
         _run(body())
 
+    def test_add_modal_auto_selects_new_task_when_enabled(self, ctx, store_file):
+        """With auto-select on (default), the created task becomes selected."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        assert ctx.config.tui_auto_select_new_task is True
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Pre-condition: cursor starts on the first existing task.
+                assert app._current_selected_id() == "T-001"
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "Freshly added":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return app._current_selected_id()
+
+        selected = _run(body())
+        tasks = _load(store_file)["tasks"]
+        new_id = next(tid for tid, t in tasks.items() if t["title"] == "Freshly added")
+        assert selected == new_id
+
+    def test_add_modal_does_not_force_select_when_disabled(self, ctx, store_file):
+        """With auto-select off, the previous cursor selection is kept."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        ctx.config.tui_auto_select_new_task = False
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app._current_selected_id() == "T-001"
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "Not auto selected":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return app._current_selected_id()
+
+        selected = _run(body())
+        # The task was still created ...
+        tasks = _load(store_file)["tasks"]
+        new_id = next(tid for tid, t in tasks.items() if t["title"] == "Not auto selected")
+        # ... but the cursor was NOT force-moved to it; the id-preserving
+        # rebuild keeps the previous selection (T-001).
+        assert selected == "T-001"
+        assert selected != new_id
+
+    def test_add_modal_auto_selects_new_task_in_list_view(self, ctx, store_file):
+        """Auto-select also works in an alt-view (list) layout, not just TABLE."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("v")  # switch to the list layout
+                await pilot.pause()
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "List view added":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return app._current_selected_id()
+
+        selected = _run(body())
+        tasks = _load(store_file)["tasks"]
+        new_id = next(tid for tid, t in tasks.items() if t["title"] == "List view added")
+        assert selected == new_id
+
+    def test_add_series_modal_creates_series(self, ctx, store_file):
+        """Pressing ``r`` opens the add-series dialog and creates a series."""
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, AddSeriesScreen)
+                # Fill the form by setting the input values directly (the
+                # pattern field is multi-word so char-by-char typing is
+                # fiddly); this still exercises the real submit path.
+                app.screen.query_one("#add-series-title").value = "Important Sync Meeting"
+                app.screen.query_one("#add-series-pattern").value = "every 2 weeks on monday"
+                app.screen.query_one("#add-series-time").value = "16:00"
+                app.screen.query_one("#add-series-duration").value = "2h"
+                app.screen.query_one("#add-series-from").value = "2026-11-01"
+                app.screen.query_one("#add-series-until").value = "2027-10-10"
+                await pilot.pause()
+                app.screen.query_one("#add-series-save").focus()
+                await pilot.press("enter")
+                await pilot.pause()
+
+        _run(body())
+        data = _load(store_file)
+        assert len(data["series"]) == 1
+        series = next(iter(data["series"].values()))
+        assert series["pattern"]["start_time"] == "16:00"
+        assert series["pattern"]["duration_minutes"] == 120
+        assert series["start_date"] == "2026-11-01"
+        tasks = [t for t in data["tasks"].values() if t.get("series_id")]
+        assert tasks
+        for task in tasks:
+            assert task["due"].endswith("T16:00")
+            assert task["estimate"] == 120
+
+    def test_add_series_modal_invalid_keeps_open(self, ctx, store_file):
+        """An invalid form keeps the dialog open and creates no series."""
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, AddSeriesScreen)
+                # Missing pattern + until -> validation errors, stays open.
+                app.screen.query_one("#add-series-title").value = "X"
+                await pilot.pause()
+                app.screen.query_one("#add-series-save").focus()
+                await pilot.press("enter")
+                await pilot.pause()
+                return isinstance(app.screen, AddSeriesScreen)
+
+        still_open = _run(body())
+        assert still_open
+        assert _load(store_file)["series"] == {}
+
+    def test_add_series_modal_cancel_creates_nothing(self, ctx, store_file):
+        """Escape dismisses the add-series dialog without creating a series."""
+        from doxtr_doto.cli.tui.app import AddSeriesScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, AddSeriesScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+        assert _load(store_file)["series"] == {}
+
+    def test_add_series_screen_is_overridable(self, ctx):
+        """A child theme can swap the add-series screen class."""
+        from doxtr_doto.cli.tui.app import AddSeriesScreen, DotoApp
+
+        class _ThemedAddSeriesScreen(AddSeriesScreen):
+            pass
+
+        class _ThemedApp(DotoApp):
+            add_series_screen_class = _ThemedAddSeriesScreen
+
+        from doxtr_doto.cli.tui import nudge
+
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        app = _ThemedApp(ctx)
+        app.scope = DisplayScope.LOCAL
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, _ThemedAddSeriesScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_select_task_moves_cursor_to_row_in_local_scope(self, ctx):
+        """``select_task`` selects the matching row by id in LOCAL scope."""
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                assert table.selected_id() == "T-001"
+                # Selecting an existing task by its (bare) id moves the cursor.
+                selected_second = app.select_task("T-002")
+                await pilot.pause()
+                selected_first = app.select_task("T-001")
+                await pilot.pause()
+                # A non-existent id is a no-op that returns False.
+                missing = app.select_task("T-999")
+                return (
+                    selected_second,
+                    selected_first,
+                    missing,
+                    table.selected_id(),
+                )
+
+        selected_second, selected_first, missing, final = _run(body())
+        assert selected_second is True
+        assert selected_first is True
+        assert missing is False
+        # The last successful selection (T-001) is where the cursor landed.
+        assert final == "T-001"
+
+    def test_display_id_for_maps_bare_id_to_namespaced_display_id(self, ctx):
+        """GLOBAL scope: the bare ``add_task`` id maps to the ``repo#id`` row.
+
+        The LOCAL ``select_task`` test above exercises the bare-id path where
+        display id == local id. This covers the namespaced path:
+        :meth:`DotoApp._display_id_for` must resolve the bare local id
+        returned by ``add_task`` to the ``repo#id`` *display* id the views key
+        their rows on when GLOBAL scope namespaces a colliding base prefix.
+        Focused unit test: ``_tasks`` is populated directly with rows carrying
+        ``_repo`` / ``_local_id`` and the namespaced display ``id`` (as
+        :func:`doxtr_doto.cli.tui.data.gather_tasks` +
+        :func:`doxtr_doto.cli.display.apply_scope` produce in GLOBAL scope),
+        using the current repo name as the owning repo so the mapping matches
+        on ``_repo``.
+        """
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        app = DotoApp(ctx)
+        current = data.current_repo_name(ctx)
+        other = "otherRepo"
+        assert other != current
+        # Two repos share a base prefix, so every display id is namespaced to
+        # ``repo#id`` while ``_local_id`` preserves the bare id.
+        app._tasks = [
+            {"id": f"{current}#T-001", "_repo": current, "_local_id": "T-001"},
+            {"id": f"{current}#T-002", "_repo": current, "_local_id": "T-002"},
+            {"id": f"{other}#T-010", "_repo": other, "_local_id": "T-010"},
+        ]
+        # A current-repo bare id maps to its namespaced display id.
+        assert app._display_id_for("T-001") == f"{current}#T-001"
+        assert app._display_id_for("T-002") == f"{current}#T-002"
+        # A foreign repo's bare id has no current-repo row, so it falls back
+        # unchanged (it is only resolved against the current repo).
+        assert app._display_id_for("T-010") == "T-010"
+        # An id with no matching row is returned unchanged (already a display
+        # id, or filtered out).
+        assert app._display_id_for("T-999") == "T-999"
+
+    def test_select_task_filtered_out_task_is_noop(self, ctx):
+        """``select_task`` on an id absent from the visible set is a no-op.
+
+        When the created task is filtered out it has no row in ``_tasks``, so
+        :meth:`DotoApp._display_id_for` falls back to the bare id, no view row
+        matches, and ``select_task`` returns False without moving the
+        selection. This targets the app-level ``select_task`` +
+        ``_display_id_for`` fallback (the view-level missing-id case is
+        covered by the per-view ``select_id`` tests).
+        """
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Move off the default first row so a no-op is observable.
+                assert app.select_task("T-002") is True
+                await pilot.pause()
+                before = table.selected_id()
+                # An id not in the visible _tasks set is a no-op.
+                result = app.select_task("T-FILTERED-OUT")
+                await pilot.pause()
+                return result, before, table.selected_id()
+
+        result, before, after = _run(body())
+        assert result is False
+        # The selection did not move.
+        assert before == "T-002"
+        assert after == before
+
+    def test_series_next_moves_to_later_occurrence(self, series_ctx):
+        """``e n`` moves the selection to the next (due-date-later) occurrence.
+
+        The jump follows occurrence (due-date) order, not id/insertion order:
+        from ``S-003`` (earliest, 2026-01-05) ``_move_in_series(1)`` lands on
+        ``S-002`` (2026-01-12), proving the step is by due date even though
+        ``S-002`` sorts between ``S-001`` and ``S-003`` by id.
+        """
+        app = self._app(series_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-003") is True
+                await pilot.pause()
+                app._move_in_series(1)
+                await pilot.pause()
+                first = app._current_selected_id()
+                app._move_in_series(1)
+                await pilot.pause()
+                return first, app._current_selected_id()
+
+        first, second = _run(body())
+        assert first == "S-002"
+        assert second == "S-001"
+
+    def test_series_prev_moves_to_earlier_occurrence(self, series_ctx):
+        """``e p`` moves the selection to the previous (earlier) occurrence."""
+        app = self._app(series_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-001") is True  # latest occurrence
+                await pilot.pause()
+                app._move_in_series(-1)
+                await pilot.pause()
+                first = app._current_selected_id()
+                app._move_in_series(-1)
+                await pilot.pause()
+                return first, app._current_selected_id()
+
+        first, second = _run(body())
+        assert first == "S-002"
+        assert second == "S-003"
+
+    def test_series_next_at_last_occurrence_clamps(self, series_ctx):
+        """At the last occurrence ``e n`` clamps (no wrap) and keeps selection."""
+        app = self._app(series_ctx)
+        notes: list[str] = []
+        app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[assignment]
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-001") is True  # latest occurrence
+                await pilot.pause()
+                app._move_in_series(1)
+                await pilot.pause()
+                return app._current_selected_id()
+
+        final = _run(body())
+        # No wrap: selection stays on the last occurrence.
+        assert final == "S-001"
+        assert any("last occurrence" in n for n in notes)
+
+    def test_series_prev_at_first_occurrence_clamps(self, series_ctx):
+        """At the first occurrence ``e p`` clamps (no wrap) and keeps selection."""
+        app = self._app(series_ctx)
+        notes: list[str] = []
+        app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[assignment]
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-003") is True  # earliest occurrence
+                await pilot.pause()
+                app._move_in_series(-1)
+                await pilot.pause()
+                return app._current_selected_id()
+
+        final = _run(body())
+        assert final == "S-003"
+        assert any("first occurrence" in n for n in notes)
+
+    def test_series_nav_noop_on_standalone_task(self, series_ctx):
+        """A non-series selection is a graceful no-op (no move, no notify)."""
+        app = self._app(series_ctx)
+        notes: list[str] = []
+        app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[assignment]
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("T-100") is True  # standalone, no series
+                await pilot.pause()
+                app._move_in_series(1)
+                await pilot.pause()
+                return app._current_selected_id()
+
+        final = _run(body())
+        assert final == "T-100"
+        assert notes == []
+
+    def test_series_nav_end_to_end_via_stream_keys(self, series_ctx):
+        """Pressing ``e n`` through the dispatcher jumps to the next occurrence.
+
+        Exercises the full registry -> dispatcher -> ``action_series_next``
+        path (the ``e`` Edit domain resolves ``n`` to the ``series_next``
+        action only because the selection is a series member).
+        """
+        app = self._app(series_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-003") is True
+                await pilot.pause()
+                await pilot.press("e", "n")
+                await pilot.pause()
+                return app._current_selected_id()
+
+        final = _run(body())
+        assert final == "S-002"
+
+    def test_series_nav_entries_only_for_series_members(self, series_ctx):
+        """The ``e n`` / ``e p`` entries appear only for a series occurrence.
+
+        Mirrors the ``e E`` / ``e D`` conditional discipline: the Edit domain's
+        ``entries_fn`` adds the series-navigation rows when (and only when) the
+        selection carries a ``series_id``, so the hint bar and help stay
+        correct automatically.
+        """
+        from doxtr_doto.cli.tui.app import KEYMAP
+
+        app = self._app(series_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # On a series occurrence: the nav entries are present.
+                assert app.select_task("S-003") is True
+                await pilot.pause()
+                member_actions = [e.action for e in KEYMAP["e"].entries_fn(app)]
+                # On a standalone task: the nav entries are absent.
+                assert app.select_task("T-100") is True
+                await pilot.pause()
+                standalone_actions = [e.action for e in KEYMAP["e"].entries_fn(app)]
+                return member_actions, standalone_actions
+
+        member_actions, standalone_actions = _run(body())
+        assert "series_next" in member_actions
+        assert "series_prev" in member_actions
+        assert "series_next" not in standalone_actions
+        assert "series_prev" not in standalone_actions
+
+    def test_series_nav_filtered_out_neighbour_notifies(self, series_ctx):
+        """A neighbour hidden by the active filter is a no-op with a notify.
+
+        From the middle occurrence (``S-002``) a filter that matches only its
+        own title hides both neighbours. ``_move_in_series(1)`` resolves the
+        target (``S-001``, which still exists in the store) but cannot select
+        it because it is filtered out of the view: the selection must stay on
+        ``S-002`` and a notify containing ``filtered out`` must fire.
+        """
+        app = self._app(series_ctx)
+        notes: list[str] = []
+        app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[assignment]
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.select_task("S-002") is True  # middle occurrence
+                await pilot.pause()
+                # Filter to the middle occurrence's title only, hiding the
+                # S-001 neighbour that ``e n`` would move to.
+                app.filter_term = "second"
+                app.refresh_tasks()
+                await pilot.pause()
+                app._move_in_series(1)
+                await pilot.pause()
+                return app._current_selected_id()
+
+        final = _run(body())
+        assert final == "S-002"
+        assert any("filtered out" in n for n in notes)
+
     def test_filter_narrows_list(self, ctx):
         from doxtr_doto.cli.tui.widgets import TaskList
 
@@ -2561,6 +3694,50 @@ class TestApp:
 
         _run(body())
 
+    def test_view_prefs_popup_collects_recent_done(self, ctx):
+        from doxtr_doto.cli.tui.app import ViewPrefsScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("F")
+                await pilot.pause()
+                screen = app.screen
+                assert isinstance(screen, ViewPrefsScreen)
+                from textual.widgets import Checkbox, Input
+
+                # Enable the recent-done filter and set a 5-day window.
+                screen.query_one("#viewprefs-recent-done", Checkbox).value = True
+                screen.query_one("#viewprefs-recent-done-days", Input).value = "5"
+                await pilot.pause()
+                collected = screen.collect_prefs()
+                assert collected.recent_done_days == 5
+
+        _run(body())
+
+    def test_view_prefs_popup_collects_recent_done_disabled(self, ctx):
+        from doxtr_doto.cli.tui.app import ViewPrefsScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("F")
+                await pilot.pause()
+                screen = app.screen
+                assert isinstance(screen, ViewPrefsScreen)
+                from textual.widgets import Checkbox
+
+                # Unchecking the recent-done box disables the filter (None).
+                screen.query_one("#viewprefs-recent-done", Checkbox).value = False
+                await pilot.pause()
+                assert screen.collect_prefs().recent_done_days is None
+
+        _run(body())
+
     def test_repo_tree_leaf_toggles_repo_filter(self, ctx, store_file):
         from doxtr_doto.cli.repo_registry import RepoRegistry
         from doxtr_doto.cli.tui.widgets import RepoTree
@@ -2651,6 +3828,281 @@ class TestApp:
                 await pilot.pause()
                 assert isinstance(app.screen, _ThemedViewPrefsScreen)
                 await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+
+    def test_set_parent_single_cursor_task(self, ctx, store_file):
+        from textual.widgets import Input
+
+        from doxtr_doto.cli.tui.app import SetParentScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Cursor on T-001; open the set-parent picker (e P).
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                # The search box is focused on open so the user can type to
+                # search immediately (no Enter needed to start filtering).
+                search = app.screen.query_one("#setparent-search", Input)
+                assert app.focused is search
+                # Type part of the only other task and submit with Enter, which
+                # applies the highlighted candidate (T-002).
+                await pilot.press("T", "-", "0", "0", "2")
+                await pilot.pause()
+                assert app.screen._highlighted_value == "T-002"
+                await pilot.press("enter")
+                await pilot.pause()
+                assert not isinstance(app.screen, SetParentScreen)
+
+        _run(body())
+        assert _load(store_file)["tasks"]["T-001"]["parent"] == "T-002"
+        # The parent task itself is unaffected.
+        assert _load(store_file)["tasks"]["T-002"].get("parent") is None
+
+    def test_set_parent_clear_via_no_parent_entry(self, ctx, store_file):
+        """Choosing the leading "(no parent)" entry removes the parent link."""
+        from doxtr_doto.cli.tui import actions as tui_actions
+        from doxtr_doto.cli.tui.app import SetParentScreen
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        # Seed T-001 under T-002 first.
+        assert actions.set_parent(ctx, "T-001", "T-002") == "ok"
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Put the cursor on T-001 deterministically (tree ordering can
+                # vary once it is a child of T-002).
+                table = app.query_one(TaskList)
+                table.move_cursor(row=table.row_ids.index("T-001"))
+                await pilot.pause()
+                # Open the picker and pick "(no parent)".
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                app.screen.dismiss(tui_actions.CLEAR_PARENT)
+                await pilot.pause()
+                assert not isinstance(app.screen, SetParentScreen)
+                # Clearing is never remembered as the last parent.
+                assert app._last_parent_id != tui_actions.CLEAR_PARENT
+
+        _run(body())
+        # The parent link was removed; the former parent is untouched.
+        assert _load(store_file)["tasks"]["T-001"]["parent"] is None
+        assert _load(store_file)["tasks"]["T-002"].get("parent") is None
+
+    def test_set_parent_multi_selection(self, parent_ctx, parent_store_file):
+        from doxtr_doto.cli.tui.app import SetParentScreen
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(parent_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Multi-select T-001 and T-002 as the children.
+                await pilot.press("space")  # select T-001
+                await pilot.press("j")
+                await pilot.press("space")  # select T-002
+                await pilot.pause()
+                assert table.selected_ids == {"T-001", "T-002"}
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                # The children are excluded from the candidate parents, so
+                # only T-003 remains selectable (plus the leading "(no parent)"
+                # clear entry).
+                values = {value for _label, value in app.screen.candidates}
+                assert values == {actions.CLEAR_PARENT, "T-003"}
+                app.screen.dismiss("T-003")
+                await pilot.pause()
+                # Selection cleared after the bulk operation.
+                assert table.selected_ids == set()
+
+        _run(body())
+        tasks = _load(parent_store_file)["tasks"]
+        assert tasks["T-001"]["parent"] == "T-003"
+        assert tasks["T-002"]["parent"] == "T-003"
+
+    def test_set_parent_remembers_last_parent(self, parent_ctx, parent_store_file):
+        from doxtr_doto.cli.tui.app import SetParentScreen
+
+        app = self._app(parent_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # First assignment: T-001's parent -> T-003.
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                app.screen.dismiss("T-003")
+                await pilot.pause()
+                assert app._last_parent_id == "T-003"
+                # Reopen on a different cursor row: the picker pre-highlights
+                # the remembered parent (T-003) in its candidate list.
+                await pilot.press("j")  # cursor -> T-002
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                assert app.screen.default == "T-003"
+                assert app.screen._highlighted_value == "T-003"
+                app.screen.dismiss(None)  # cancel, leaving memory intact
+                await pilot.pause()
+
+        _run(body())
+        tasks = _load(parent_store_file)["tasks"]
+        assert tasks["T-001"]["parent"] == "T-003"
+        # Cancelled second assignment leaves T-002 unparented.
+        assert tasks["T-002"].get("parent") is None
+
+    def test_set_parent_candidates_exclude_children(self, parent_ctx, parent_store_file):
+        from doxtr_doto.cli.tui.app import SetParentScreen
+
+        app = self._app(parent_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Single cursor task T-001 is the child; it must not appear as
+                # its own candidate parent.
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                values = {value for _label, value in app.screen.candidates}
+                assert "T-001" not in values
+                # Other visible tasks plus the leading "(no parent)" clear entry.
+                assert values == {actions.CLEAR_PARENT, "T-002", "T-003"}
+                app.screen.dismiss(None)
+                await pilot.pause()
+
+        _run(body())
+
+    def test_set_parent_cycle_rejected_through_chosen(self, parent_ctx, parent_store_file):
+        """Picking a descendant as parent is skipped and warns (cycle path).
+
+        Seeds T-002.parent = T-001, then with T-001 as the child selects
+        T-002 as its parent. That is a cycle, so ``_chosen`` skips it: T-001
+        stays unparented, the store is unchanged, and the
+        "Could not set parent (self/cycle or cross-repo)." warning fires.
+        """
+        from doxtr_doto.cli.tui.app import SetParentScreen
+
+        app = self._app(parent_ctx)
+        notes: list[str] = []
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Seed T-002 under T-001 via the real action.
+                assert actions.set_parent(parent_ctx, "T-002", "T-001") == "ok"
+                app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[assignment]
+                # Cursor on T-001 (the child); pick its descendant T-002 as parent.
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                app.screen.dismiss("T-002")
+                await pilot.pause()
+
+        _run(body())
+        tasks = _load(parent_store_file)["tasks"]
+        # The rejected assignment left T-001 unparented; T-002 keeps its seed.
+        assert tasks["T-001"].get("parent") is None
+        assert tasks["T-002"]["parent"] == "T-001"
+        # The cycle/cross-repo warning branch fired.
+        assert any("Could not set parent" in msg for msg in notes)
+
+    def test_set_parent_screen_class_is_overridable(self, ctx):
+        from doxtr_doto.cli.tui.app import DotoApp, SetParentScreen
+
+        # The seam exists and defaults to SetParentScreen, mirroring the other
+        # *_screen_class overridable modal seams.
+        assert DotoApp.set_parent_screen_class is SetParentScreen
+
+        class _ThemedSetParentScreen(SetParentScreen):
+            """Stand-in for a child theme's custom parent picker."""
+
+        class _ThemedSetParentApp(DotoApp):
+            set_parent_screen_class = _ThemedSetParentScreen
+
+        from doxtr_doto.cli.tui import nudge
+
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        app = _ThemedSetParentApp(ctx)
+        app.scope = DisplayScope.LOCAL
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, _ThemedSetParentScreen)
+                app.screen.dismiss(None)
+                await pilot.pause()
+
+        _run(body())
+
+    def test_set_parent_select_class_is_overridable(self, ctx):
+        from doxtr_doto.cli.tui.app import FilterableSelect, SetParentScreen
+
+        # The select_class seam defaults to FilterableSelect, mirroring
+        # ViewPrefsScreen / EditTaskScreen.
+        assert SetParentScreen.select_class is FilterableSelect
+
+        class _ThemedSelect(FilterableSelect):
+            """Stand-in for a child theme's custom parent-picker dropdown."""
+
+        class _ThemedSetParentScreen(SetParentScreen):
+            select_class = _ThemedSelect
+
+        screen = _ThemedSetParentScreen([("T-002  Second task", "T-002")])
+        assert screen.select_class is _ThemedSelect
+
+    def test_set_parent_type_to_search_filters_immediately(self, parent_ctx, parent_store_file):
+        """Typing in the set-parent picker filters the list without pressing
+        Enter first: the search box is focused on open and each keystroke
+        re-filters the visible candidate list live."""
+        from textual.widgets import Input, OptionList
+
+        from doxtr_doto.cli.tui.app import SetParentScreen
+
+        app = self._app(parent_ctx)
+
+        def listed(option_list):
+            return [option_list.get_option_at_index(i).id for i in range(option_list.option_count)]
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Cursor on T-001; open the picker. Candidates are T-002/T-003.
+                await pilot.press("e", "P")
+                await pilot.pause()
+                assert isinstance(app.screen, SetParentScreen)
+                # The search box is focused immediately -> no Enter needed.
+                search = app.screen.query_one("#setparent-search", Input)
+                assert app.focused is search
+                option_list = app.screen.query_one("#setparent-list", OptionList)
+                # Full list before typing (plus the leading "(no parent)" entry).
+                assert set(listed(option_list)) == {
+                    actions.CLEAR_PARENT,
+                    "T-002",
+                    "T-003",
+                }
+                # Typing narrows the visible list live (no Enter needed); the
+                # "(no parent)" entry drops out since it does not match.
+                await pilot.press("T", "-", "0", "0", "3")
+                await pilot.pause()
+                assert listed(option_list) == ["T-003"]
+                assert app.screen._highlighted_value == "T-003"
+                app.screen.dismiss(None)
                 await pilot.pause()
 
         _run(body())
@@ -3361,8 +4813,19 @@ class TestViewPrefsActions:
     def test_default_prefs_when_unset(self, ctx):
         from doxtr_doto.cli.tui.filtersort import ViewPrefs
 
-        # Fresh global state has no tui_* filter/sort fields; must default.
-        assert actions.load_view_prefs(ctx) == ViewPrefs()
+        # Fresh global state has no tui_* filter/sort fields; the recent-done
+        # filter is ON by default seeded from the config's
+        # tui_recent_done_days (default 10), and every other field defaults.
+        assert actions.load_view_prefs(ctx) == ViewPrefs(recent_done_days=10)
+
+    def test_default_prefs_seeds_recent_done_from_nondefault_config(self, ctx):
+        from doxtr_doto.cli.tui.filtersort import ViewPrefs
+
+        # With fresh/empty global state, the recent-done window is seeded from
+        # the config's tui_recent_done_days - a NON-default value (30) proves
+        # the seed is read from config and not hardcoded to 10.
+        ctx.config.tui_recent_done_days = 30
+        assert actions.load_view_prefs(ctx) == ViewPrefs(recent_done_days=30)
 
     def test_save_then_load_round_trip(self, ctx):
         from doxtr_doto.cli.tui.filtersort import ViewPrefs
@@ -3370,6 +4833,7 @@ class TestViewPrefsActions:
 
         prefs = ViewPrefs(
             hide_completed=True,
+            recent_done_days=10,
             due_filter=DueFilter.WEEK,
             tag_filter="frontend",
             priority_filter="high",
@@ -3383,6 +4847,46 @@ class TestViewPrefsActions:
         assert state.tui_sort_key == "priority"
         assert state.tui_sort_order == "desc"
         assert state.tui_due_filter == "week"
+
+    def test_recent_done_enabled_round_trip(self, ctx):
+        from doxtr_doto.cli.tui.filtersort import ViewPrefs
+
+        # An active recent-done window round-trips and persists its on-state
+        # and N-day count, overriding the config default on the next load.
+        actions.save_view_prefs(ctx, ViewPrefs(recent_done_days=30))
+        state = ctx.global_store.load()
+        assert state.tui_recent_done_enabled is True
+        assert state.tui_recent_done_days == 30
+        assert actions.load_view_prefs(ctx).recent_done_days == 30
+
+    def test_recent_done_disabled_persists(self, ctx):
+        from doxtr_doto.cli.tui.filtersort import ViewPrefs
+
+        # Disabling the filter (None) persists as enabled=False so it survives
+        # a restart instead of snapping back to the ON-by-default config value.
+        actions.save_view_prefs(ctx, ViewPrefs(recent_done_days=None))
+        state = ctx.global_store.load()
+        assert state.tui_recent_done_enabled is False
+        assert actions.load_view_prefs(ctx).recent_done_days is None
+
+    def test_recent_done_invalid_stored_days_falls_back_to_config(self, ctx):
+        # A missing stored day count while enabled falls back to the config
+        # default (10) rather than breaking the view.
+        state = ctx.global_store.load()
+        state.tui_recent_done_enabled = True
+        state.tui_recent_done_days = None
+        ctx.global_store.save(state)
+        assert actions.load_view_prefs(ctx).recent_done_days == 10
+
+    def test_recent_done_corrupt_stored_days_falls_back_to_config(self, ctx):
+        # A genuinely corrupt (non-numeric) persisted day count must not crash
+        # the view: load_view_prefs falls back to the config default (10).
+        state = ctx.global_store.load()
+        state.tui_recent_done_enabled = True
+        state.tui_recent_done_days = "abc"  # type: ignore[assignment]
+        ctx.global_store.save(state)
+        # Does not raise and falls back to the config default.
+        assert actions.load_view_prefs(ctx).recent_done_days == 10
 
     def test_repo_filter_round_trip(self, ctx):
         from doxtr_doto.cli.tui.filtersort import ViewPrefs
@@ -3418,7 +4922,277 @@ class TestViewPrefsActions:
         assert prefs.due_filter is DueFilter.ALL
         assert prefs.sort_key is SortKey.NONE
         assert prefs.sort_order is SortOrder.ASC
-        assert prefs == ViewPrefs()
+        # Every other field matches its default; the recent-done filter is ON
+        # by default (seeded from the config's tui_recent_done_days, 10).
+        assert prefs == ViewPrefs(recent_done_days=10)
+
+
+class TestDetailRatioActions:
+    """Unit tests for the table-layout detail-pane ratio persistence/parse."""
+
+    def test_default_ratio_when_unset(self, ctx):
+        from doxtr_doto.cli.tui.actions import DEFAULT_DETAIL_RATIO
+
+        # Fresh global state has no tui_detail_ratio; must default to 3/4.
+        assert actions.load_detail_ratio(ctx) == DEFAULT_DETAIL_RATIO == "3/4"
+
+    def test_save_then_load_round_trip(self, ctx):
+        actions.save_detail_ratio(ctx, "5/8")
+        assert actions.load_detail_ratio(ctx) == "5/8"
+        # Persisted to global state verbatim.
+        assert ctx.global_store.load().tui_detail_ratio == "5/8"
+
+    def test_save_normalizes_whitespace(self, ctx):
+        actions.save_detail_ratio(ctx, " 1 / 2 ")
+        assert ctx.global_store.load().tui_detail_ratio == "1/2"
+        assert actions.load_detail_ratio(ctx) == "1/2"
+
+    def test_load_falls_back_on_malformed_value(self, ctx):
+        state = ctx.global_store.load()
+        state.tui_detail_ratio = "garbage"
+        ctx.global_store.save(state)
+        # A malformed stored value never breaks the layout: default is used.
+        assert actions.load_detail_ratio(ctx) == "3/4"
+
+    def test_parse_detail_ratio_semantics(self):
+        from doxtr_doto.cli.tui.actions import parse_detail_ratio
+
+        # ``n/d`` -> (top_fr=d-n, detail_fr=n): the detail (bottom) pane takes
+        # n/d of the *total* height, the task list (top) the remaining (d-n)/d.
+        assert parse_detail_ratio("3/4") == (1, 3)
+        assert parse_detail_ratio("5/8") == (3, 5)
+        assert parse_detail_ratio("1/2") == (1, 1)
+        assert parse_detail_ratio("1/4") == (3, 1)
+        # Malformed / zero / out-of-range (n >= d) / missing fall back to the
+        # default 3/4 -> (1, 3).
+        assert parse_detail_ratio("bad") == (1, 3)
+        assert parse_detail_ratio("0/4") == (1, 3)
+        assert parse_detail_ratio("4/0") == (1, 3)
+        assert parse_detail_ratio("4/4") == (1, 3)
+        assert parse_detail_ratio("5/4") == (1, 3)
+        assert parse_detail_ratio("") == (1, 3)
+        assert parse_detail_ratio(None) == (1, 3)
+
+    def test_normalize_detail_ratio_canonicalizes_and_defaults(self):
+        from doxtr_doto.cli.tui.actions import normalize_detail_ratio
+
+        # Well-formed values round-trip to their canonical ``n/d`` form (the
+        # numerator is the detail pane's share of the total).
+        assert normalize_detail_ratio("3/4") == "3/4"
+        assert normalize_detail_ratio("5/8") == "5/8"
+        assert normalize_detail_ratio(" 1 / 2 ") == "1/2"
+        # Malformed / out-of-range values normalize to the default.
+        assert normalize_detail_ratio("bad") == "3/4"
+        assert normalize_detail_ratio("4/4") == "3/4"
+        assert normalize_detail_ratio("5/4") == "3/4"
+        assert normalize_detail_ratio(None) == "3/4"
+
+    def test_global_state_round_trips_detail_ratio(self, ctx):
+        # The field survives a to_dict/from_dict round trip (persistence).
+        from doxtr_doto.cli.global_state import GlobalState
+
+        state = ctx.global_store.load()
+        state.tui_detail_ratio = "5/8"
+        restored = GlobalState.from_dict(state.to_dict())
+        assert restored.tui_detail_ratio == "5/8"
+
+
+class TestModalWidthActions:
+    """Unit tests for the edit/note pop-up width ratio persistence/parse."""
+
+    def test_default_ratio_when_unset(self, ctx):
+        from doxtr_doto.cli.tui.actions import DEFAULT_MODAL_WIDTH_RATIO
+
+        # Fresh global state has no tui_modal_width_ratio; must default to 3/4.
+        assert actions.load_modal_width_ratio(ctx) == DEFAULT_MODAL_WIDTH_RATIO == "3/4"
+
+    def test_save_then_load_round_trip(self, ctx):
+        actions.save_modal_width_ratio(ctx, "1/2")
+        assert actions.load_modal_width_ratio(ctx) == "1/2"
+        assert ctx.global_store.load().tui_modal_width_ratio == "1/2"
+
+    def test_save_normalizes_whitespace(self, ctx):
+        actions.save_modal_width_ratio(ctx, " 2 / 3 ")
+        assert ctx.global_store.load().tui_modal_width_ratio == "2/3"
+        assert actions.load_modal_width_ratio(ctx) == "2/3"
+
+    def test_load_falls_back_on_malformed_value(self, ctx):
+        state = ctx.global_store.load()
+        state.tui_modal_width_ratio = "garbage"
+        ctx.global_store.save(state)
+        assert actions.load_modal_width_ratio(ctx) == "3/4"
+
+    def test_parse_modal_width_ratio_semantics(self):
+        from doxtr_doto.cli.tui.actions import parse_modal_width_ratio
+
+        # ``n/d`` -> (numerator, denominator): the modal takes n/d of the
+        # *total* terminal width. Unlike the detail ratio, n == d (full width)
+        # is allowed.
+        assert parse_modal_width_ratio("3/4") == (3, 4)
+        assert parse_modal_width_ratio("1/2") == (1, 2)
+        assert parse_modal_width_ratio("1/1") == (1, 1)
+        assert parse_modal_width_ratio("4/4") == (4, 4)
+        # Malformed / zero / out-of-range (n > d) / missing fall back to 3/4.
+        assert parse_modal_width_ratio("bad") == (3, 4)
+        assert parse_modal_width_ratio("0/4") == (3, 4)
+        assert parse_modal_width_ratio("4/0") == (3, 4)
+        assert parse_modal_width_ratio("5/4") == (3, 4)
+        assert parse_modal_width_ratio("") == (3, 4)
+        assert parse_modal_width_ratio(None) == (3, 4)
+
+    def test_modal_width_percent(self):
+        from doxtr_doto.cli.tui.actions import modal_width_percent
+
+        assert modal_width_percent("3/4") == 75
+        assert modal_width_percent("1/2") == 50
+        assert modal_width_percent("1/1") == 100
+        assert modal_width_percent("2/3") == 67  # rounded
+        # Malformed falls back to the default 3/4 -> 75%.
+        assert modal_width_percent("bad") == 75
+        assert modal_width_percent(None) == 75
+
+    def test_normalize_modal_width_ratio_canonicalizes_and_defaults(self):
+        from doxtr_doto.cli.tui.actions import normalize_modal_width_ratio
+
+        assert normalize_modal_width_ratio("3/4") == "3/4"
+        assert normalize_modal_width_ratio("1/2") == "1/2"
+        assert normalize_modal_width_ratio("1/1") == "1/1"
+        assert normalize_modal_width_ratio(" 2 / 3 ") == "2/3"
+        assert normalize_modal_width_ratio("bad") == "3/4"
+        assert normalize_modal_width_ratio("5/4") == "3/4"
+        assert normalize_modal_width_ratio(None) == "3/4"
+
+    def test_global_state_round_trips_modal_width_ratio(self, ctx):
+        from doxtr_doto.cli.global_state import GlobalState
+
+        state = ctx.global_store.load()
+        state.tui_modal_width_ratio = "1/2"
+        restored = GlobalState.from_dict(state.to_dict())
+        assert restored.tui_modal_width_ratio == "1/2"
+
+
+class TestDetailRatioApply:
+    """The detail ratio is applied to the live table-layout pane heights."""
+
+    def _app(self, ctx):
+        from doxtr_doto.cli.tui import nudge
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        # Suppress the once-per-day kickstart nudge so the main screen renders
+        # directly (so ``F`` opens the view-prefs pop-up, not the kickstart).
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        return DotoApp(ctx)
+
+    def test_mount_applies_persisted_ratio_to_pane_heights(self, ctx):
+        from textual.css.scalar import Unit
+
+        actions.save_detail_ratio(ctx, "5/8")
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                task_list = app.query_one("#task-list")
+                task_details = app.query_one("#task-details")
+                # 5/8 -> detail pane takes 5/8 of total: task list 3fr,
+                # detail pane 5fr.
+                assert task_list.styles.height.value == 3.0
+                assert task_list.styles.height.unit is Unit.FRACTION
+                assert task_details.styles.height.value == 5.0
+                assert task_details.styles.height.unit is Unit.FRACTION
+
+        _run(body())
+
+    def test_mount_default_ratio_applies_three_quarters_to_detail(self, ctx):
+        from textual.css.scalar import Unit
+
+        # Fresh app, no saved ratio: the default 3/4 must apply at mount so the
+        # detail (bottom) pane takes 3/4 of the height (3fr) and the task list
+        # the remaining 1/4 (1fr). Guards the default path end-to-end and that
+        # the runtime default agrees with the static-CSS placeholder.
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                task_list = app.query_one("#task-list")
+                task_details = app.query_one("#task-details")
+                assert task_list.styles.height.value == 1.0
+                assert task_list.styles.height.unit is Unit.FRACTION
+                assert task_details.styles.height.value == 3.0
+                assert task_details.styles.height.unit is Unit.FRACTION
+
+        _run(body())
+
+    def test_config_popup_applies_and_persists_ratio(self, ctx):
+        from doxtr_doto.cli.tui.app import DetailRatioScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # ``c`` opens the Config domain, ``d`` the detail-size pop-up.
+                await pilot.press("c")
+                await pilot.press("d")
+                await pilot.pause()
+                assert isinstance(app.screen, DetailRatioScreen)
+                # Simulate applying a 1/2 ratio from the pop-up.
+                app.screen.dismiss("1/2")
+                await pilot.pause()
+                # Applied immediately to the live pane heights: 1/2 -> an even
+                # 1fr / 1fr split (detail pane half the total height).
+                assert app.query_one("#task-list").styles.height.value == 1.0
+                assert app.query_one("#task-details").styles.height.value == 1.0
+                # ... stored on the app, and persisted for the next launch.
+                assert app.detail_ratio == "1/2"
+                assert ctx.global_store.load().tui_detail_ratio == "1/2"
+
+        _run(body())
+
+    def test_config_popup_prepopulates_current_ratio(self, ctx):
+        from textual.widgets import Input
+
+        from doxtr_doto.cli.tui.app import DetailRatioScreen
+
+        actions.save_detail_ratio(ctx, "5/8")
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("c")
+                await pilot.press("d")
+                await pilot.pause()
+                assert isinstance(app.screen, DetailRatioScreen)
+                # The ratio input is pre-populated with the persisted value.
+                ratio_input = app.screen.query_one("#detailratio-input", Input)
+                assert ratio_input.value == "5/8"
+
+        _run(body())
+
+    def test_config_popup_collect_ratio_normalizes_input(self, ctx):
+        from doxtr_doto.cli.tui.app import DetailRatioScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            from textual.widgets import Input
+
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("c")
+                await pilot.press("d")
+                await pilot.pause()
+                screen = app.screen
+                assert isinstance(screen, DetailRatioScreen)
+                # A messy entry is canonicalized; a bad one falls back to 3/4.
+                screen.query_one("#detailratio-input", Input).value = " 5 / 8 "
+                assert screen.collect_ratio() == "5/8"
+                screen.query_one("#detailratio-input", Input).value = "nonsense"
+                assert screen.collect_ratio() == "3/4"
+
+        _run(body())
 
 
 def _running_task(tid, **kw):
@@ -3452,12 +5226,15 @@ class TestActivePinInViews:
     """Feature A: the active (running) task is first in each view's rows."""
 
     def test_list_view_pins_running_task_first(self):
+        from doxtr_doto.cli.tui.filtersort import pin_active_first
         from doxtr_doto.cli.tui.widgets import ListView
 
         tasks = [_plain_task("A"), _running_task("B"), _plain_task("C")]
         view = ListView()
-        view.rebuild(tasks)
-        # The produced row order has the running task on top; rest stable.
+        # The view consumes an already-active-pinned list (the app's
+        # _visible_tasks pins via pin_active_first before passing it in); the
+        # view does not re-pin, so it preserves the running-first order.
+        view.rebuild(pin_active_first(tasks))
         assert view.row_ids == ["B", "A", "C"]
 
     def test_kanban_pins_running_task_top_of_its_column(self):
@@ -3767,6 +5544,24 @@ class TestListView:
         assert view.cursor == 0
         assert view.selected_id() is None
 
+    def test_list_view_select_id_moves_cursor(self):
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        tasks = [
+            {"id": f"T-{i}", "title": "short", "status": "open", "priority": "low"}
+            for i in range(5)
+        ]
+        view = ListView()
+        view.rebuild(tasks)
+        assert view.cursor == 0
+        # Selecting a present id moves the cursor to that row and reports True.
+        assert view.select_id("T-3") is True
+        assert view.cursor == 3
+        assert view.selected_id() == "T-3"
+        # A missing id is a no-op that leaves the cursor and returns False.
+        assert view.select_id("T-99") is False
+        assert view.cursor == 3
+
     def test_jump_to_top_scrolls_back_after_jump_to_bottom(self):
         """Regression: Shift+Up after Shift+Down must scroll the list up.
 
@@ -3805,6 +5600,54 @@ class TestListView:
                 await pilot.pause()
                 assert view.cursor == 0
                 assert view.scroll_y == 0
+
+        _run(body())
+
+    def test_select_id_repositions_offscreen_row_into_view(self):
+        """select_id must reposition a row that is off screen back into view.
+
+        The list view shares the discontinuous-jump seam
+        (:meth:`~AltLayoutView.ensure_cursor_visible`): selecting a row by id
+        from the bottom of a long list (frame scrolled down) to a row near the
+        top must scroll the frame up so the selected row is visible, rather
+        than relying on the direction-inferring smart scroll.
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        tasks = [{"id": f"T-{i:03d}", "status": "open", "title": f"task {i}"} for i in range(60)]
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield ListView(id="list")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                view = app.query_one("#list", ListView)
+                view.rebuild(tasks)
+                view.focus()
+                await pilot.pause()
+                assert view.max_scroll_y > 0
+
+                # Scroll to the bottom first.
+                view.move_cursor_to_edge(True)
+                await pilot.pause()
+                assert view.scroll_y > 0
+
+                # Select the first row by id: it is off screen at the top.
+                assert view.select_id("T-000") is True
+                await pilot.pause()
+                assert view.selected_id() == "T-000"
+                top = view.cursor_line()
+                bottom = top + view.cursor_span() - 1
+                height = view.size.height
+                assert view.scroll_y <= top  # row top visible
+                assert bottom < view.scroll_y + height  # row bottom visible
+                assert view.scroll_y <= view.cursor_line()
 
         _run(body())
 
@@ -3855,6 +5698,26 @@ class TestKanbanView:
         assert view.move_target_status(1) == "in-progress"
         # Moving left off the first column is a no-op.
         assert view.move_target_status(-1) is None
+
+    def test_kanban_select_id_places_cursor_across_lanes(self):
+        from doxtr_doto.cli.tui.widgets import KanbanView
+
+        view = KanbanView()
+        view.rebuild(
+            [
+                {"id": "A", "status": "open"},
+                {"id": "B", "status": "in-progress"},
+            ],
+            ["open", "in-progress", "done"],
+        )
+        # Cursor starts on A in the first (open) lane.
+        assert view.selected_id() == "A"
+        # Selecting B (in a different lane) moves both col and row to it.
+        assert view.select_id("B") is True
+        assert view.selected_id() == "B"
+        # A missing id is a no-op that leaves the selection and returns False.
+        assert view.select_id("Z") is False
+        assert view.selected_id() == "B"
 
     def test_move_target_status_into_other_is_noop(self):
         from doxtr_doto.cli.tui.widgets import KanbanView
@@ -4071,6 +5934,260 @@ class TestKanbanView:
                 await pilot.pause()
                 assert board.row == 0
                 assert board.scroll_y == 0
+
+        _run(body())
+
+    def test_switching_to_short_lane_repositions_viewport_to_top(self):
+        """Regression: switching lanes must make the selected card visible.
+
+        The last unchecked feature: the cursor is at the *bottom* of a long
+        ``open`` lane (frame scrolled down), then the user switches (``l``) to
+        a one-card ``in-progress`` lane whose single card is at the *top*.
+        Relying on the direction-inferring smart scroll
+        (:meth:`~AltLayoutView.scroll_to_cursor`) inferred a stale *downward*
+        direction and did not reposition, leaving the selected card off
+        screen. The discontinuous-jump seam
+        (:meth:`~AltLayoutView.ensure_cursor_visible`, wired into
+        :meth:`KanbanView.move_column`) repositions the frame so the whole
+        selected card is visible: here it scrolls back to the top (``0``).
+        Asserts the real ``scroll_y`` offset resets so the selected card's
+        span lies within ``[scroll_y .. scroll_y + height)``.
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import KanbanView
+
+        # A long 'open' lane (overflows the frame) and a single 'in-progress'
+        # card (pinned at the top of its lane).
+        tasks = [{"id": f"O{i:02d}", "status": "open", "title": f"open {i}"} for i in range(40)]
+        tasks.append({"id": "P00", "status": "in-progress", "title": "only card"})
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield KanbanView(id="board")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                board = app.query_one("#board", KanbanView)
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.focus()
+                await pilot.pause()
+                assert board.max_scroll_y > 0  # the open lane overflows
+
+                # Jump to the bottom of the long 'open' lane: frame scrolls
+                # down.
+                board.move_cursor_to_edge(True)
+                await pilot.pause()
+                assert board.col == 0
+                assert board.row == len(tasks) - 2  # last open card
+                assert board.scroll_y > 0  # frame is scrolled down
+
+                # Switch to the one-card 'in-progress' lane, then rebuild the
+                # board as the app does after a lane switch
+                # (``_kanban_navigate`` -> ``move_column`` -> rebuild). The
+                # intervening rebuild re-anchors the smart-scroll baseline
+                # (``_sync_scroll_anchor``), so a bare
+                # :meth:`~AltLayoutView.scroll_to_cursor` would then read
+                # ``cursor_line == previous_line``, infer a stale *downward*
+                # move and return None - leaving the card off screen. The
+                # discontinuous reposition after the rebuild fixes that.
+                assert board.move_column(1) is True
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.ensure_cursor_visible()
+                await pilot.pause()
+                assert board.col == 1
+                assert board.row == 0
+                assert board.selected_id() == "P00"
+                # The selected card's full span must now be on screen.
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                height = board.size.height
+                assert board.scroll_y <= top  # card top visible
+                assert bottom < board.scroll_y + height  # card bottom visible
+                # The card sits near the top of its lane, so the frame scrolled
+                # back up close to the top (it was deep at the bottom before).
+                assert board.scroll_y <= board.cursor_line()
+
+        _run(body())
+
+    def test_select_id_repositions_offscreen_card_into_view(self):
+        """select_id must bring a card that is off screen back into view.
+
+        Selecting by id is a *discontinuous* jump, so it goes through the
+        direction-free :meth:`~AltLayoutView.ensure_cursor_visible` seam. This
+        mimics the app's select-then-rebuild flow
+        (:meth:`~doxtr_doto.cli.tui.app.DotoApp.select_task`): after the select
+        a rebuild re-anchors the smart-scroll baseline
+        (``_sync_scroll_anchor``), so a bare
+        :meth:`~AltLayoutView.scroll_to_cursor` reads
+        ``cursor_line == previous_line``, takes neither margin branch and
+        returns None - leaving the card stuck off screen. The reposition seam
+        keeps the selected card visible regardless of the stale baseline.
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import KanbanView
+
+        tasks = [{"id": f"T{i:02d}", "status": "open", "title": f"card {i}"} for i in range(40)]
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield KanbanView(id="board")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                board = app.query_one("#board", KanbanView)
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.focus()
+                await pilot.pause()
+
+                # Scroll to the bottom first.
+                board.move_cursor_to_edge(True)
+                await pilot.pause()
+                assert board.scroll_y > 0
+
+                # Select the first card by id, then rebuild as the app does
+                # after a selection - the rebuild re-anchors the baseline so a
+                # bare scroll_to_cursor would read cursor == previous and leave
+                # the off-screen card unmoved.
+                assert board.select_id("T00") is True
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.ensure_cursor_visible()
+                await pilot.pause()
+                assert board.selected_id() == "T00"
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                height = board.size.height
+                assert board.scroll_y <= top
+                assert bottom < board.scroll_y + height
+                assert board.scroll_y <= board.cursor_line()
+
+        _run(body())
+
+    def test_ensure_cursor_visible_fixes_stale_direction_none(self):
+        """ensure_cursor_visible repositions where scroll_to_cursor returns None.
+
+        The crux of the always-reposition feature: once the smart-scroll
+        baseline is re-anchored to the landing line (as every :meth:`rebuild`
+        does via ``_sync_scroll_anchor``), :meth:`~AltLayoutView.scroll_to_cursor`
+        reads ``cursor_line == previous_line``, infers a (tie-break) *downward*
+        move, and - because the card is actually *above* the frame, not within
+        the bottom margin - takes neither branch and returns None, leaving the
+        selected card off screen. This test drives exactly that state and
+        asserts the two seams diverge: the direction-inferring scroll leaves
+        the card off screen, while :meth:`~AltLayoutView.ensure_cursor_visible`
+        pulls it back into view. It is the regression that fails without the
+        new seam.
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import KanbanView
+
+        tasks = [{"id": f"T{i:02d}", "status": "open", "title": f"card {i}"} for i in range(40)]
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield KanbanView(id="board")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                board = app.query_one("#board", KanbanView)
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.focus()
+                await pilot.pause()
+
+                # Deep-scroll to the bottom, then relocate the cursor to the
+                # top row and re-anchor the baseline (exactly what a rebuild
+                # after a discontinuous selection does).
+                board.move_cursor_to_edge(True)
+                await pilot.pause()
+                deep = board.scroll_y
+                assert deep > 0
+                board.row = 0
+                board._sync_scroll_anchor()
+
+                # scroll_to_cursor sees cursor == previous and returns None:
+                # the frame stays deep and the top card is off screen.
+                board.scroll_to_cursor()
+                await pilot.pause()
+                top = board.cursor_line()
+                height = board.size.height
+                assert not (board.scroll_y <= top < board.scroll_y + height)
+
+                # ensure_cursor_visible makes no direction assumption and pulls
+                # the card fully back into view.
+                board.ensure_cursor_visible()
+                await pilot.pause()
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                assert board.scroll_y <= top
+                assert bottom < board.scroll_y + height
+
+        _run(body())
+
+    def test_ensure_cursor_visible_safe_on_empty_destination_lane(self):
+        """Switching into an empty lane must reposition safely, not raise.
+
+        ``move_column`` clamps an empty destination to ``row = 0``;
+        :meth:`~AltLayoutView.ensure_cursor_visible` then falls back to the
+        empty-lane :meth:`cursor_line` (the column header line) and the base
+        single-line :meth:`cursor_span`, so from a deep offset it scrolls the
+        header line back on screen without raising on the empty column. Guards
+        the empty-destination edge (the defensive ``cursor_line`` /
+        ``cursor_span`` bounds handling plus the span/offset math).
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import KanbanView
+
+        # A long 'open' lane and a completely empty 'in-progress' lane.
+        tasks = [{"id": f"O{i:02d}", "status": "open", "title": f"open {i}"} for i in range(40)]
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield KanbanView(id="board")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                board = app.query_one("#board", KanbanView)
+                board.rebuild(tasks, ["open", "in-progress"])
+                board.focus()
+                await pilot.pause()
+
+                # Scroll to the bottom of the long 'open' lane.
+                board.move_cursor_to_edge(True)
+                await pilot.pause()
+                deep = board.scroll_y
+                assert deep > 0
+
+                # Switch to the empty 'in-progress' lane: row clamps to 0 and
+                # the lane has no card. ensure_cursor_visible must not raise on
+                # the empty destination and repositions to show the lane's
+                # header line (its content line, which the empty-lane
+                # cursor_line falls back to).
+                assert board.move_column(1) is True
+                assert board.col == 1
+                assert board.row == 0
+                board.ensure_cursor_visible()
+                await pilot.pause()
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                height = board.size.height
+                assert board.scroll_y <= top  # header line on screen
+                assert bottom < board.scroll_y + height
+                assert board.scroll_y < deep  # scrolled back up from the deep offset
 
         _run(body())
 
@@ -5583,6 +7700,47 @@ class TestCalendarView:
         assert view.region_cursor == 0
         assert view.selected_id() == "N1"
 
+    def test_calendar_select_id_targets_dated_and_no_due_tasks(self):
+        """``select_id`` focuses the region/day holding the task.
+
+        The calendar's :meth:`select_id` (the view seam the app-level
+        ``select_task`` delegates to for auto-selecting a freshly created
+        task) must handle both buckets: a dated task re-targets the selected
+        day and focuses the Due list, while an undated task focuses the No-due
+        list. Mirrors the list/kanban ``select_id`` tests above but asserts
+        the calendar's region/day/cursor state so ``selected_id()`` resolves
+        to the chosen task.
+        """
+        from datetime import date
+
+        from doxtr_doto.cli.tui.widgets import CalendarView
+
+        view = CalendarView()
+        # A dated task (due 2099-02-10) plus an undated one; build on a
+        # different day/month so select_id has to re-target the grid.
+        view.rebuild(
+            [
+                {"id": "D1", "due": "2099-02-10"},
+                {"id": "N1"},
+            ],
+            today=date(2099, 1, 15),
+        )
+        # Selecting the dated task re-targets the day/month, focuses the Due
+        # list, and points the region cursor at it.
+        assert view.select_id("D1") is True
+        assert view.focus_region == CalendarView.REGION_DUE
+        assert view.selected == "2099-02-10"
+        assert view.year == 2099
+        assert view.month == 2
+        assert view.region_cursor == 0
+        assert view.selected_id() == "D1"
+        # Selecting the undated task focuses the No-due list instead.
+        assert view.select_id("N1") is True
+        assert view.focus_region == CalendarView.REGION_NO_DUE
+        assert view.selected_id() == "N1"
+        # A missing id is a no-op that returns False.
+        assert view.select_id("NONEXISTENT") is False
+
 
 class TestTimeView:
     """Pure-logic tests for the time-view day navigation."""
@@ -5780,6 +7938,63 @@ class TestSmartScroll:
         item_bottom = 11 + 10 - 1
         assert target <= 11  # item top on screen
         assert item_bottom <= target + 12 - 1  # item bottom on screen (was failing)
+
+    # ------------------------------------------------------------------
+    # ensure_cursor_visible / target_visible_scroll_y: the discontinuous-jump
+    # reposition seam (last unchecked feature). These exercise the direction-
+    # independent target computation directly through the same geometry stub.
+    # ------------------------------------------------------------------
+    def test_visible_target_none_when_span_already_on_screen(self):
+        # A one-line cursor item already inside the viewport (frame 10..19,
+        # cursor at line 12) needs no reposition: target_visible_scroll_y
+        # returns None (minimal scroll - the frame does not move).
+        view = self._stub(scroll_y=10, height=10, max_scroll=50)
+        assert view.target_visible_scroll_y(cursor_line=12) is None
+
+    def test_visible_target_scrolls_up_when_cursor_above_frame(self):
+        # The core bug: the cursor lands ABOVE the current frame (frame
+        # 30..39, cursor at line 0 - e.g. after switching to a one-card lane
+        # whose card is at the top). Direction-free reposition must pull the
+        # frame up so the item's top (line 0) is visible: offset == 0.
+        view = self._stub(scroll_y=30, height=10, max_scroll=50)
+        assert view.target_visible_scroll_y(cursor_line=0) == 0
+
+    def test_visible_target_scrolls_down_when_cursor_below_frame(self):
+        # The cursor lands BELOW the current frame (frame 0..9, cursor at line
+        # 40). Reposition must push the frame down so the item's bottom is on
+        # screen; with span=1 the deepest offset keeping line 40 visible is
+        # 40 - 10 + 1 = 31.
+        view = self._stub(scroll_y=0, height=10, max_scroll=50)
+        assert view.target_visible_scroll_y(cursor_line=40) == 31
+
+    def test_visible_target_keeps_whole_card_span_on_screen(self):
+        # A multi-line card (span=5) landing below the frame (frame 0..9,
+        # card top line 40 -> occupies 40..44) must keep its BOTTOM line on
+        # screen: deepest offset is item_bottom - height + 1 = 44 - 10 + 1 = 35.
+        view = self._stub(scroll_y=0, height=10, max_scroll=50, span=5)
+        target = view.target_visible_scroll_y(cursor_line=40)
+        assert target == 35
+        item_bottom = 40 + 5 - 1
+        assert target <= 40  # card top on screen
+        assert item_bottom <= target + 10 - 1  # card bottom on screen
+
+    def test_visible_target_oversized_card_aligns_top(self):
+        # An oversized card (span=12 > height=8) cannot fit; the reposition
+        # aligns its top to the viewport top (shows the start) regardless of
+        # the current offset, mirroring target_scroll_y's oversized branch.
+        view = self._stub(scroll_y=30, height=8, max_scroll=50, span=12)
+        assert view.target_visible_scroll_y(cursor_line=10) == 10
+
+    def test_visible_target_clamped_to_scroll_range(self):
+        # A reposition that would overshoot the content is clamped to
+        # max_scroll (the frame cannot scroll past the end).
+        view = self._stub(scroll_y=0, height=10, max_scroll=3)
+        assert view.target_visible_scroll_y(cursor_line=40) == 3
+
+    def test_visible_target_none_when_content_fits(self):
+        # Nothing to scroll (max_scroll == 0): no reposition.
+        view = self._stub(scroll_y=0, height=10, max_scroll=0)
+        assert view.target_visible_scroll_y(cursor_line=5) is None
 
 
 class TestLayoutViews:
@@ -6354,7 +8569,7 @@ class TestLayoutViews:
                 await pilot.press("escape")
                 await pilot.pause()
                 # e opens the edit dialog for the same task.
-                await pilot.press("e")
+                await pilot.press("e", "e")
                 await pilot.pause()
                 assert app.screen_stack[-1].__class__.__name__ == "EditTaskScreen"
                 await pilot.press("escape")
@@ -6505,7 +8720,7 @@ class TestLayoutViews:
                 await pilot.pause()
                 await pilot.press("v")  # list layout
                 await pilot.pause()
-                await pilot.press("e")  # edit the list-view's selected task
+                await pilot.press("e", "e")  # edit the list-view's selected task
                 await pilot.pause()
                 assert isinstance(app.screen, EditTaskScreen)
                 app.screen.query_one("#edit-title-input", Input).value = "From list"
@@ -8708,8 +10923,11 @@ class TestLongValuesPureLayout:
         row = TaskList.format_row(_long_task())
         # DataTable owns column sizing, so the row cells carry the full values
         # verbatim; the id and title must survive untruncated into the table.
+        # The Title cell is prefixed with the tree expand/collapse indicator
+        # (a leaf's blank glyph for this flat task), so strip it before the
+        # full-title check.
         assert row[5] == LONG_ID
-        assert row[6] == LONG_TITLE
+        assert row[6] == TaskList.format_tree_prefix(0, False, False) + LONG_TITLE
         # Long tags are rendered as badges and all survive.
         tag_cell = _plain(row[7])
         for tag in LONG_TAGS:
@@ -8801,6 +11019,24 @@ class TestLongValuesPureLayout:
         for tag in LONG_TAGS:
             assert tag in plain
 
+    def test_details_pane_shows_parent_when_set(self):
+        from doxtr_doto.cli.tui.widgets import TaskDetails
+
+        task = {"id": "C-1", "title": "Child", "status": "open", "parent": "P-1"}
+        plain = _plain(TaskDetails.format_details(task, []))
+        assert "Parent: P-1" in plain
+
+    def test_details_pane_omits_parent_when_absent(self):
+        from doxtr_doto.cli.tui.widgets import TaskDetails
+
+        # A top-level task (no ``parent``) renders no Parent line.
+        task = {"id": "T-1", "title": "Top-level", "status": "open"}
+        plain = _plain(TaskDetails.format_details(task, []))
+        assert "Parent:" not in plain
+        # An explicit None parent is likewise omitted.
+        task_none = {"id": "T-2", "title": "Also top-level", "status": "open", "parent": None}
+        assert "Parent:" not in _plain(TaskDetails.format_details(task_none, []))
+
 
 #: Free-text titles that contain ``[``/``]`` which rich/Textual would
 #: otherwise parse as style tags: a style-tag lookalike that silently drops
@@ -8855,9 +11091,11 @@ class TestBracketTitlesRenderLiterally:
         for title in BRACKET_TITLES:
             row = TaskList.format_row(_bracket_task(title=title))
             # The id/title/tag cells must parse as markup (``[/]`` would raise)
-            # and render the brackets literally.
+            # and render the brackets literally. The Title cell carries the
+            # leading tree indicator (a leaf blank here), so strip it first.
             assert _plain(row[5]) == "[id-1]"
-            assert _plain(row[6]) == title
+            prefix = TaskList.format_tree_prefix(0, False, False)
+            assert _plain(row[6]) == prefix + title
             assert "[tag]" in _plain(row[7])
 
     def test_list_line_renders_bracket_title_literally(self):
@@ -8897,6 +11135,22 @@ class TestBracketTitlesRenderLiterally:
             # the shared CLI/TUI builder, which stays colour-neutral); pin that
             # so a future change cannot silently diverge.
             assert "#" not in lines[0]
+
+    def test_details_pane_body_keeps_markdown_link_text(self):
+        from doxtr_doto.cli.tui.widgets import TaskDetails
+
+        # The table-layout detail pane renders the task body through Textual
+        # markup. A body containing a Markdown link ``[text](url)`` must keep
+        # its ``[text]`` run: without escaping, Textual parses ``[link text]``
+        # as a style tag and drops it, leaving only ``(url)`` in the preview
+        # (the bug: the bracketed link text disappears although it is present
+        # when editing).
+        task = _bracket_task(title="plain", body="see [link text](http://example.com) for details")
+        plain = _plain(TaskDetails.format_details(task, []))
+        assert "[link text]" in plain, plain
+        # Guard against the regression: the ``(url)``-only remnant must not be
+        # the whole link rendering.
+        assert "see [link text](http://example.com) for details" in plain
 
     def test_kanban_body_handles_a_bracket_run_split_across_lines(self):
         from doxtr_doto.cli.tui.widgets import KanbanView
@@ -9187,3 +11441,695 @@ class TestLongValuesLiveLayout:
                 assert LONG_ASSIGNEE in content
 
         _run(body())
+
+
+@pytest.fixture
+def reposition_store_file(tmp_path):
+    """A JSON store with a long ``open`` list and a single ``in-progress`` task.
+
+    Thirty ``open`` tasks (enough to overflow a short viewport in the list and
+    kanban layouts) plus one ``in-progress`` task pinned at the top of its
+    lane, so a Pilot test can scroll to the bottom of the long column and then
+    switch (lane or layout) to the short destination and assert the viewport
+    repositioned so the selected task is visible (the last unchecked feature).
+    """
+    store_path = tmp_path / "repoReposition" / ".doto" / "tasks.json"
+    store_path.parent.mkdir(parents=True)
+    tasks = {
+        f"T-{i:03d}": {
+            "title": f"Open task {i}",
+            "status": "open",
+            "priority": "medium",
+            "tags": [],
+            "worklogs": [],
+        }
+        for i in range(30)
+    }
+    tasks["P-001"] = {
+        "title": "Only in-progress task",
+        "status": "in-progress",
+        "priority": "high",
+        "tags": [],
+        "worklogs": [],
+    }
+    store_path.write_text(
+        json.dumps(
+            {
+                "version": 5,
+                "updated": "2024-01-01T00:00:00",
+                "tasks": tasks,
+                "series": {},
+            }
+        )
+    )
+    return store_path
+
+
+@pytest.fixture
+def reposition_ctx(reposition_store_file, env):
+    """A DotoContext wired to the long-list / short-lane reposition store."""
+    config = load_config(json_path=reposition_store_file)
+    return DotoContext(
+        config=config,
+        store=JsonTaskStore(config.get_json_path()),
+        formatter=get_formatter(config),
+        global_store=GlobalStateStore(),
+    )
+
+
+class TestSelectedTaskAlwaysVisible:
+    """Live-app tests for the always-reposition feature (last unchecked item).
+
+    After any *discontinuous* selection change - a kanban lane switch, a
+    layout cycle that re-selects a task, or a select-by-id - the viewport must
+    reposition so the whole selected task is visible. These drive the real
+    :class:`~doxtr_doto.cli.tui.app.DotoApp` through the Pilot so the wiring
+    (``_kanban_navigate`` / ``_cycle_layout`` / ``select_task``) is exercised
+    end to end, not just the widget seam.
+    """
+
+    def _app(self, ctx):
+        from doxtr_doto.cli.tui import nudge
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        app = DotoApp(ctx)
+        # Render the single current repo's tasks; pin LOCAL scope (the app
+        # defaults to GLOBAL, which would show nothing for the unregistered
+        # current repo this fixture uses).
+        app.scope = DisplayScope.LOCAL
+        return app
+
+    def test_kanban_lane_switch_repositions_selected_card(self, reposition_ctx):
+        from doxtr_doto.cli.tui.widgets import KanbanView
+        from doxtr_doto.enums import TuiLayout
+
+        app = self._app(reposition_ctx)
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                # Switch to the kanban layout.
+                await pilot.press("v")  # list
+                await pilot.press("v")  # kanban
+                await pilot.pause()
+                assert app.layout_view == TuiLayout.KANBAN
+                board = app.query_one(KanbanView)
+                assert board.max_scroll_y > 0  # the open lane overflows
+
+                # Jump to the bottom of the long 'open' lane.
+                await pilot.press("shift+down")
+                await pilot.pause()
+                assert board.scroll_y > 0  # frame scrolled down
+
+                # Switch right to the single-card 'in-progress' lane. The card
+                # is at the top, so the viewport must reposition to show it.
+                await pilot.press("l")
+                await pilot.pause()
+                assert board.selected_id() == "P-001"
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                height = board.size.height
+                assert board.scroll_y <= top  # card top visible
+                assert bottom < board.scroll_y + height  # card bottom visible
+
+        _run(body())
+
+    def test_layout_switch_repositions_selected_task(self, reposition_ctx):
+        from doxtr_doto.cli.tui.widgets import KanbanView
+        from doxtr_doto.enums import TuiLayout
+
+        app = self._app(reposition_ctx)
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                # Enter the kanban layout and scroll its long 'open' lane to
+                # the bottom so the view carries a deep, stale scroll offset.
+                await pilot.press("v")  # list
+                await pilot.press("v")  # kanban
+                await pilot.pause()
+                assert app.layout_view == TuiLayout.KANBAN
+                board = app.query_one(KanbanView)
+                assert board.max_scroll_y > 0
+                await pilot.press("shift+down")  # jump to bottom of the lane
+                await pilot.pause()
+                deep = board.scroll_y
+                assert deep > 0
+
+                # Relocate the kanban selection back to the top card and
+                # re-anchor the smart-scroll baseline *without* repositioning,
+                # so the view is left scrolled deep while its selection sits at
+                # the top - the exact stale state a return visit produces.
+                # ``apply_layout`` only toggles widget visibility (it does not
+                # rebuild), so this deep offset survives the layout switch.
+                board.row = 0
+                board._sync_scroll_anchor()
+                top = board.cursor_line()
+                height = board.size.height
+                assert not (board.scroll_y <= top < board.scroll_y + height)
+
+                # Cycle away to the list and back to the kanban. The
+                # ``_cycle_layout`` reposition on the newly active kanban view
+                # must pull the selected top card back into view; without that
+                # wiring the stale deep offset would remain and this assertion
+                # would fail.
+                await pilot.press("v")  # calendar
+                await pilot.press("v")  # time
+                await pilot.press("v")  # table
+                await pilot.press("v")  # list
+                await pilot.press("v")  # kanban (active again)
+                await pilot.pause()
+                assert app.layout_view == TuiLayout.KANBAN
+                board = app.query_one(KanbanView)
+                top = board.cursor_line()
+                bottom = top + board.cursor_span() - 1
+                height = board.size.height
+                assert board.scroll_y <= top  # card top visible
+                assert bottom < board.scroll_y + height  # card bottom visible
+                assert board.scroll_y < deep  # repositioned up from the deep offset
+
+        _run(body())
+
+    def test_cycle_into_calendar_keeps_grid_pinned(self, reposition_ctx):
+        """Cycling into the calendar keeps its month grid pinned to the top.
+
+        The calendar overrides
+        :meth:`~doxtr_doto.cli.tui.widgets.CalendarView.ensure_cursor_visible`
+        to delegate to its pinned-grid scroll, so the layout-cycle reposition
+        (:meth:`~doxtr_doto.cli.tui.app.DotoApp._cycle_layout`) that pulls a
+        list/kanban selection on screen instead keeps the calendar's grid
+        header at the top (``scroll_y == 0``) rather than scrolling to a
+        selected day. Exercises the ``CalendarView`` override end to end via
+        the ``_cycle_layout`` wiring, the only path that reaches it.
+        """
+        from doxtr_doto.cli.tui.widgets import CalendarView
+        from doxtr_doto.enums import TuiLayout
+
+        app = self._app(reposition_ctx)
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                # Cycle TABLE -> LIST -> KANBAN -> CALENDAR.
+                await pilot.press("v")  # list
+                await pilot.press("v")  # kanban
+                await pilot.press("v")  # calendar (CalendarView override runs)
+                await pilot.pause()
+                assert app.layout_view == TuiLayout.CALENDAR
+                cal = app.query_one(CalendarView)
+                # The pinned grid keeps the view at the top.
+                assert cal.scroll_y == 0
+
+        _run(body())
+
+    def test_calendar_ensure_cursor_visible_delegates_to_pinned_grid(self):
+        """The CalendarView override repositions to the pinned-grid offset (0).
+
+        A direct unit check that
+        :meth:`~doxtr_doto.cli.tui.widgets.CalendarView.ensure_cursor_visible`
+        delegates to the pinned-grid scroll rather than the list/kanban
+        span-clamp: even when the view carries a positive offset, the override
+        clamps it back to 0 so the month grid header stays on screen.
+        """
+        from textual.app import App, ComposeResult
+
+        from doxtr_doto.cli.tui.widgets import CalendarView
+
+        tasks = [
+            {"id": f"T-{i:03d}", "status": "open", "title": f"task {i}", "due": "2024-01-15"}
+            for i in range(40)
+        ]
+
+        class _Harness(App):
+            def compose(self) -> ComposeResult:
+                yield CalendarView(id="cal")
+
+        app = _Harness()
+
+        async def body():
+            async with app.run_test(size=(80, 12)) as pilot:
+                await pilot.pause()
+                cal = app.query_one("#cal", CalendarView)
+                cal.rebuild(tasks)
+                cal.focus()
+                await pilot.pause()
+
+                # Force a stale positive offset, then let the override pin it.
+                cal.scroll_to(y=5, animate=False)
+                await pilot.pause()
+                cal.ensure_cursor_visible()
+                await pilot.pause()
+                assert cal.scroll_y == 0  # grid pinned to the top
+
+        _run(body())
+
+
+@pytest.mark.skipif(not TEXTUAL_AVAILABLE, reason="textual not installed")
+class TestConflictResolveDialog:
+    """Pilot tests for the ``C r`` calendar-sync conflict resolver dialog."""
+
+    def _app(self, ctx):
+        from doxtr_doto.cli.tui import nudge
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        app = DotoApp(ctx)
+        app.scope = DisplayScope.LOCAL
+        return app
+
+    def _flag_conflict(self, store_file):
+        """Give T-001 an unresolved body conflict stash on disk."""
+        data = _load(store_file)
+        data["tasks"]["T-001"].update(
+            {
+                "body": "<<<<<<< local\nLOCAL\n=======\nREMOTE\n>>>>>>> remote",
+                "sync_conflict": True,
+                "_sync": {
+                    "conflict": {
+                        "detected": "2024-01-01T00:00:00",
+                        "fields": [
+                            {
+                                "field": "body",
+                                "base": "l1\nBASE\nl3",
+                                "local": "l1\nLOCAL\nl3",
+                                "remote": "l1\nREMOTE\nl3",
+                                "both": "<<<<<<< local\nLOCAL\n=======\nREMOTE\n>>>>>>> remote",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        store_file.write_text(json.dumps(data))
+
+    def test_resolve_keep_remote_clears_conflict(self, ctx, store_file):
+        from doxtr_doto.cli.tui.app import ConflictResolveScreen
+
+        self._flag_conflict(store_file)
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("C", "r")
+                await pilot.pause()
+                assert isinstance(app.screen, ConflictResolveScreen)
+                await pilot.press("r")  # keep remote
+                await pilot.pause()
+
+        _run(body())
+        t = _load(store_file)["tasks"]["T-001"]
+        assert t["body"] == "l1\nREMOTE\nl3"
+        assert t["sync_conflict"] is False
+        assert t["_sync"]["conflict"] is None
+
+    def test_resolve_cancel_leaves_conflict(self, ctx, store_file):
+        from doxtr_doto.cli.tui.app import ConflictResolveScreen
+
+        self._flag_conflict(store_file)
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("C", "r")
+                await pilot.pause()
+                assert isinstance(app.screen, ConflictResolveScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+        t = _load(store_file)["tasks"]["T-001"]
+        # Untouched: still flagged, markers still present.
+        assert t["sync_conflict"] is True
+        assert "<<<<<<<" in t["body"]
+
+    def test_resolve_noop_when_no_conflict(self, ctx, store_file):
+        from doxtr_doto.cli.tui.app import ConflictResolveScreen
+
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("C", "r")
+                await pilot.pause()
+                # No conflict on the selected task -> no dialog is pushed.
+                assert not isinstance(app.screen, ConflictResolveScreen)
+
+        _run(body())
+
+    def _flag_legacy_conflict(self, store_file):
+        """Flag T-001 with body markers but NO structured stash (legacy merge)."""
+        data = _load(store_file)
+        data["tasks"]["T-001"].update(
+            {
+                "body": (
+                    "shared\n\n<<<<<<< local (doto)\nLOCAL note\n"
+                    "=======\nREMOTE note\n>>>>>>> remote (calendar)"
+                ),
+                "sync_conflict": True,
+                "_sync": {"rst_file": None, "snapshot": None},
+            }
+        )
+        store_file.write_text(json.dumps(data))
+
+    def test_resolve_legacy_marker_task_from_dialog(self, ctx, store_file):
+        """A task with markers but no stash is resolvable via the dialog."""
+        from doxtr_doto.cli.tui.app import ConflictResolveScreen
+
+        self._flag_legacy_conflict(store_file)
+        app = self._app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("C", "r")
+                await pilot.pause()
+                assert isinstance(app.screen, ConflictResolveScreen)
+                await pilot.press("l")  # keep local
+                await pilot.pause()
+
+        _run(body())
+        t = _load(store_file)["tasks"]["T-001"]
+        assert "LOCAL note" in t["body"]
+        assert "<<<<<<<" not in t["body"]
+        assert t["sync_conflict"] is False
+        assert t["_sync"]["conflict"] is None
+
+
+@pytest.fixture
+def tree_store_file(tmp_path):
+    """A JSON store with a 3-level parent/child task tree plus a sibling.
+
+    ``P`` (parent) -> ``C`` (child) -> ``G`` (grandchild), plus ``S`` a
+    top-level leaf, so the TUI tree has a multi-level branch and a root leaf
+    to exercise expand/collapse and leaf multi-select.
+    """
+    store_path = tmp_path / "repoTree" / ".doto" / "tasks.json"
+    store_path.parent.mkdir(parents=True)
+    data_dict = {
+        "version": 6,
+        "updated": "2024-01-01T00:00:00",
+        "tasks": {
+            "P": {
+                "title": "Parent",
+                "status": "open",
+                "priority": "high",
+                "tags": [],
+                "parent": None,
+                "worklogs": [],
+            },
+            "C": {
+                "title": "Child",
+                "status": "open",
+                "priority": "medium",
+                "tags": [],
+                "parent": "P",
+                "worklogs": [],
+            },
+            "G": {
+                "title": "Grandchild",
+                "status": "open",
+                "priority": "low",
+                "tags": [],
+                "parent": "C",
+                "worklogs": [],
+            },
+            "S": {
+                "title": "Sibling leaf",
+                "status": "open",
+                "priority": "low",
+                "tags": [],
+                "parent": None,
+                "worklogs": [],
+            },
+        },
+        "series": {},
+    }
+    store_path.write_text(json.dumps(data_dict))
+    return store_path
+
+
+@pytest.fixture
+def tree_ctx(tree_store_file, env):
+    """A DotoContext wired to the parent/child tree store."""
+    config = load_config(json_path=tree_store_file)
+    return DotoContext(
+        config=config,
+        store=JsonTaskStore(config.get_json_path()),
+        formatter=get_formatter(config),
+        global_store=GlobalStateStore(),
+    )
+
+
+class TestTaskTreePrefix:
+    """Pure-logic tests for the tree triangle + indent seam."""
+
+    def test_prefix_glyph_reflects_state(self):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        expanded = TaskList.format_tree_prefix(0, True, True)
+        collapsed = TaskList.format_tree_prefix(0, True, False)
+        leaf = TaskList.format_tree_prefix(0, False, False)
+        assert TaskList.TREE_GLYPH_EXPANDED in expanded
+        assert TaskList.TREE_GLYPH_COLLAPSED in collapsed
+        # A leaf draws no triangle, just the blank glyph + space.
+        assert TaskList.TREE_GLYPH_EXPANDED not in leaf
+        assert TaskList.TREE_GLYPH_COLLAPSED not in leaf
+
+    def test_prefix_indents_by_depth(self):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        d0 = TaskList.format_tree_prefix(0, False, False)
+        d2 = TaskList.format_tree_prefix(2, False, False)
+        # Deeper rows carry more leading indent (width-stable prefix).
+        assert len(d2) == len(d0) + 2 * TaskList.TREE_INDENT
+
+    def test_format_row_applies_tree_prefix_from_treerow(self):
+        from doxtr_doto.cli.tui.filtersort import TreeRow
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        row = TreeRow(
+            task={"id": "P", "title": "Parent", "status": "open"},
+            depth=1,
+            has_children=True,
+            expanded=True,
+        )
+        cells = TaskList.format_row(row)
+        expected_prefix = TaskList.format_tree_prefix(1, True, True)
+        assert cells[6].startswith(expected_prefix)
+        assert "Parent" in cells[6]
+
+    def test_format_row_treats_bare_dict_as_leaf(self):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        cells = TaskList.format_row({"id": "x", "title": "T", "status": "open"})
+        assert cells[6] == TaskList.format_tree_prefix(0, False, False) + "T"
+
+    def test_format_tree_prefix_is_overridable(self):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        class ThemedTaskList(TaskList):
+            TREE_GLYPH_EXPANDED = "v"
+            TREE_GLYPH_COLLAPSED = ">"
+            TREE_INDENT = 4
+
+        assert "v" in ThemedTaskList.format_tree_prefix(0, True, True)
+        assert ">" in ThemedTaskList.format_tree_prefix(0, True, False)
+        # The subclass's wider indent flows through format_row's Title cell.
+        row = ThemedTaskList.format_row({"id": "x", "title": "T", "status": "open"})
+        # Leaf at depth 0 with the base glyphs is unchanged, but a themed
+        # parent prefix uses the overridden glyph.
+        from doxtr_doto.cli.tui.filtersort import TreeRow
+
+        parent_row = ThemedTaskList.format_row(
+            TreeRow(
+                task={"id": "p", "title": "P", "status": "open"},
+                depth=1,
+                has_children=True,
+                expanded=False,
+            )
+        )
+        assert "    " in parent_row[6]  # 4-space indent at depth 1
+        assert ">" in parent_row[6]
+        assert row[6].endswith("T")
+
+    def test_list_view_format_line_applies_tree_prefix(self):
+        from doxtr_doto.cli.tui.filtersort import TreeRow
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        row = TreeRow(
+            task={"id": "C", "title": "Child", "status": "open"},
+            depth=2,
+            has_children=False,
+            expanded=False,
+        )
+        line = ListView.format_line(row, highlighted=False)
+        assert ListView.format_tree_prefix(2, False, False) in line
+        assert "Child" in line
+
+
+class TestTaskTreeInteraction:
+    """Pilot-driven tests of the expandable task tree + Space semantics."""
+
+    def _app(self, ctx):
+        from doxtr_doto.cli.tui import nudge
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        nudge.mark_prompted(ctx, nudge.today_iso())
+        app = DotoApp(ctx)
+        app.scope = DisplayScope.LOCAL
+        return app
+
+    def test_tree_rebuilds_nested_rows_expanded_by_default(self, tree_ctx):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(tree_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Parents default EXPANDED: the whole branch is visible.
+                assert set(table.row_ids) == {"P", "C", "G", "S"}
+                # P and C have children; G and S are leaves.
+                hc = dict(zip(table.row_ids, table.row_has_children, strict=True))
+                assert hc["P"] is True
+                assert hc["C"] is True
+                assert hc["G"] is False
+                assert hc["S"] is False
+
+        _run(body())
+
+    def test_space_on_parent_collapses_and_expands_children(self, tree_ctx):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(tree_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Cursor starts on P (a parent). Space collapses its subtree.
+                assert table.selected_id() == "P"
+                await pilot.press("space")
+                await pilot.pause()
+                assert "P" in app._collapsed_ids
+                # C and G disappear; P and the sibling S remain.
+                assert set(table.row_ids) == {"P", "S"}
+                # Space again re-expands.
+                await pilot.press("space")
+                await pilot.pause()
+                assert "P" not in app._collapsed_ids
+                assert set(table.row_ids) == {"P", "C", "G", "S"}
+
+        _run(body())
+
+    def test_space_collapse_is_recursive_per_level(self, tree_ctx):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(tree_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Move to C (the mid-level parent) and collapse just its child.
+                table.select_id("C")
+                await pilot.pause()
+                assert table.selected_id() == "C"
+                await pilot.press("space")
+                await pilot.pause()
+                # Only G (under C) is hidden; P, C, S remain.
+                assert set(table.row_ids) == {"P", "C", "S"}
+
+        _run(body())
+
+    def test_space_on_leaf_toggles_multi_select(self, tree_ctx):
+        from doxtr_doto.cli.tui.widgets import TaskList
+
+        app = self._app(tree_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                table = app.query_one(TaskList)
+                # Move cursor to the leaf S and Space-select it.
+                table.select_id("S")
+                await pilot.pause()
+                assert table.selected_id() == "S"
+                await pilot.press("space")
+                await pilot.pause()
+                # Leaf Space is still the multi-select toggle (not expansion).
+                assert table.selected_ids == {"S"}
+                assert app._collapsed_ids == set()
+                await pilot.press("space")
+                await pilot.pause()
+                assert table.selected_ids == set()
+
+        _run(body())
+
+
+class TestListViewTreeInteraction:
+    """Render-only tests of the expandable task tree in the LIST layout.
+
+    Space is a TABLE-only affordance, so the LIST layout exercises the tree by
+    passing a ``collapsed_ids`` set straight to :meth:`ListView.rebuild` and
+    asserting the rendered rows - mirroring :class:`TestTaskTreeInteraction`
+    for the table, but render-only.
+    """
+
+    @staticmethod
+    def _tree_tasks():
+        return [
+            {"id": "P", "title": "Parent", "status": "open", "parent": None},
+            {"id": "C", "title": "Child", "status": "open", "parent": "P"},
+            {"id": "G", "title": "Grandchild", "status": "open", "parent": "C"},
+            {"id": "S", "title": "Sibling leaf", "status": "open", "parent": None},
+        ]
+
+    def test_list_view_rebuilds_nested_rows_expanded_by_default(self):
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        view = ListView()
+        view.rebuild(self._tree_tasks())
+        # Parents default EXPANDED: the whole branch is visible, in order.
+        assert view.row_ids == ["P", "C", "G", "S"]
+
+    def test_list_view_renders_indented_triangle_rows(self):
+        from doxtr_doto.cli.tui.filtersort import flatten_tree
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        tasks = self._tree_tasks()
+        rows = flatten_tree(tasks)
+        by_id = {r.task["id"]: ListView.format_line(r, highlighted=False) for r in rows}
+        # Parent P (expanded, depth 0): expanded triangle, no indent.
+        assert ListView.TREE_GLYPH_EXPANDED in by_id["P"]
+        assert ListView.format_tree_prefix(0, True, True) in by_id["P"]
+        # Child C (expanded parent, depth 1): one indent level + triangle.
+        assert ListView.format_tree_prefix(1, True, True) in by_id["C"]
+        # Grandchild G (leaf, depth 2): two indent levels, leaf blank glyph.
+        assert ListView.format_tree_prefix(2, False, False) in by_id["G"]
+        assert ListView.TREE_GLYPH_EXPANDED not in by_id["G"]
+        assert ListView.TREE_GLYPH_COLLAPSED not in by_id["G"]
+        # Sibling leaf S (depth 0 leaf).
+        assert ListView.format_tree_prefix(0, False, False) in by_id["S"]
+
+    def test_list_view_collapsed_parent_hides_descendants(self):
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        view = ListView()
+        # Collapse P directly via the rebuild collapsed_ids arg (render-only,
+        # since Space is TABLE-only): its descendants C and G vanish.
+        view.rebuild(self._tree_tasks(), {"P"})
+        assert view.row_ids == ["P", "S"]
+
+    def test_list_view_mid_level_collapse_hides_only_that_subtree(self):
+        from doxtr_doto.cli.tui.widgets import ListView
+
+        view = ListView()
+        # Collapse only C: its child G is hidden, but P, C, and S remain.
+        view.rebuild(self._tree_tasks(), {"C"})
+        assert view.row_ids == ["P", "C", "S"]

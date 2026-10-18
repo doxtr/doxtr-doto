@@ -39,6 +39,7 @@ class TestCalendarConfig:
                 "event_duration_minutes": 45,
                 "all_day_for_dateless": False,
                 "username": "me@example.com",
+                "conflict_policy": "merge",
             },
         )
         cc = cfg.calendar
@@ -49,6 +50,7 @@ class TestCalendarConfig:
         assert cc.event_duration_minutes == 45
         assert cc.all_day_for_dateless is False
         assert cc.username == "me@example.com"
+        assert cc.normalized_conflict_policy() == "merge"
 
     def test_apply_empty_table_noop(self):
         from doxtr_doto.cli.config import DotoConfig
@@ -148,9 +150,51 @@ class TestCalendarConfigValidation:
         assert any("event_mode" in e for e in cc.validate())
 
     def test_unsupported_direction_error(self):
-        cc = CalendarConfig(provider="google", direction="two-way")
+        cc = CalendarConfig(provider="google", direction="sideways")
         assert any("direction" in e for e in cc.validate())
+
+    def test_two_way_direction_is_valid(self):
+        for d in ("two-way", "twoway", "both", "TWO-WAY"):
+            cc = CalendarConfig(provider="google", direction=d)
+            assert cc.validate() == []
+            assert cc.normalized_direction() == "two-way"
+
+    def test_push_direction_normalizes(self):
+        assert CalendarConfig(direction="push").normalized_direction() == "push"
+        assert CalendarConfig().normalized_direction() == "push"
+
+    def test_pull_direction_is_valid(self):
+        for d in ("pull", "PULL", "  pull  "):
+            cc = CalendarConfig(provider="google", direction=d)
+            assert cc.validate() == []
+            assert cc.normalized_direction() == "pull"
+
+    def test_validate_matches_normalized_whitespace(self):
+        # validate() and normalized_direction() must agree on surrounding
+        # whitespace: a padded alias is valid and normalizes correctly.
+        cc = CalendarConfig(provider="google", direction="  Two-Way  ")
+        assert cc.validate() == []
+        assert cc.normalized_direction() == "two-way"
 
     def test_aliases_are_valid(self):
         for p in ("apple", "icloud", "outlook", "ms", "graph", "caldav"):
             assert CalendarConfig(provider=p).validate() == []
+
+    def test_default_conflict_policy_is_local_wins(self):
+        assert CalendarConfig().normalized_conflict_policy() == "local-wins"
+
+    def test_merge_conflict_policy_aliases_normalize(self):
+        for p in ("merge", "three-way", "3-way", "MERGE", "  merge  "):
+            cc = CalendarConfig(provider="google", conflict_policy=p)
+            assert cc.validate() == []
+            assert cc.normalized_conflict_policy() == "merge"
+
+    def test_local_wins_conflict_policy_aliases_normalize(self):
+        for p in ("local-wins", "localwins", "local", "LOCAL"):
+            cc = CalendarConfig(provider="google", conflict_policy=p)
+            assert cc.validate() == []
+            assert cc.normalized_conflict_policy() == "local-wins"
+
+    def test_unknown_conflict_policy_error(self):
+        cc = CalendarConfig(provider="google", conflict_policy="newest")
+        assert any("conflict_policy" in e for e in cc.validate())

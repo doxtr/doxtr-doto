@@ -67,6 +67,7 @@ Full Options Test
    :priority: critical
    :status: in-progress
    :due: 2026-12-31
+   :estimate: 4h
    :tags: feature, frontend, urgent
    :depends-on: TASK-001, TASK-002
    :created: 2026-01-01
@@ -90,8 +91,38 @@ Full Options Test
         assert task.status == "in-progress"
         # due is now stored as ISO string, not date object
         assert task.due == "2026-12-31"
+        assert task.estimate == 240
         assert task.tags == ["feature", "frontend", "urgent"]
         assert task.depends_on == ["TASK-001", "TASK-002"]
+
+    def test_estimate_parsed_to_minutes(self, doto_srcdir, make_app):
+        """The :estimate: option is parsed to whole minutes via the duration syntax."""
+        tasks_rst = doto_srcdir / "estimate.rst"
+        tasks_rst.write_text("""
+Estimate Test
+=============
+
+.. doto:: Quick task
+   :id: EST-001
+   :estimate: 5m
+
+.. doto:: Combined estimate
+   :id: EST-002
+   :estimate: 1h30m
+
+.. doto:: No estimate
+   :id: EST-003
+""")
+        index = doto_srcdir / "index.rst"
+        index.write_text(index.read_text() + "\n   estimate\n")
+
+        app = make_app(srcdir=doto_srcdir)
+        app.build()
+
+        tasks = app.env.doto_data.all_tasks
+        assert tasks["EST-001"].estimate == 5
+        assert tasks["EST-002"].estimate == 90
+        assert tasks["EST-003"].estimate is None
 
     def test_multiline_title_normalized_to_single_line(self, doto_srcdir, make_app):
         """A title spanning continuation lines is stored as a single line.

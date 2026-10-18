@@ -111,3 +111,76 @@ def read_client_secrets(path: str) -> dict[str, Any]:
         raise ProviderAuthError(f"Cannot read oauth_client_secrets {path!r}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ProviderAuthError(f"Invalid JSON in oauth_client_secrets {path!r}: {exc}") from exc
+
+
+def parse_google_datetime(node: dict[str, Any]) -> tuple[datetime | None, bool]:
+    """Parse a Google events#resource start/end node into naive-local time.
+
+    Google represents an all-day boundary as ``{"date": "YYYY-MM-DD"}`` and a
+    timed boundary as ``{"dateTime": "...", "timeZone": "..."}``. doto models
+    due dates/times as *naive, local* wall-clock values, so the returned
+    datetime is naive: for a timed value we drop the timezone (keeping the
+    wall-clock the API returned, which the push path stamps with the local
+    zone), and for an all-day value we return a midnight datetime.
+
+    Args:
+        node: The ``start`` or ``end`` object from a Google event resource.
+
+    Returns:
+        ``(datetime | None, all_day)``. ``all_day`` is True for a ``date``
+        node. Returns ``(None, False)`` for an empty/unrecognized node.
+    """
+    if not node:
+        return None, False
+    date_only = node.get("date")
+    if date_only:
+        try:
+            parsed = datetime.fromisoformat(str(date_only))
+        except ValueError:
+            return None, True
+        return parsed.replace(hour=0, minute=0, second=0, microsecond=0), True
+    dt_str = node.get("dateTime")
+    if dt_str:
+        try:
+            parsed = datetime.fromisoformat(str(dt_str))
+        except ValueError:
+            return None, False
+        # Drop any timezone to get back to naive-local wall-clock. Google
+        # returns the time already expressed in the event's own zone, so the
+        # wall-clock fields are what we want.
+        return parsed.replace(tzinfo=None), False
+    return None, False
+
+
+def parse_graph_datetime(node: dict[str, Any]) -> datetime | None:
+    """Parse a Microsoft Graph ``{"dateTime", "timeZone"}`` node to naive-local.
+
+    Graph returns a boundary as ``{"dateTime": "2026-03-02T09:00:00.0000000",
+    "timeZone": "..."}``. doto models due dates/times as *naive, local*
+    wall-clock values, so we take the wall-clock ``dateTime`` and drop any
+    timezone marker. The list request stamps a ``Prefer: outlook.timezone``
+    header asking Graph to express times in the local zone, so the wall-clock
+    fields are already correct once tzinfo is stripped. Shared by the Microsoft
+    provider; kept here next to :func:`parse_google_datetime` so the two API
+    providers can't drift on inbound time handling.
+
+    Args:
+        node: The ``start`` or ``end`` object from a Graph event resource.
+
+    Returns:
+        A naive :class:`datetime`, or None for an empty/unparseable node.
+    """
+    raw = (node or {}).get("dateTime")
+    if not raw:
+        return None
+    try:
+        # Microsoft Graph uses 7-digit fractional seconds (100-ns ticks), e.g.
+        # "2026-03-02T09:00:00.0000000". Python < 3.11 fromisoformat() only
+        # accepts up to 6 fractional digits, so we truncate before parsing.
+        s = str(raw).replace("Z", "")
+        if "." in s:
+            dt_part, frac = s.rsplit(".", 1)
+            s = f"{dt_part}.{frac[:6]}"
+        return datetime.fromisoformat(s).replace(tzinfo=None)
+    except ValueError:
+        return None

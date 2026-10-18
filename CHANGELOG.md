@@ -13,6 +13,304 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [0.3.0] - 2026-10-18
+
+### Added
+
+#### Migrate xlink resolver integration to `doxtr-xlink`
+- The optional `:xlink:` resolution for the task `:assignee:` field now
+  integrates with [`doxtr-xlink`](https://pypi.org/project/doxtr-xlink/) (`>=2.0`),
+  the maintained successor to the now-unmaintained `sphinxcontrib-xlink`. The
+  resolver API doto relies on is unchanged
+  (`doxtr_xlink._get_xlink_data(app, link_id) -> (title, url)`), as are the
+  `.xlink` file grammar, the `xlink_directory` config, and the `xlink` role, so
+  this is a drop-in swap: enable it with `doto-doto[xlink]` and list
+  `doxtr_xlink` (instead of `sphinxcontrib.xlink`) in your Sphinx `extensions`.
+  Resolution stays render-time only and still degrades gracefully to the raw
+  `:xlink:` token when the package is absent or disabled.
+
+#### `doto series update` + TUI series/entry edit & delete under the `e` domain
+- New **`doto series update`** command: update a recurring series and
+  re-stamp its occurrences **forward-only** from a `--from` anchor (a task id
+  or a date). Replaces the calendar pattern (`--repeat`), per-occurrence start
+  time (`--at` / `--no-time`), duration (`--for` / `--no-duration`) and/or
+  title template (`--title`); `--metadata-only` updates the stored pattern /
+  title without re-stamping any task; `--dry-run` previews; `--json` for
+  scripting. Only occurrences whose due date is on or after the anchor are
+  changed, done / archived occurrences are skipped, and occurrences before the
+  anchor are never modified. Changing the calendar *shape* re-stamps
+  time / duration / title onto the existing forward dates only — it does not
+  move or add dates (use `doto series extend` to add dates). Mutually-exclusive
+  flags and a "nothing to update" guard surface clear errors.
+- **TUI Edit domain (`e` is now a two-key prefix).** The flat `e` edit key is
+  promoted to an Edit stream domain: `e e` edits the selected entry, `e d`
+  deletes it (single-entry delete, with a confirm dialog), and — **only when
+  the selected task is part of a series** — `e E` edits the whole series from
+  the selected occurrence forward and `e D` deletes the series (confirm dialog
+  offering *Delete series + tasks* / *Keep tasks, remove series* / *Cancel*,
+  parity with `doto series delete --keep-tasks`). Convention: lowercase second
+  key = single entry, uppercase = whole series. The TUI routes through the
+  same reusable `update_series` / `delete_task` / `delete_series` actions the
+  CLI uses, so the two never diverge.
+- **Store fix:** deleting a task now prunes its id from the owning series'
+  `task_ids` (in `JsonTaskStore.delete_task`), so the `doto delete` path and
+  the TUI single-entry delete both keep a series' occurrence count consistent.
+- **TUI series navigation (`e n` / `e p`).** Within the Edit domain — and
+  **only when the selected task is part of a series** — `e n` jumps the
+  selection to the next occurrence of the series and `e p` to the previous
+  one, following due-date (occurrence) order independent of the current list
+  sort / filter. Both clamp at the ends (no wrap, subtle notify) and are
+  graceful no-ops for a non-series selection or a neighbour hidden by the
+  active filter.
+- **TUI "recent done" filter.** The filter/sort pop-up (`F`) can now hide
+  stale `done` tasks — those completed more than **N** days ago — keeping the
+  list focused on recent work. The window **N** comes from the new
+  `tui_recent_done_days` config key (default **10**) and the filter is **on by
+  default**; toggle it or change the window in the pop-up and your choice is
+  remembered across launches (persisted via the new `tui_recent_done_enabled`
+  / `tui_recent_done_days` global-state fields). Backs it with a new
+  `completed_at` task field stamped centrally when a task transitions into
+  `done` (and cleared when it moves back out). Backward compatible: `done`
+  tasks completed before this field existed carry no timestamp and are always
+  shown, and the field has no schema migration by design.
+
+#### TUI set parent (`e P`)
+- **Attach a task to a PARENT task from the TUI.** The new **`e P`**
+  Edit-domain key opens a parent-picker pop-up listing every other visible
+  task; choosing one sets the selected entry's new **`parent`** task field.
+  Always available (not series-only) and multi-select aware — with a
+  multi-selection every selected entry is attached to the chosen parent in one
+  go. The picker **remembers the last chosen parent** for the session so
+  assigning several tasks to the same parent is quick. Rejects
+  **self-parenting / cycles** and **cross-repo parents** per child (rejected
+  children are skipped with a notice). The new `parent` field is shown in the
+  detail pane (`Parent: <id>`). No CLI twin — this is a TUI-only action.
+- **Store fix:** deleting a task now also clears any surviving task's
+  `parent` pointer that referenced it (symmetric with the series-link prune in
+  `JsonTaskStore.delete_task`), so `parent` always points at a live task.
+
+#### TUI: hierarchical sub-task tree
+- **Sub-tasks nest under their `parent` as a recursive, indented tree** in
+  both the table and list layouts: each child is drawn below its parent with
+  depth indentation and a leading expand/collapse triangle (`▾` expanded /
+  `▶` collapsed; leaves carry no triangle). The nesting is multi-level —
+  a grandchild sits under its child under its parent to arbitrary depth — and
+  a task whose parent is filtered out (or absent) is promoted to a root so a
+  child never vanishes just because its parent is hidden.
+- **`Space` is now split by row shape.** On a **parent** row `Space` toggles
+  expand/collapse of its sub-tree; on a **leaf** row it keeps the existing
+  multi-select behaviour (so `d` / `D` bulk actions and `e P` parenting still
+  work). Multi-select / expand remain table-layout affordances.
+- **Running tasks stay visible under a collapsed ancestor.** An active
+  (time-recorded) task is always shown even when one of its ancestors is
+  collapsed: the full ancestor chain down to the running task is
+  force-expanded, so you can never be timing a sub-task you cannot see.
+- **Parents default to expanded**, and the collapse state is **session-scoped**
+  (held in memory per TUI run, not persisted).
+- **New overridable seams:** `flatten_tree` / `TreeRow` in
+  `cli/tui/filtersort.py` (the pure parent/child flatten), and
+  `format_tree_prefix` / the `TREE_*` glyph+indent attributes on the list
+  widgets — hoisted into a shared `TreePrefixMixin` that both the table
+  (`TaskList`) and list (`ListView`) widgets inherit, each still overridable
+  independently so a child theme can reskin either tree.
+
+### Changed
+- **Behavior change:** a bare `e` in the TUI no longer edits immediately — it
+  is now the Edit-domain prefix; press `e e` to edit the selected entry. The
+  series actions `e E` / `e D` are shown in the Edit domain only for a task
+  that belongs to a series (a standalone task shows just `e e` / `e d`). The
+  card-viewer popup's own `e` still edits the viewed card directly (it is a
+  self-contained modal, not the prefix dispatcher).
+
+#### TUI: always reposition so the selected task stays visible
+- The interactive TUI now guarantees the **selected doto is always on screen**
+  after a *discontinuous* selection change. Previously, switching from the
+  bottom of a long column to a short destination could leave the selected task
+  off screen: the smart-scroll algorithm infers the move direction from the
+  previous cursor line (correct for continuous `j` / `k` navigation), but a
+  jump across lanes / days / layouts has no meaningful direction, so a stale
+  inference could keep the frame where it was. Example from the report:
+  switching from the bottom of a long `open` lane to a one-card `in-progress`
+  lane now scrolls the viewport back up so the single card is visible.
+- Repositioning is wired into every discontinuous jump: switching kanban swim
+  lanes (`h` / `l` / arrows → `DotoApp._kanban_navigate` after the board
+  rebuild), selecting a task by id (`select_id` on the list / kanban views),
+  and the layout cycle (`v` / `V`) that re-selects a task. The `calendar`
+  layout keeps its month grid pinned either way: cycling into the calendar
+  keeps the grid header on screen, while a calendar day move reaches its scroll
+  through the subsequent rebuild rather than the reposition seam.
+- Extensibility seam for child themes: the reposition is the new overridable
+  `AltLayoutView.ensure_cursor_visible()` method (a discontinuous-jump
+  counterpart to `scroll_to_cursor` / `scroll_cursor_to_edge`), with the pure
+  target computation factored into `target_visible_scroll_y()` so it can be
+  unit-tested and retuned independently. It reuses the same whole-span clamp as
+  the smart-scroll (`lo = item_bottom - height + 1`, `hi = cursor_line`,
+  oversized items align their top) so a multi-line kanban card is kept *fully*
+  visible, and re-anchors the smart-scroll baseline afterwards so subsequent
+  `j` / `k` still infer direction correctly. `CalendarView` overrides it to
+  stay consistent with its pinned-grid scroll. A child theme can replace the
+  reposition by subclassing and swapping the matching `*_view_class` attribute.
+
+#### TUI: auto-select newly added tasks
+- The interactive TUI now **auto-selects** a task immediately after you create
+  it with the add-task modal (`a`): once the list refreshes the new task becomes
+  the highlighted row in whichever layout is active (table / list / kanban /
+  calendar) and is scrolled into view, so you no longer have to hunt for the
+  task you just added.
+- The behaviour is configurable via the new `[doto]` key
+  `tui_auto_select_new_task` (default `true`). Set it to `false` to keep the
+  previous selection after adding a task.
+- Works in both LOCAL and GLOBAL display scope: the bare id `add_task` returns
+  is mapped to the display id the active view uses (namespaced `repo#id` in
+  GLOBAL scope when needed) before selecting.
+- Extensibility seam for child themes: selection is routed through the new
+  overridable `DotoApp.select_task(task_id)` method, which delegates to a new
+  per-view `select_id(task_id)` seam on the task-list table and every
+  `AltLayoutView` (list / kanban / calendar); the time view, whose selection is
+  day-based, inherits the base no-op. A child theme can swap either the
+  app-level operation or the per-view cursor placement without reimplementing
+  the add flow, and the existing id-preservation behaviour in each view's
+  `rebuild` is untouched.
+
+#### TUI: configurable add-task modal
+- The interactive TUI's add-task modal (opened with `a`) is now
+  **field-configurable** via two `[doto]` keys, so you can turn the classic
+  title-only prompt into a richer form. The default is unchanged — with no
+  config the modal stays the original title-only prompt (`minimal`), so
+  existing users see no difference until they opt in.
+- `tui_add_fields` selects which fields the modal shows, and in what order:
+  either a preset name — `minimal` (title only; the default), `default`
+  (`title`, `tags`, `due`, `assignee`, `body`) or `all` (every user-settable
+  field, derived dynamically from the task field registry) — or an **explicit
+  ordered list** of field names (which overrides a preset; `title` is always
+  included, unknown / non-settable `created` / `updated` names are dropped,
+  duplicates removed). An explicit list may also include `repo` to position
+  the repository picker anywhere in the modal (e.g.
+  `tui_add_fields = ["repo", "title", "due"]`); in the presets the picker keeps
+  its place just under the title, and it is shown only when more than one
+  repository is available.
+- `[doto.tui_add_defaults]` is a per-field sub-table that prefills the modal.
+  The `due` default accepts **relative expressions** (`"tomorrow"`, `"+7d"`,
+  `"friday"`) resolved when you open the modal, and a `repo` default pre-selects
+  the target repository **by name** (case-insensitive). Bad values fall back
+  safely (an unparseable `due` opens empty; an unknown `repo` uses the current
+  repo), so a stale default never breaks the modal. `assignee` / `priority` /
+  `status` still honor the existing `default_*` config as a fallback.
+- `progress` is validated as a `0`–`100` integer at submit (a non-numeric or
+  out-of-range value surfaces an error and keeps the modal open rather than
+  writing a value that would crash at render time).
+- Extensibility seams for child themes: the field→kind mapping (`FIELD_KINDS`)
+  and the data-driven kind→builder dispatch table (`FIELD_KIND_BUILDERS`, so a
+  new render kind is one method + one table entry — no `if`/`elif` chain), the
+  widget classes (`input_class` / `select_class` / `text_area_class`), the RACI
+  role inputs (`RACI_FIELDS` / `build_raci_inputs`), the per-field suggesters
+  (`field_suggester`, routing to `assignee_suggester` / `tags_suggester` /
+  `raci_suggester`), the select choices (`select_choices`) and the field labels
+  (`FIELD_LABELS`) are all overridable without reimplementing the modal.
+
+#### Two-way calendar sync (pull + push)
+- `doto calsync` now supports **pulling** calendar events into doto, not just
+  pushing. Set `direction = "two-way"` in the `[calendar]` table (aliases
+  `twoway` / `both`) to make `doto calsync sync` run a full pull-then-push
+  cycle; the default `direction = "push"` is unchanged.
+- New `doto calsync pull` subcommand imports / reconciles calendar events into
+  doto on its own (`--dry-run` / `-n` previews). Inbound semantics:
+  - **New** user-created events (ones *without* a `doto-<id>@doxtr-doto` UID)
+    are **imported** as new tasks (summary → title, description → body with the
+    `[doto:…]` back-reference stripped, start/date → `due`).
+  - **Changed** imported events **update** their task; **deleted** imported
+    events **archive** the task (soft delete — `archived = true` /
+    `archived_on`, never a hard delete).
+  - doto-owned events are ignored by pull (they round-trip through push), and an
+    imported task is excluded from the same run's push pass so no duplicate
+    `doto-…` event is created.
+- **Conflict policy is local-wins** and *reported*: when both a task and its
+  doto-owned calendar event changed since the last sync, the local task is kept
+  and push overwrites the remote; the conflict is surfaced in the sync output.
+  A persisted inbound baseline hash means a routine local-only edit of a
+  previously-pushed task is **not** reported as a spurious conflict.
+- Extension seams mirroring `register_projector`: `register_inbound_mapper(fn)`
+  swaps the calendar-item → task-fields mapping used by pull, and
+  `two_way_sync(..., conflict_policy=…)` injects the conflict-resolution policy
+  (default `local_wins_policy`) so a downstream can choose remote-wins /
+  newest-wins without editing core.
+- A live end-to-end harness (`scripts/calsync_live_e2e.py`) exercises the full
+  two-way cycle against a real provider.
+
+#### Private global-state location (keep your working hours out of a shared repo)
+- The global state file holds the **work clock** (your clock-in/clock-out
+  hours), the active session, favorites, and the repo registry. In a shared
+  checkout you may not want this visible to the team. You can now redirect it
+  to a private path via a new `state_file` setting:
+  - In `.doto.toml`: `state_file = "~/private/doto-state.json"` (top-level under
+    `[doto]`), or a dedicated table `[state]` with `file = "..."`.
+  - Or the `DOTO_STATE_FILE` environment variable.
+  - `~` and `$VAR`/`${VAR}` references are expanded; a relative path is
+    anchored to the project base (the Sphinx source dir, which may be a
+    `docs/` subdirectory rather than the repo root), so an absolute or
+    `~`-anchored path points at a personal location outside the shared tree.
+- Resolution precedence (read and first-run write): `$DOTO_CONFIG` →
+  `state_file`/`DOTO_STATE_FILE` → portable `.doto/config.json` (walk-up) →
+  `~/.config/doto/config.json`. `$DOTO_CONFIG` still wins, so existing setups
+  are unchanged, and when `state_file` is unset behaviour is identical to
+  before. Seam: `cli/config.py::DotoConfig.get_state_path`,
+  `cli/global_state.py::resolve_global_config_path` /
+  `resolve_global_config_write_path`.
+
+- `estimate` is now a sortable field: `:sort: estimate` in `doto-list` and
+  `doto list --sort estimate` order tasks numerically by expected duration
+  (shortest first; tasks without an estimate sort last).
+- The duration parser/formatter is more forgiving of foreign-stored data: a
+  numeric `float` estimate is accepted (truncated to whole minutes), and
+  `format_duration_minutes` returns `""` for any non-integer input instead of
+  raising, so RST write-back and table rendering never crash on a hand-edited
+  `tasks.json`.
+
+### Fixed
+
+- `estimate` now renders in the `doto-list` table and single-task card in the
+  real Sphinx HTML/LaTeX build. Previously the column value was only wired into
+  the Jinja-absent fallback path, so a `:columns: ..., estimate` list showed an
+  empty cell in the shipped build. (The same gap for `progress` is fixed too.)
+- Merge-driven RST write-back now emits `:estimate:` in the compact form
+  (`1h30m`) identical to the create path, instead of the raw stored integer.
+- `estimate` is now included in the `TaskData` TypedDict and the standalone RST
+  parser's option spec, closing silent single-source-of-truth drift.
+- The single-task **LaTeX/PDF** box now renders `estimate` and `progress`
+  (both the default and compact layouts), matching the HTML card which already
+  showed them; previously the PDF box silently omitted both fields.
+- `done` tasks with a past due date are no longer flagged `[OVERDUE]` in the
+  `doto list` CLI table (and its overdue summary count), matching the
+  Sphinx/collectors overdue logic which already excluded completed tasks.
+- The TUI table-view detail pane now markup-escapes the task **body** as well,
+  so a value containing a Markdown link `[text](url)` keeps its `[text]` run
+  instead of having it parsed as a style tag and dropped (rendering only
+  `(url)`). This matches the literal bracketed-text behaviour the title/kanban
+  surfaces already had.
+
+#### Per-task estimate (expected duration) for calendar-sync
+- Tasks can now record how long they are expected to take via a new
+  `:estimate:` option on the `.. doto::` directive, authored with a compact,
+  human-friendly duration syntax: `5m`, `10m`, `4h`, `1h30m`, or a bare number
+  of minutes (`30`). The value is stored canonically as a whole number of
+  minutes and round-trips losslessly back to the compact form on sync.
+- **Calendar-sync** uses the estimate to size the projected event: a task
+  carrying `:estimate: 4h` becomes a 4-hour calendar block, overriding the
+  global `event_duration_minutes` default. Tasks without an estimate keep the
+  configured default slot size. The estimate is honoured by every provider
+  (Google, Outlook, Apple, CalDAV) because it lives in the single, shared
+  task → event projection (`calsync/model.py::project_task_to_event`); parsing
+  there is forgiving so malformed stored data falls back to the default rather
+  than failing a push.
+- The `estimate` field is a first-class task field registered in the central
+  registry (`fields.py`), so it participates in 3-way merge, JSON
+  serialization, and is available as a `doto-list` display column (rendered in
+  the compact duration form). New helpers `parse_duration`,
+  `parse_duration_safe`, and `format_duration_minutes` in `date_utils.py` are
+  the single source of truth for the duration syntax.
+- JSON store schema migrated v5 → v6 to backfill `estimate` (`None` = unset)
+  on existing tasks.
+
 ## [0.2.0] - 2026-10-11
 
 ### Added
@@ -822,6 +1120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single cursor task. A new `TaskList.target_ids` returns the effective
   target list. The help modal and README keybinding table were updated
   accordingly.
+  _(Superseded under `[Unreleased]`: `Space` is now split by row shape — on a
+  **parent** row it toggles tree expand/collapse, on a **leaf** row it keeps
+  this multi-select behaviour — see “TUI: hierarchical sub-task tree” above.)_
 
 ### Changed
 - **Kanban navigation / card-move keys switched** (interactive TUI): in the

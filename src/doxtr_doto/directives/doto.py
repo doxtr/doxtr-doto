@@ -53,6 +53,7 @@ class DotoDirective(SphinxDirective):
            :priority: high
            :status: open
            :due: 2026-08-15
+           :estimate: 4h
            :tags: security, backend
            :depends-on: TASK-000
 
@@ -71,6 +72,7 @@ class DotoDirective(SphinxDirective):
         "priority": directives.unchanged,
         "status": directives.unchanged,
         "due": directives.unchanged,
+        "estimate": directives.unchanged,
         "tags": directives.unchanged,
         "depends-on": directives.unchanged,
         "progress": directives.unchanged,
@@ -106,6 +108,7 @@ class DotoDirective(SphinxDirective):
         priority = self._get_priority()
         status = self._get_status()
         due = self._get_due_date()
+        estimate = self._get_estimate()
         tags = parse_list(self.options.get("tags", ""))
         depends_on = parse_list(self.options.get("depends-on", ""))
         progress = self._get_progress()
@@ -130,6 +133,7 @@ class DotoDirective(SphinxDirective):
             priority=priority,
             status=status,
             due=due.isoformat() if due else None,
+            estimate=estimate,
             tags=tags,
             depends_on=depends_on,
             progress=progress,
@@ -301,6 +305,34 @@ class DotoDirective(SphinxDirective):
                 "followed by a time: 'YYYY-MM-DD 16:00', 'YYYY-MM-DD 16h', or "
                 "'YYYY-MM-DD 16:00:31' (naive local time)."
             ) from e
+
+    def _get_estimate(self) -> int | None:
+        """Parse and validate the ``:estimate:`` option.
+
+        The estimate expresses how long the task is expected to take using the
+        compact duration syntax (``5m``, ``10m``, ``4h``, ``1h30m``) or a bare
+        number of minutes. It is stored as a whole number of minutes and is
+        consumed by calendar-sync to size the projected event (overriding the
+        global ``event_duration_minutes``).
+
+        Returns:
+            The estimate in whole minutes, or ``None`` if not set.
+
+        Raises:
+            self.error: If the value is not a recognized positive duration.
+        """
+        from doxtr_doto.date_utils import parse_duration
+
+        raw = self.options.get("estimate", "").strip()
+        if not raw:
+            return None
+        try:
+            return parse_duration(raw)
+        except (ValueError, TypeError) as err:
+            raise self.error(
+                f"Invalid estimate '{raw}'. Expected a duration like '5m', "
+                "'10m', '4h', '1h30m', or a bare number of minutes."
+            ) from err
 
     def _get_date_option(self, name: str) -> DotoDate | None:
         """Get and validate a date option by name.

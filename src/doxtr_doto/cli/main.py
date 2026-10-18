@@ -87,8 +87,10 @@ def cli(
     # Create formatter
     formatter = get_formatter(config, quiet=quiet)
 
-    # Global cross-repo state (work clock, active session, registry)
-    global_store = GlobalStateStore()
+    # Global cross-repo state (work clock, active session, registry). Honour a
+    # configured private state path (``state_file`` in .doto.toml or
+    # DOTO_STATE_FILE) so working hours can be kept out of a shared checkout.
+    global_store = GlobalStateStore(config_override=config.get_state_path())
 
     # Store in context
     ctx.obj = DotoContext(

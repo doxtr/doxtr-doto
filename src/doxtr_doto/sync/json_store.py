@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+from doxtr_doto.constants import DONE_STATUS
+
 if TYPE_CHECKING:
     from doxtr_doto.sync.restore import RestoreResult
 
@@ -77,6 +79,7 @@ class TaskData(TypedDict, total=False):
     priority: str
     status: str
     due: str | None
+    estimate: int | None
     tags: list[str]
     depends_on: list[str]
     body: str
@@ -84,6 +87,30 @@ class TaskData(TypedDict, total=False):
     raci: dict[str, list[str]] | None
     created: str
     updated: str
+    # ISO-8601 timestamp of when the task most recently transitioned *into*
+    # the ``done`` status (stamped centrally by :meth:`_TaskRepository.update`;
+    # see that method's "completion-timestamp" block). Cleared when the task
+    # moves back out of ``done`` so re-completing re-stamps a fresh date.
+    # Absent on tasks created before this field existed, which the TUI's
+    # "recent done" filter treats as "always show" for backward compatibility
+    # (see :func:`doxtr_doto.cli.tui.filtersort.filter_done_recent`).
+    completed_at: str | None
+    # Parent-task link: the task id of THIS task's parent in a parent/child
+    # task hierarchy ("this task's parent is <id>"), or None / absent when the
+    # task has no parent (a top-level task). Seeded to None in
+    # :meth:`_TaskRepository.add` so freshly created tasks carry it explicitly.
+    #
+    # Deliberately distinct from ``depends_on`` (a *dependency* list - "this
+    # task is blocked by those tasks", a different, many-to-many relation) and
+    # from ``series_id`` (recurring-series membership). ``parent`` is a single
+    # optional child->parent edge forming the task hierarchy.
+    #
+    # Cycle safety: callers must route parent assignments through
+    # :func:`would_create_cycle` (which rejects self-parenting and any direct
+    # or transitive A->B->...->A loop) before writing this field. The store's
+    # :meth:`update` does not enforce acyclicity itself, so an absent check in
+    # a future caller would be the bug - the guard lives at the call site.
+    parent: str | None
     archived: bool
     archived_on: str | None
     worklogs: list[WorkLog]
@@ -122,7 +149,67 @@ class JsonStoreData(_JsonStoreOptional):
 
 
 # Current schema version
-SCHEMA_VERSION = 5
+#
+# Note: the ``completed_at`` task field (added for the TUI "recent done"
+# filter) intentionally has NO schema migration/backfill here - unlike
+# ``progress`` (v4), ``worklogs`` (v5), and ``estimate`` (v6). It relies on the
+# filter's "missing completed_at = always keep" rule
+# (:func:`doxtr_doto.cli.tui.filtersort.filter_done_recent`), so pre-existing
+# done tasks stay visible without a backfill. This omission is deliberate, not
+# a forgotten migration.
+SCHEMA_VERSION = 6
+
+
+def would_create_cycle(
+    all_tasks: dict[str, TaskData],
+    child_id: str,
+    new_parent_id: str,
+) -> bool:
+    """Report whether parenting ``child_id`` under ``new_parent_id`` cycles.
+
+    A pure guard for the ``parent`` task link (see :class:`TaskData`). The
+    parent relation must stay acyclic: following ``parent`` edges from any task
+    has to terminate at a top-level task (``parent`` None/absent), never loop.
+
+    Rejects (returns True) when:
+
+    * ``new_parent_id == child_id`` -- a task cannot be its own parent; and
+    * ``new_parent_id`` is already a descendant of ``child_id`` -- i.e. walking
+      the existing ``parent`` chain upward from ``new_parent_id`` reaches
+      ``child_id`` (this covers both a direct ``A -> B -> A`` cycle and any
+      deeper transitive ``A -> B -> C -> ... -> A`` loop).
+
+    The walk is bounded by a visited set so a pre-existing (malformed) cycle in
+    the stored data cannot spin forever; it simply stops and reports a cycle.
+    A ``new_parent_id`` that is not present in ``all_tasks`` is treated as a
+    valid (non-cycling) parent here -- existence is the caller's concern, this
+    helper only answers the acyclicity question.
+
+    Args:
+        all_tasks: The full task map (id -> task data) to walk ``parent`` edges
+            through.
+        child_id: The task being (re)parented.
+        new_parent_id: The candidate parent id.
+
+    Returns:
+        True if the assignment would create a self-loop or a cycle, else False.
+    """
+    if new_parent_id == child_id:
+        return True
+    # Walk up from the candidate parent via existing ``parent`` edges: if we
+    # reach ``child_id`` the new edge would close a loop. The visited guard
+    # stops a pre-existing malformed cycle from looping forever.
+    seen: set[str] = set()
+    current: str | None = new_parent_id
+    while current is not None and current not in seen:
+        if current == child_id:
+            return True
+        seen.add(current)
+        task = all_tasks.get(current)
+        if task is None:
+            break
+        current = task.get("parent")
+    return False
 
 
 def _cleanup_stale_tmp_files(path: Path) -> None:
@@ -251,6 +338,8 @@ class _TaskRepository:
         task_data.setdefault("updated", now)
         task_data.setdefault("archived", False)
         task_data.setdefault("archived_on", None)
+        task_data.setdefault("completed_at", None)
+        task_data.setdefault("parent", None)
         task_data.setdefault("worklogs", [])
         task_data.setdefault(
             "_sync",
@@ -282,6 +371,26 @@ class _TaskRepository:
         # ``key`` is a runtime-dynamic field name, so operate through a plain
         # mutable-mapping view (TaskData only permits literal keys).
         task_mut = cast("dict[str, Any]", task)
+        # Completion-timestamp: this is the single chokepoint every write path
+        # (CLI ``doto done``, TUI done/status cycle/set-status) funnels through
+        # via ``store.update_task``, so stamping ``completed_at`` here covers
+        # them all. The incoming ``data`` is a *partial* update, so we only act
+        # when ``status`` is actually being written, comparing the new status
+        # against the task's *current* status so unrelated field updates (and
+        # redundant same-status writes) never disturb the timestamp.
+        if "status" in data:
+            old_status = task_mut.get("status")
+            new_status = data["status"]
+            if new_status == DONE_STATUS and (
+                old_status != DONE_STATUS or not task_mut.get("completed_at")
+            ):
+                # Transitioned into done (or was done but never stamped, e.g. a
+                # legacy task): record when it became done.
+                task_mut["completed_at"] = datetime.now().isoformat()
+            elif new_status != DONE_STATUS and old_status == DONE_STATUS:
+                # Moved back out of done: clear the stamp so a later
+                # re-completion records a fresh date.
+                task_mut["completed_at"] = None
         for key, value in data.items():
             if key in ("_sync", "_git"):
                 task_mut.setdefault(key, {}).update(value)
@@ -618,7 +727,23 @@ class JsonTaskStore:
         return self._repo.update(task_id, data)
 
     def delete_task(self, task_id: str) -> bool:
-        """Delete a task by ID.
+        """Delete a task by ID, pruning dangling series and parent links.
+
+        When the task belongs to a series, its id is also removed from that
+        series' ``task_ids`` list so the series' occurrence count stays
+        consistent (otherwise :meth:`get_tasks_in_series` would keep counting a
+        now-deleted task). This runs on every delete path -- including the CLI
+        ``doto delete`` verb and the TUI's single-entry delete -- so no caller
+        has to prune the link itself.
+
+        Symmetrically, any remaining task whose ``parent`` points at the
+        deleted task has its ``parent`` cleared to ``None``. The ``parent``
+        field stores the bare local id (what :func:`doxtr_doto.cli.tui.actions\
+        .set_parent` writes), which is the same id form passed here, so a
+        direct equality compare finds every orphaned child. This keeps the
+        invariant that ``parent`` always points at a live task -- otherwise the
+        detail pane would render ``Parent: <deleted-id>`` for a task that no
+        longer exists.
 
         Args:
             task_id: The task identifier.
@@ -626,7 +751,20 @@ class JsonTaskStore:
         Returns:
             True if task was deleted, False if not found.
         """
-        return self._repo.delete(task_id)
+        task = self._repo.get(task_id)
+        series_id = task.get("series_id") if task else None
+        deleted = self._repo.delete(task_id)
+        if deleted and isinstance(series_id, str) and series_id:
+            series = self._serepo.get(series_id)
+            if series is not None:
+                task_ids = [tid for tid in series.get("task_ids", []) if tid != task_id]
+                self._serepo.update(series_id, {"task_ids": task_ids})
+        if deleted:
+            for tid in list(self._repo.get_all()):
+                child = self._repo.get(tid)
+                if child is not None and child.get("parent") == task_id:
+                    self._repo.update(tid, {"parent": None})
+        return deleted
 
     def archive_task(self, task_id: str) -> bool:
         """Archive a task.
@@ -710,6 +848,10 @@ class JsonTaskStore:
                 task["archived"] = False
                 task["archived_on"] = None
                 task["status"] = status
+                if status != DONE_STATUS:
+                    # Reopened out of done: drop the stale completion stamp so
+                    # a later re-completion records a fresh date.
+                    task["completed_at"] = None
                 task["updated"] = datetime.now().isoformat()
                 sync = task.setdefault("_sync", {})
                 if result.rst_file:
@@ -723,6 +865,10 @@ class JsonTaskStore:
         task["archived"] = False
         task["archived_on"] = None
         task["status"] = status
+        if status != DONE_STATUS:
+            # Reopened out of done: drop the stale completion stamp so a later
+            # re-completion records a fresh date.
+            task["completed_at"] = None
         task["updated"] = datetime.now().isoformat()
 
         # Update target file if specified
@@ -783,6 +929,7 @@ class JsonTaskStore:
         due_before: str | None = None,
         due_after: str | None = None,
         include_archived: bool = False,
+        sync_conflict: bool | None = None,
     ) -> list[dict[str, Any]]:
         """Filter tasks by criteria.
 
@@ -794,6 +941,10 @@ class JsonTaskStore:
             due_before: Filter by due date before.
             due_after: Filter by due date after.
             include_archived: Include archived tasks.
+            sync_conflict: When True, keep only tasks flagged with an unresolved
+                calendar-sync conflict (``sync_conflict`` truthy). When False,
+                keep only tasks without one. ``None`` (default) does not filter
+                on the conflict flag.
 
         Returns:
             List of matching tasks with id included.
@@ -826,6 +977,9 @@ class JsonTaskStore:
             if due_after:
                 task_due = task_data.get("due")
                 if not task_due or task_due < due_after:
+                    continue
+            if sync_conflict is not None:
+                if bool(task_data.get("sync_conflict")) != sync_conflict:
                     continue
 
             # Include task with id
@@ -1108,3 +1262,13 @@ class JsonTaskStore:
                 task.setdefault("worklogs", [])
 
             self._data["version"] = 5
+            version = 5
+
+        if version < 6:
+            # Migration from v5 to v6:
+            # - Add estimate field (expected duration in whole minutes) to all
+            #   tasks; None means "no estimate set".
+            for task in self._data.get("tasks", {}).values():
+                task.setdefault("estimate", None)
+
+            self._data["version"] = 6

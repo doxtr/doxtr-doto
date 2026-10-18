@@ -213,6 +213,32 @@ class TestOutputFormatterTableFormatting:
         assert "TASK-001" in captured.out
         assert "First task" in captured.out
 
+    def test_format_task_table_done_task_not_overdue(self, capsys):
+        """A done task with a past due date is not flagged [OVERDUE] in the table."""
+        formatter = OutputFormatter()
+        tasks = [
+            {
+                "id": "DONE-001",
+                "title": "Finished late",
+                "status": "done",
+                "priority": "high",
+                "due": "2000-01-01",
+            },
+            {
+                "id": "OPEN-001",
+                "title": "Still open",
+                "status": "open",
+                "priority": "high",
+                "due": "2000-01-01",
+            },
+        ]
+        formatter.format_task_table(tasks, ["id", "status", "due"])
+        captured = capsys.readouterr()
+        # Exactly one [OVERDUE] marker, for the open task only.
+        assert captured.out.count("[OVERDUE]") == 1
+        # The summary count must agree: 1 overdue, not 2 (done excluded).
+        assert "1 overdue" in captured.out
+
     def test_format_task_table_empty_tasks(self, capsys):
         """format_task_table() handles empty tasks list."""
         formatter = OutputFormatter()

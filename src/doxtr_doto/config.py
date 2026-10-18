@@ -120,8 +120,8 @@ DEFAULTS: dict[str, Any] = {
     # via plotly + kaleido, falling back to SVG when those packages are absent
     # (Feature 7).
     "doto_chart_engine": "svg",
-    # xlink resolution (optional sphinxcontrib-xlink integration)
-    # When True (default) and sphinxcontrib-xlink is installed AND listed in
+    # xlink resolution (optional doxtr-xlink integration)
+    # When True (default) and doxtr-xlink is installed AND listed in
     # the project's extensions, the :assignee: field's value is scanned for
     # :xlink:`key` tokens and each is resolved to the person/entity display
     # name (and linked in HTML/PDF) at render time. Only the :assignee: field

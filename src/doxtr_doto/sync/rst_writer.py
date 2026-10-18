@@ -94,6 +94,7 @@ def _ensure_doto_directive_registered() -> dict[str, type[Directive]]:
             "priority": directives.unchanged,
             "status": directives.unchanged,
             "due": directives.unchanged,
+            "estimate": directives.unchanged,
             "tags": directives.unchanged,
             "depends-on": directives.unchanged,
             "progress": directives.unchanged,
@@ -469,6 +470,11 @@ def generate_directive_text(task_data: dict[str, Any]) -> str:
 
     if task_data.get("due"):
         lines.append(f"   :due: {task_data['due']}")
+
+    if task_data.get("estimate") is not None:
+        estimate_str = _format_option_value("estimate", task_data["estimate"])
+        if estimate_str:
+            lines.append(f"   :estimate: {estimate_str}")
 
     if task_data.get("tags"):
         tags = task_data["tags"]
@@ -1039,6 +1045,36 @@ def _find_directive_block(
     return start_pos, end_pos, content[start_pos:end_pos]
 
 
+def _format_option_value(field: str, value: Any) -> str:
+    """Format a task field's value for a ``:name: value`` RST option line.
+
+    Centralizes the per-field display formatting so the CREATE path
+    (:func:`generate_directive_text`) and the UPDATE path
+    (:func:`_update_directive_content`) render identically. Fields whose stored
+    representation differs from their authored/RST form are converted here:
+
+    * ``estimate`` -- stored as whole minutes, emitted as the compact duration
+      (``90`` -> ``1h30m``) via :func:`doxtr_doto.date_utils.format_duration_minutes`.
+    * list-valued fields (``tags``, ``depends_on``) -- joined with ``", "``.
+
+    Any other value is stringified unchanged.
+
+    Args:
+        field: The internal (underscore) field name.
+        value: The stored value.
+
+    Returns:
+        The string to place after ``:name: `` on the option line.
+    """
+    if field == "estimate":
+        from doxtr_doto.date_utils import format_duration_minutes
+
+        return format_duration_minutes(value)
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
 def _update_directive_content(directive_content: str, updates: dict[str, Any]) -> str:
     """Update fields within a directive's content.
 
@@ -1121,9 +1157,8 @@ def _update_directive_content(directive_content: str, updates: dict[str, Any]) -
             match = re.match(pattern, line)
             if match:
                 indent = match.group(1)
-                if isinstance(value, list):
-                    value = ", ".join(str(v) for v in value)
-                result.append(f"{indent}:{rst_field}: {value}")
+                formatted = _format_option_value(field, value)
+                result.append(f"{indent}:{rst_field}: {formatted}")
                 updated_fields.add(field)
                 updated = True
                 break
@@ -1151,10 +1186,9 @@ def _update_directive_content(directive_content: str, updates: dict[str, Any]) -
         if field in updated_fields:
             continue
         rst_field = field_map.get(field, field)
-        if isinstance(value, list):
-            value = ", ".join(str(v) for v in value)
-        if value:  # Only add a new option when it has a value
-            result.insert(insert_pos, f"{option_indent}:{rst_field}: {value}")
+        formatted = _format_option_value(field, value)
+        if formatted:  # Only add a new option when it has a (non-empty) value
+            result.insert(insert_pos, f"{option_indent}:{rst_field}: {formatted}")
             insert_pos += 1
 
     # Rewrite the body (indented content block) when it changed. The body is

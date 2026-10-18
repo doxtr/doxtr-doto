@@ -13,8 +13,11 @@ from datetime import datetime
 import pytest
 
 from doxtr_doto.calsync.model import CalendarEvent, EventKind, make_uid
-from doxtr_doto.calsync.providers.base import ProviderAuthError
-from doxtr_doto.calsync.providers.google import GoogleCalendarProvider
+from doxtr_doto.calsync.providers.base import ProviderAuthError, ProviderError
+from doxtr_doto.calsync.providers.google import (
+    GoogleCalendarProvider,
+    _is_duplicate_identifier_error,
+)
 from doxtr_doto.calsync.providers.microsoft import MicrosoftCalendarProvider
 from doxtr_doto.cli.config import CalendarConfig
 
@@ -97,6 +100,216 @@ class TestGoogleBody:
         prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
         with pytest.raises(ProviderAuthError, match="Not logged in"):
             prov.connect()
+
+
+class TestGoogleCreateDuplicateRecovery:
+    """create_event self-heals Google's 409 'identifier already exists'.
+
+    Google reserves an iCalUID even after its event is deleted (a lingering
+    'cancelled' tombstone), so inserting with a reused iCalUID 409s. The
+    provider must recover by importing over the existing item (or updating a
+    live one) instead of aborting the whole sync.
+    """
+
+    @staticmethod
+    def _http_409() -> Exception:
+        """Build a googleapiclient HttpError with status 409, as Google raises."""
+        from googleapiclient.errors import HttpError
+
+        class _Resp:
+            status = 409
+            reason = "Conflict"
+
+        content = (
+            b'{"error": {"code": 409, "message": "The requested identifier '
+            b'already exists.", "errors": [{"reason": "duplicate"}]}}'
+        )
+        return HttpError(_Resp(), content, uri="https://example/insert")
+
+    def test_detects_409_duplicate(self):
+        assert _is_duplicate_identifier_error(self._http_409()) is True
+
+    def test_ignores_non_409(self):
+        from googleapiclient.errors import HttpError
+
+        class _Resp:
+            status = 404
+            reason = "Not Found"
+
+        err = HttpError(_Resp(), b'{"error": {"message": "missing"}}', uri="u")
+        assert _is_duplicate_identifier_error(err) is False
+
+    def test_detects_409_via_resp_status_when_no_status_code(self):
+        """Fallback branch: no ``status_code`` attr, but ``resp.status`` is 409."""
+
+        class _Resp:
+            status = 409
+
+        exc = Exception("conflict")
+        exc.resp = _Resp()  # type: ignore[attr-defined]
+        assert _is_duplicate_identifier_error(exc) is True
+
+    def test_detects_duplicate_by_message_substring(self):
+        """Fallback branch: no status at all, but the message says 'already exists'."""
+        assert (
+            _is_duplicate_identifier_error(RuntimeError("The requested identifier already exists"))
+            is True
+        )
+        assert _is_duplicate_identifier_error(RuntimeError("duplicate entry")) is True
+
+    def test_plain_error_without_409_or_keywords_is_false(self):
+        """A plain error with no 409 and no keywords must not be misclassified."""
+        assert _is_duplicate_identifier_error(RuntimeError("network down")) is False
+
+    def test_plain_insert_succeeds(self):
+        """The happy path still returns the inserted item's ids."""
+
+        class _Events:
+            def insert(self, calendarId=None, body=None):
+                self._res = {"id": "gid-new", "etag": '"e-new"'}
+                return self
+
+            def execute(self):
+                return self._res
+
+        class _Service:
+            def events(self):
+                return _Events()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _Service()
+        prov._calendar_id = "primary"
+        res = prov.create_event(_timed())
+        assert res.remote_id == "gid-new"
+        assert res.etag == '"e-new"'
+        assert res.uid == make_uid("T1")
+
+    def test_409_recovers_via_import(self):
+        """A 409 on insert falls back to import_, returning the live item ids."""
+        calls: list[str] = []
+        err = self._http_409()
+
+        class _Events:
+            def insert(self, calendarId=None, body=None):
+                calls.append("insert")
+                self._raise = True
+                return self
+
+            def import_(self, calendarId=None, body=None):
+                calls.append("import")
+                self._raise = False
+                self._res = {"id": "gid-resurrected", "etag": '"e-res"'}
+                return self
+
+            def execute(self):
+                if getattr(self, "_raise", False):
+                    raise err
+                return self._res
+
+        class _Service:
+            def events(self):
+                return _Events()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _Service()
+        prov._calendar_id = "primary"
+        res = prov.create_event(_timed())
+        assert calls == ["insert", "import"]
+        assert res.remote_id == "gid-resurrected"
+        assert res.etag == '"e-res"'
+
+    def test_409_import_fails_falls_back_to_update(self):
+        """If import_ is refused but the item is live, update it in place."""
+        err = self._http_409()
+
+        class _Events:
+            def insert(self, calendarId=None, body=None):
+                self._mode = "insert"
+                return self
+
+            def import_(self, calendarId=None, body=None):
+                self._mode = "import"
+                return self
+
+            def list(self, **kw):
+                self._mode = "list"
+                return self
+
+            def update(self, calendarId=None, eventId=None, body=None):
+                self._mode = "update"
+                assert eventId == "gid-live"
+                return self
+
+            def execute(self):
+                mode = self._mode
+                if mode in ("insert", "import"):
+                    raise err
+                if mode == "list":
+                    return {"items": [{"id": "gid-live"}]}
+                return {"id": "gid-live", "etag": '"e-upd"'}
+
+        class _Service:
+            def events(self):
+                return _Events()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _Service()
+        prov._calendar_id = "primary"
+        res = prov.create_event(_timed())
+        assert res.remote_id == "gid-live"
+        assert res.etag == '"e-upd"'
+
+    def test_409_unrecoverable_raises_provider_error(self):
+        """Import fails and no live item is found -> a clear ProviderError."""
+        err = self._http_409()
+
+        class _Events:
+            def insert(self, calendarId=None, body=None):
+                self._mode = "insert"
+                return self
+
+            def import_(self, calendarId=None, body=None):
+                self._mode = "import"
+                return self
+
+            def list(self, **kw):
+                self._mode = "list"
+                return self
+
+            def execute(self):
+                if self._mode in ("insert", "import"):
+                    raise err
+                return {"items": []}  # no live item to update
+
+        class _Service:
+            def events(self):
+                return _Events()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _Service()
+        prov._calendar_id = "primary"
+        with pytest.raises(ProviderError, match="could not be reconciled"):
+            prov.create_event(_timed())
+
+    def test_non_duplicate_error_still_raises(self):
+        """A non-409 insert error is wrapped and raised (no recovery attempt)."""
+
+        class _Events:
+            def insert(self, calendarId=None, body=None):
+                return self
+
+            def execute(self):
+                raise RuntimeError("network down")
+
+        class _Service:
+            def events(self):
+                return _Events()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _Service()
+        prov._calendar_id = "primary"
+        with pytest.raises(ProviderError, match="network down"):
+            prov.create_event(_timed())
 
 
 class TestMicrosoftBody:
@@ -275,3 +488,139 @@ class TestSharedHelpers:
         assert not _is_valid_iana("CEST")
         assert not _is_valid_iana("")
         assert not _is_valid_iana("Not/AZone")
+
+
+class TestGoogleInboundMapper:
+    """Unit-test Google's events#resource -> RemoteEvent mapping (no network)."""
+
+    def test_all_day_resource_maps_to_date_only(self):
+        item = {
+            "iCalUID": "user-ad@example.com",
+            "id": "gid1",
+            "etag": '"etag1"',
+            "summary": "Holiday",
+            "description": "Day off",
+            "start": {"date": "2026-07-04"},
+            "end": {"date": "2026-07-05"},
+            "status": "confirmed",
+        }
+        rev = GoogleCalendarProvider._to_remote_event(item)
+        assert rev.uid == "user-ad@example.com"
+        assert rev.remote_id == "gid1"
+        assert rev.all_day is True
+        assert rev.start == datetime(2026, 7, 4, 0, 0)
+        assert rev.start.tzinfo is None
+        assert rev.inbound_due() == "2026-07-04"
+
+    def test_timed_resource_is_naive_local(self):
+        item = {
+            "iCalUID": "user-t@example.com",
+            "id": "gid2",
+            "summary": "Call",
+            "start": {"dateTime": "2026-03-02T09:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": "2026-03-02T09:30:00+02:00", "timeZone": "Europe/Berlin"},
+        }
+        rev = GoogleCalendarProvider._to_remote_event(item)
+        assert rev.all_day is False
+        # tzinfo dropped; the +02:00 wall-clock is kept as naive-local.
+        assert rev.start == datetime(2026, 3, 2, 9, 0)
+        assert rev.start.tzinfo is None
+        assert rev.inbound_due() == "2026-03-02T09:00"
+
+    def test_cancelled_items_are_skipped_by_list(self):
+        """list_events must drop status == 'cancelled' items (contract)."""
+
+        class _FakeEvents:
+            def list(self, **kw):
+                return self
+
+            def execute(self):
+                return {
+                    "items": [
+                        {"iCalUID": "a@x", "status": "cancelled", "summary": "gone"},
+                        {
+                            "iCalUID": "b@x",
+                            "status": "confirmed",
+                            "summary": "live",
+                            "start": {"date": "2026-01-01"},
+                        },
+                    ]
+                }
+
+        class _FakeService:
+            def events(self):
+                return _FakeEvents()
+
+        prov = GoogleCalendarProvider(CalendarConfig(provider="google"))
+        prov._service = _FakeService()
+        prov._calendar_id = "primary"
+        out = prov.list_events()
+        assert [r.summary for r in out] == ["live"]
+
+
+class TestMicrosoftInboundMapper:
+    """Unit-test Graph event -> RemoteEvent mapping (no network)."""
+
+    def test_extended_property_uid_wins(self):
+        from doxtr_doto.calsync.providers.microsoft import DOTO_UID_PROP
+
+        item = {
+            "id": "mid1",
+            "@odata.etag": 'W/"e1"',
+            "subject": "Doto owned",
+            "body": {"content": "note"},
+            "isAllDay": False,
+            "start": {"dateTime": "2026-03-02T09:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-03-02T09:30:00.0000000", "timeZone": "UTC"},
+            "iCalUId": "fallback@outlook.com",
+            "singleValueExtendedProperties": [{"id": DOTO_UID_PROP, "value": "doto-A@doxtr-doto"}],
+        }
+        rev = MicrosoftCalendarProvider._to_remote_event(item)
+        # The stashed doto-uid extended property wins over iCalUId.
+        assert rev.uid == "doto-A@doxtr-doto"
+        assert rev.remote_id == "mid1"
+        assert rev.all_day is False
+        # Naive-local (Prefer header makes Graph return local wall-clock).
+        assert rev.start == datetime(2026, 3, 2, 9, 0)
+        assert rev.start.tzinfo is None
+
+    def test_icaluid_fallback_when_no_extended_property(self):
+        item = {
+            "id": "mid2",
+            "subject": "User event",
+            "body": {"content": ""},
+            "isAllDay": True,
+            "start": {"dateTime": "2026-07-04T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-07-05T00:00:00.0000000", "timeZone": "UTC"},
+            "iCalUId": "user@outlook.com",
+            "singleValueExtendedProperties": [],
+        }
+        rev = MicrosoftCalendarProvider._to_remote_event(item)
+        assert rev.uid == "user@outlook.com"
+        assert rev.all_day is True
+        assert rev.inbound_due() == "2026-07-04"
+
+    def test_list_sends_prefer_timezone_header(self, monkeypatch):
+        """list_events must send Prefer: outlook.timezone with the local zone."""
+        from doxtr_doto.calsync.providers import microsoft as ms_mod
+
+        monkeypatch.setattr(ms_mod, "local_tz_name", lambda: "Europe/Berlin")
+
+        captured: dict = {}
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {"value": []}
+
+        class _FakeSession:
+            def get(self, url, params=None, headers=None):
+                captured["headers"] = headers
+                return _FakeResp()
+
+        prov = MicrosoftCalendarProvider(CalendarConfig(provider="microsoft"))
+        prov._session = _FakeSession()
+        prov._calendar_id = ""
+        prov.list_events()
+        assert captured["headers"]["Prefer"] == 'outlook.timezone="Europe/Berlin"'

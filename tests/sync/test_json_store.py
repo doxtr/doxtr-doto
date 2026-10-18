@@ -8,6 +8,108 @@ import json
 class TestJsonTaskStore:
     """Test the JsonTaskStore class."""
 
+    def test_delete_task_prunes_owning_series_link(self, tmp_path):
+        """Deleting a series task removes it from the series' ``task_ids``.
+
+        The pruning lives in the store so every delete path (the CLI
+        ``doto delete`` verb and the TUI wrapper alike) keeps the series'
+        occurrence count consistent.
+        """
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "version": 6,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {
+                        "S-1": {"title": "W1", "series_id": "SER-1", "status": "open"},
+                        "S-2": {"title": "W2", "series_id": "SER-1", "status": "open"},
+                    },
+                    "series": {
+                        "SER-1": {
+                            "title_template": "W",
+                            "pattern": {"type": "weekly", "interval": 1, "weekday": 0},
+                            "start_date": "2026-01-05",
+                            "end_date": "2026-01-12",
+                            "task_ids": ["S-1", "S-2"],
+                            "task_defaults": {},
+                            "created": "2024-01-01T00:00:00",
+                        }
+                    },
+                }
+            )
+        )
+        store = JsonTaskStore(json_path)
+        store.load()
+
+        assert store.delete_task("S-1") is True
+
+        series = store.get_series("SER-1")
+        assert series is not None
+        assert series["task_ids"] == ["S-2"]
+        assert len(store.get_tasks_in_series("SER-1")) == 1
+
+    def test_delete_standalone_task_leaves_series_untouched(self, tmp_path):
+        """A task with no ``series_id`` deletes without touching any series."""
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "version": 6,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {"A-1": {"title": "Solo", "status": "open"}},
+                    "series": {},
+                }
+            )
+        )
+        store = JsonTaskStore(json_path)
+        store.load()
+        assert store.delete_task("A-1") is True
+        assert store.get_task("A-1") is None
+
+    def test_delete_parent_clears_child_parent_link(self, tmp_path):
+        """Deleting a parent clears the dangling ``parent`` on its children.
+
+        Symmetric with the series prune: ``parent`` stores the deleted task's
+        bare local id, so after the delete no surviving task may still point
+        at it (otherwise the detail pane would show ``Parent: <deleted-id>``).
+        """
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "version": 6,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {
+                        "P-1": {"title": "Parent", "status": "open"},
+                        "C-1": {"title": "Child", "status": "open", "parent": "P-1"},
+                        "C-2": {"title": "Child2", "status": "open", "parent": "P-1"},
+                        "O-1": {"title": "Other", "status": "open", "parent": "X-9"},
+                    },
+                    "series": {},
+                }
+            )
+        )
+        store = JsonTaskStore(json_path)
+        store.load()
+
+        assert store.delete_task("P-1") is True
+
+        assert store.get_task("P-1") is None
+        assert store.get_task("C-1")["parent"] is None
+        assert store.get_task("C-2")["parent"] is None
+        # An unrelated child's parent link is left untouched.
+        assert store.get_task("O-1")["parent"] == "X-9"
+
     def test_create_empty_store(self, tmp_path):
         """Test creating a new empty store."""
         from doxtr_doto.sync.json_store import SCHEMA_VERSION, JsonTaskStore
@@ -20,7 +122,7 @@ class TestJsonTaskStore:
         assert json_path.exists()
 
         data = json.loads(json_path.read_text())
-        assert data["version"] == SCHEMA_VERSION  # Current schema version (v5)
+        assert data["version"] == SCHEMA_VERSION  # written at the current schema version
         assert data["tasks"] == {}
 
     def test_load_existing_store(self, sample_json_store):
@@ -187,10 +289,49 @@ class TestJsonTaskStore:
         store = JsonTaskStore(json_path)
         store.load()
 
-        assert store.version == SCHEMA_VERSION == 5
+        assert store.version == SCHEMA_VERSION
         task = store.get_task("OLD-1")
         assert task is not None
         assert task["worklogs"] == []
+
+    def test_migration_v5_to_v6_backfills_estimate(self, tmp_path):
+        """A pre-existing v5 task without estimate is backfilled to v6.
+
+        The v5->v6 migration adds an ``estimate`` key (``None`` = unset) to
+        every task so the calendar-sync projection and display code can rely
+        on the field existing.
+        """
+        from doxtr_doto.sync.json_store import SCHEMA_VERSION, JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "version": 5,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {
+                        "OLD-1": {
+                            "title": "Legacy task",
+                            "status": "open",
+                            "priority": "medium",
+                            "worklogs": [],
+                        }
+                    },
+                    "series": {},
+                }
+            )
+        )
+
+        store = JsonTaskStore(json_path)
+        store.load()
+
+        assert (
+            store.version == SCHEMA_VERSION == 6
+        )  # literal pinned to the v5->v6 migration under test
+        task = store.get_task("OLD-1")
+        assert task is not None
+        assert task["estimate"] is None
 
     def test_reload_rebinds_cached_repository(self, tmp_path):
         """Reloading a store rebinds its task repository to the fresh data.
@@ -317,3 +458,180 @@ class TestRstOnlyTaskPersistence:
         persisted = reloaded.get_task(task_id)
         assert persisted is not None, "RST-only task was not persisted to tasks.json"
         assert persisted["title"] == "A bare directive without an explicit id"
+
+
+class TestCompletionTimestamp:
+    """Central ``completed_at`` stamping in ``_TaskRepository.update``.
+
+    Every write path funnels through ``update_task``, so these verify the
+    single chokepoint stamps/clears ``completed_at`` correctly and leaves
+    unrelated updates alone.
+    """
+
+    def _store(self, tmp_path):
+        import json as _json
+
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        json_path.write_text(
+            _json.dumps(
+                {
+                    "version": 6,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {
+                        "T-1": {"title": "A", "status": "open"},
+                    },
+                }
+            )
+        )
+        store = JsonTaskStore(json_path)
+        store.load()
+        return store
+
+    def test_transition_to_done_stamps_completed_at(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "done"})
+        task = store.get_task("T-1")
+        assert task is not None
+        assert task.get("completed_at")  # a non-empty ISO timestamp
+
+    def test_move_away_from_done_clears_completed_at(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "done"})
+        assert store.get_task("T-1").get("completed_at")
+        store.update_task("T-1", {"status": "open"})
+        assert store.get_task("T-1").get("completed_at") is None
+
+    def test_recompleting_restamps_fresh_date(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "done"})
+        store.update_task("T-1", {"status": "open"})
+        store.update_task("T-1", {"status": "done"})
+        assert store.get_task("T-1").get("completed_at")
+
+    def test_unrelated_update_does_not_touch_completed_at(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "done"})
+        stamped = store.get_task("T-1").get("completed_at")
+        # An update with no status key must leave completed_at untouched.
+        store.update_task("T-1", {"priority": "high"})
+        assert store.get_task("T-1").get("completed_at") == stamped
+
+    def test_redundant_same_status_done_keeps_original_stamp(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "done"})
+        stamped = store.get_task("T-1").get("completed_at")
+        # Writing status=done again while already done must not re-stamp.
+        store.update_task("T-1", {"status": "done", "priority": "low"})
+        assert store.get_task("T-1").get("completed_at") == stamped
+
+    def test_legacy_done_without_stamp_gets_stamped_on_update(self, tmp_path):
+        store = self._store(tmp_path)
+        # Simulate a legacy done task created before completed_at existed.
+        store.update_task("T-1", {"status": "done"})
+        # Remove the stamp to mimic old data, then write status=done again.
+        store.get_task("T-1")["completed_at"] = None
+        store.update_task("T-1", {"status": "done"})
+        assert store.get_task("T-1").get("completed_at")
+
+    def test_non_done_update_on_non_done_task_is_untouched(self, tmp_path):
+        store = self._store(tmp_path)
+        store.update_task("T-1", {"status": "in-progress"})
+        assert store.get_task("T-1").get("completed_at") is None
+
+
+class TestParentField:
+    """The ``parent`` task-hierarchy field and its cycle-prevention guard.
+
+    Covers the ``parent`` link added to :class:`TaskData`: it is None-seeded on
+    :meth:`JsonTaskStore.add_task`, written through the normal ``update_task``
+    path, and guarded against self/cyclic assignment by
+    :func:`doxtr_doto.sync.json_store.would_create_cycle`.
+    """
+
+    def _store(self, tmp_path):
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        json_path = tmp_path / ".doto" / "tasks.json"
+        json_path.parent.mkdir(parents=True)
+        store = JsonTaskStore(json_path)
+        store.load()
+        return store
+
+    def test_add_task_seeds_parent_none(self, tmp_path):
+        """A freshly added task carries ``parent`` explicitly set to None."""
+        store = self._store(tmp_path)
+        store.add_task("T-1", {"title": "A"})
+        task = store.get_task("T-1")
+        assert task is not None
+        assert "parent" in task
+        assert task["parent"] is None
+
+    def test_update_task_sets_parent(self, tmp_path):
+        """Setting ``parent`` via ``update_task`` stamps + persists the field."""
+        store = self._store(tmp_path)
+        store.add_task("CHILD", {"title": "child"})
+        store.add_task("PARENT", {"title": "parent"})
+        store.update_task("CHILD", {"parent": "PARENT"})
+        store.save()
+
+        from doxtr_doto.sync.json_store import JsonTaskStore
+
+        reloaded = JsonTaskStore(store.path)
+        reloaded.load()
+        assert reloaded.get_task("CHILD")["parent"] == "PARENT"
+        # The parent task itself is unaffected (still a top-level task).
+        assert reloaded.get_task("PARENT")["parent"] is None
+
+    def test_would_create_cycle_rejects_self_parent(self):
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        tasks = {"A": {"title": "A"}}
+        assert would_create_cycle(tasks, "A", "A") is True
+
+    def test_would_create_cycle_rejects_direct_cycle(self):
+        """A -> B already; making B's parent A would close A -> B -> A."""
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        # A's parent is B. Setting B's parent to A would create A<->B.
+        tasks = {"A": {"title": "A", "parent": "B"}, "B": {"title": "B"}}
+        assert would_create_cycle(tasks, "B", "A") is True
+
+    def test_would_create_cycle_rejects_transitive_cycle(self):
+        """A -> B -> C already; making C's parent A closes the longer loop."""
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        tasks = {
+            "A": {"title": "A", "parent": "B"},
+            "B": {"title": "B", "parent": "C"},
+            "C": {"title": "C"},
+        }
+        assert would_create_cycle(tasks, "C", "A") is True
+
+    def test_would_create_cycle_accepts_valid_parent(self):
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        tasks = {"A": {"title": "A"}, "B": {"title": "B"}}
+        assert would_create_cycle(tasks, "A", "B") is False
+
+    def test_would_create_cycle_tolerates_missing_parent_task(self):
+        """An unknown candidate parent id is treated as non-cycling."""
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        tasks = {"A": {"title": "A"}}
+        assert would_create_cycle(tasks, "A", "GHOST") is False
+
+    def test_would_create_cycle_survives_preexisting_loop(self):
+        """A malformed stored cycle does not spin the walk forever."""
+        from doxtr_doto.sync.json_store import would_create_cycle
+
+        # X -> Y -> X is a pre-existing (malformed) loop; querying a new,
+        # unrelated child must terminate and report no *new* cycle.
+        tasks = {
+            "X": {"title": "X", "parent": "Y"},
+            "Y": {"title": "Y", "parent": "X"},
+            "Z": {"title": "Z"},
+        }
+        assert would_create_cycle(tasks, "Z", "X") is False

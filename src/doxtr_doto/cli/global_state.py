@@ -7,18 +7,23 @@ global daily work clock, and daily-nudge dedupe metadata.
 Location resolution (read, highest priority first):
 
 1. ``$DOTO_CONFIG`` environment variable (explicit path to a config file).
-2. A ``.doto/config.json`` found by walking **up** from the current working
+2. A configured private path -- ``state_file`` / ``[state] file`` in
+   ``.doto.toml`` or the ``DOTO_STATE_FILE`` env var. Use this in a *shared*
+   checkout to keep the work clock (your working hours) in a personal location
+   the team cannot see.
+3. A ``.doto/config.json`` found by walking **up** from the current working
    directory (portable, survives ephemeral container restarts, and can live
    under version control alongside ``.doto/tasks.json``).
-3. ``$XDG_CONFIG_HOME``/``doto/config.json`` (falling back to
+4. ``$XDG_CONFIG_HOME``/``doto/config.json`` (falling back to
    ``~/.config/doto/config.json``).
 
 First-run *write* target (when no config exists yet) mirrors this intent
 without surprising writes in arbitrary directories:
 
 1. ``$DOTO_CONFIG`` if set.
-2. ``<project-root>/.doto/config.json`` when a project root is detected.
-3. ``~/.config/doto/config.json`` otherwise.
+2. The configured private path (``state_file`` / ``DOTO_STATE_FILE``).
+3. ``<project-root>/.doto/config.json`` when a project root is detected.
+4. ``~/.config/doto/config.json`` otherwise.
 
 The on-disk shape is::
 
@@ -35,12 +40,17 @@ The on-disk shape is::
         "last_prompt_date": str | None,
         "tui_layout": str | None,
         "tui_hide_completed": bool,
+        "tui_conflicts_only": bool,
         "tui_due_filter": str | None,
         "tui_tag_filter": str | None,
         "tui_priority_filter": str | None,
         "tui_sort_key": str | None,
         "tui_sort_order": str | None,
         "tui_repo_filter": [ str, ... ] | None
+        "tui_recent_done_enabled": bool | None,
+        "tui_recent_done_days": int | None,
+        "tui_detail_ratio": str | None,
+        "tui_modal_width_ratio": str | None,
     }
 
 Writes are atomic (temp file + rename), matching the pattern used by
@@ -142,14 +152,21 @@ def _find_portable_config(start: Path | None = None) -> Path | None:
         current = current.parent
 
 
-def resolve_global_config_path(start: Path | None = None) -> Path:
+def resolve_global_config_path(
+    start: Path | None = None,
+    config_override: Path | None = None,
+) -> Path:
     """Resolve the global config path for *reading*.
 
     Search order (highest priority first):
 
     1. ``$DOTO_CONFIG`` environment variable.
-    2. A ``.doto/config.json`` found by walking up from ``start``/cwd.
-    3. ``$XDG_CONFIG_HOME``/``doto/config.json`` (``~/.config`` fallback).
+    2. ``config_override`` -- an explicit path configured via ``.doto.toml``
+       (``state_file`` / ``[state] file``) or ``DOTO_STATE_FILE``. This lets a
+       shared checkout keep the work clock (your working hours) in a private
+       location the team cannot see, while ``$DOTO_CONFIG`` still wins.
+    3. A ``.doto/config.json`` found by walking up from ``start``/cwd.
+    4. ``$XDG_CONFIG_HOME``/``doto/config.json`` (``~/.config`` fallback).
 
     The returned path is where doto will *read* from. It may not exist yet
     (callers return a default state in that case). Use
@@ -158,6 +175,7 @@ def resolve_global_config_path(start: Path | None = None) -> Path:
 
     Args:
         start: Starting directory for the portable lookup (defaults to cwd).
+        config_override: Explicit configured state path (below ``$DOTO_CONFIG``).
 
     Returns:
         The resolved config path.
@@ -165,27 +183,37 @@ def resolve_global_config_path(start: Path | None = None) -> Path:
     env_path = _env_config_path()
     if env_path is not None:
         return env_path
+    if config_override is not None:
+        return config_override
     portable = _find_portable_config(start)
     if portable is not None:
         return portable
     return xdg_config_path()
 
 
-def resolve_global_config_write_path(start: Path | None = None) -> Path:
+def resolve_global_config_write_path(
+    start: Path | None = None,
+    config_override: Path | None = None,
+) -> Path:
     """Resolve where to *create* the global config on first run.
 
     Write order (highest priority first):
 
     1. ``$DOTO_CONFIG`` if set.
-    2. ``<project-root>/.doto/config.json`` when a project root is detected
+    2. ``config_override`` -- an explicit configured state path (``.doto.toml``
+       ``state_file`` / ``[state] file`` or ``DOTO_STATE_FILE``). Honouring it
+       here means a first-run ``save()`` lands directly in your private
+       location, so the work clock is never created in the shared tree.
+    3. ``<project-root>/.doto/config.json`` when a project root is detected
        (via :func:`doxtr_doto.cli.config.find_project_root`).
-    3. ``~/.config/doto/config.json`` otherwise.
+    4. ``~/.config/doto/config.json`` otherwise.
 
     If a config already exists anywhere in the read search order, that
     existing path is returned so first-run detection does not clobber it.
 
     Args:
         start: Starting directory (defaults to cwd).
+        config_override: Explicit configured state path (below ``$DOTO_CONFIG``).
 
     Returns:
         The path to create (or reuse) the config at.
@@ -193,6 +221,9 @@ def resolve_global_config_write_path(start: Path | None = None) -> Path:
     env_path = _env_config_path()
     if env_path is not None:
         return env_path
+
+    if config_override is not None:
+        return config_override
 
     # Reuse an existing portable config instead of creating a new one.
     portable = _find_portable_config(start)
@@ -376,6 +407,9 @@ class GlobalState:
             completed" filter is on. Part of the persisted filter/sort memory
             (:class:`doxtr_doto.cli.tui.filtersort.ViewPrefs`), restored on the
             next launch so the last filter/sort state is remembered.
+        tui_conflicts_only: Whether the TUI's "sync conflicts only" filter is
+            on -- keeps only tasks flagged with an unresolved calendar-sync
+            conflict. Part of the persisted filter/sort memory.
         tui_due_filter: The persisted due-date filter choice (a
             :class:`doxtr_doto.enums.DueFilter` value). None means no
             preference saved (defaults to ``all``).
@@ -398,6 +432,26 @@ class GlobalState:
             persisted filter/sort memory
             (:class:`doxtr_doto.cli.tui.filtersort.ViewPrefs`), restored on the
             next launch.
+        tui_recent_done_enabled: Whether the TUI's "recent done" filter is on
+            (hide ``done`` tasks completed more than N days ago). None means
+            the user has not toggled it yet, in which case
+            :func:`doxtr_doto.cli.tui.actions.load_view_prefs` falls back to
+            the config default (on). Part of the persisted filter/sort memory.
+        tui_recent_done_days: The persisted "recent done" window in days (the
+            N in the recent-done filter). None means no preference saved, in
+            which case the ``tui_recent_done_days`` config value (default 10)
+            is used. Part of the persisted filter/sort memory.
+        tui_detail_ratio: The persisted table-layout detail-pane size ratio, a
+            ``"n/d"`` string (e.g. ``"3/4"``, ``"5/8"``, ``"1/2"``) meaning the
+            lower detail pane takes ``n/d`` of the total height (the task list
+            above it taking the remaining ``(d-n)/d``). None means no
+            preference saved (defaults to ``"3/4"``). Restored on the next
+            ``doto tui`` launch.
+        tui_modal_width_ratio: The persisted width ratio for the edit-task and
+            edit-body/note pop-ups, a ``"n/d"`` string (e.g. ``"3/4"``,
+            ``"1/2"``) meaning each modal is ``n/d`` of the total terminal
+            width (centered). None means no preference saved (defaults to
+            ``"3/4"``). Restored on the next ``doto tui`` launch.
     """
 
     version: int = GLOBAL_STATE_VERSION
@@ -410,12 +464,17 @@ class GlobalState:
     last_prompt_date: str | None = None
     tui_layout: str | None = None
     tui_hide_completed: bool = False
+    tui_conflicts_only: bool = False
     tui_due_filter: str | None = None
     tui_tag_filter: str | None = None
     tui_priority_filter: str | None = None
     tui_sort_key: str | None = None
     tui_sort_order: str | None = None
     tui_repo_filter: list[str] | None = None
+    tui_recent_done_enabled: bool | None = None
+    tui_recent_done_days: int | None = None
+    tui_detail_ratio: str | None = None
+    tui_modal_width_ratio: str | None = None
     #: Unrecognized top-level keys, preserved verbatim so a newer version's or
     #: plugin's extra config survives a load/save round-trip (forward compat).
     _extra: dict[str, Any] = field(default_factory=dict)
@@ -442,12 +501,17 @@ class GlobalState:
                 "last_prompt_date": self.last_prompt_date,
                 "tui_layout": self.tui_layout,
                 "tui_hide_completed": self.tui_hide_completed,
+                "tui_conflicts_only": self.tui_conflicts_only,
                 "tui_due_filter": self.tui_due_filter,
                 "tui_tag_filter": self.tui_tag_filter,
                 "tui_priority_filter": self.tui_priority_filter,
                 "tui_sort_key": self.tui_sort_key,
                 "tui_sort_order": self.tui_sort_order,
                 "tui_repo_filter": self.tui_repo_filter,
+                "tui_recent_done_enabled": self.tui_recent_done_enabled,
+                "tui_recent_done_days": self.tui_recent_done_days,
+                "tui_detail_ratio": self.tui_detail_ratio,
+                "tui_modal_width_ratio": self.tui_modal_width_ratio,
             }
         )
         return data
@@ -477,12 +541,17 @@ class GlobalState:
             "last_prompt_date",
             "tui_layout",
             "tui_hide_completed",
+            "tui_conflicts_only",
             "tui_due_filter",
             "tui_tag_filter",
             "tui_priority_filter",
             "tui_sort_key",
             "tui_sort_order",
             "tui_repo_filter",
+            "tui_recent_done_enabled",
+            "tui_recent_done_days",
+            "tui_detail_ratio",
+            "tui_modal_width_ratio",
         }
         extra = {k: v for k, v in data.items() if k not in known}
         return cls(
@@ -498,12 +567,17 @@ class GlobalState:
             last_prompt_date=data.get("last_prompt_date"),
             tui_layout=data.get("tui_layout"),
             tui_hide_completed=bool(data.get("tui_hide_completed", False)),
+            tui_conflicts_only=bool(data.get("tui_conflicts_only", False)),
             tui_due_filter=data.get("tui_due_filter"),
             tui_tag_filter=data.get("tui_tag_filter"),
             tui_priority_filter=data.get("tui_priority_filter"),
             tui_sort_key=data.get("tui_sort_key"),
             tui_sort_order=data.get("tui_sort_order"),
             tui_repo_filter=data.get("tui_repo_filter"),
+            tui_recent_done_enabled=data.get("tui_recent_done_enabled"),
+            tui_recent_done_days=data.get("tui_recent_done_days"),
+            tui_detail_ratio=data.get("tui_detail_ratio"),
+            tui_modal_width_ratio=data.get("tui_modal_width_ratio"),
             _extra=extra,
         )
 
@@ -515,26 +589,34 @@ class GlobalStateStore:
         path: Path to the config.json file.
     """
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        config_override: Path | str | None = None,
+    ) -> None:
         """Initialize the store.
 
         Args:
-            path: Override path to the config file. When omitted, the path is
-                resolved from the portable search order
-                (:func:`resolve_global_config_path`). If no config exists
-                anywhere yet, the *write* target
-                (:func:`resolve_global_config_write_path`) is used instead so
-                a first-run ``save()`` lands in the project-anchored portable
-                location rather than silently in ``~/.config``.
+            path: Explicit override path to the config file. When given it is
+                used verbatim (highest precedence) and resolution is skipped.
+            config_override: A path configured via ``.doto.toml``
+                (``state_file`` / ``[state] file``) or ``DOTO_STATE_FILE``,
+                used to keep the work clock in a private location in a shared
+                checkout. It sits *below* ``$DOTO_CONFIG`` but *above* the
+                portable/XDG fallbacks in both the read and first-run write
+                resolution (see :func:`resolve_global_config_path` /
+                :func:`resolve_global_config_write_path`).
         """
         if path is not None:
             self.path = Path(path)
             return
-        read_path = resolve_global_config_path()
+        override = Path(config_override) if config_override else None
+        read_path = resolve_global_config_path(config_override=override)
         if read_path.exists():
             self.path = read_path
         else:
-            self.path = resolve_global_config_write_path()
+            self.path = resolve_global_config_write_path(config_override=override)
 
     def load(self) -> GlobalState:
         """Load the global state from disk.

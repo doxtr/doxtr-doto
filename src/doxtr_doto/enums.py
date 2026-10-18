@@ -167,6 +167,30 @@ class SortOrder(str, Enum):
     DESC = "desc"
 
 
+class SetParentResult(str, Enum):
+    """Outcome of :func:`doxtr_doto.cli.tui.actions.set_parent`.
+
+    The single source of truth for the four return codes the set-parent
+    feature contract rests on, shared by the producer
+    (:func:`~doxtr_doto.cli.tui.actions.set_parent`) and the consumer
+    (:meth:`~doxtr_doto.cli.tui.app.DotoApp.action_set_parent`, which compares
+    against :attr:`OK`) so a typo cannot silently diverge the two.
+
+    Members:
+        OK: The parent was set.
+        CLEARED: The task's parent link was removed (it is now top-level).
+        NOT_FOUND: A reference could not be resolved to a task.
+        CROSS_REPO: Child and parent are in different repos.
+        CYCLE: The assignment would create a self-loop or cycle.
+    """
+
+    OK = "ok"
+    CLEARED = "cleared"
+    NOT_FOUND = "not_found"
+    CROSS_REPO = "cross_repo"
+    CYCLE = "cycle"
+
+
 #: Human-readable labels for each :class:`DueFilter` member, keyed by the enum.
 #: Single source of truth for the filter/sort pop-up's due-filter select
 #: options so a new member cannot be backend-supported but UI-unselectable;

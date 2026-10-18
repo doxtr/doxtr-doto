@@ -271,3 +271,341 @@ class TestErrorPaths:
         result = cli_runner.invoke(cli, ["--config", str(tmp_path), "calsync", "push"])
         assert result.exit_code != 0
         assert "event_mode" in result.output
+
+
+class _PullProvider(CalendarProvider):
+    """Fake provider that also serves remote events for pull/two-way tests."""
+
+    name = "fake"
+    remote_events: list = []
+    instances: list = []
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.created: list[str] = []
+        self.updated: list[str] = []
+        self.deleted: list[str] = []
+        _PullProvider.instances.append(self)
+
+    def connect(self):
+        pass
+
+    def create_event(self, event):
+        self.created.append(event.task_id)
+        return PushResult(uid=event.uid, etag="e1", remote_id="r-" + (event.task_id or ""))
+
+    def update_event(self, event, *, etag="", href=""):
+        self.updated.append(event.task_id)
+        return PushResult(uid=event.uid, etag="e2", remote_id="r-" + (event.task_id or ""))
+
+    def delete_event(self, uid, *, etag="", href=""):
+        self.deleted.append(uid)
+
+    def list_events(self):
+        return list(_PullProvider.remote_events)
+
+
+@pytest.fixture
+def two_way_project(tmp_path):
+    """A project configured for two-way calendar sync with one due task."""
+    doto_dir = tmp_path / ".doto"
+    doto_dir.mkdir()
+    (tmp_path / ".doto.toml").write_text(
+        """
+[doto]
+json_file = ".doto/tasks.json"
+id_prefix = "TEST"
+
+[calendar]
+enabled = true
+provider = "caldav"
+calendar = "work"
+event_mode = "event"
+direction = "two-way"
+username = "me@example.com"
+password = "pw"
+url = "https://dav.example.com/"
+"""
+    )
+    (doto_dir / "tasks.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    "TASK-001": {
+                        "title": "Local task",
+                        "status": "open",
+                        "due": "2026-08-15T09:00",
+                        "archived": False,
+                    }
+                },
+                "series": {},
+            }
+        )
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def pull_provider(monkeypatch):
+    from doxtr_doto.calsync.model import EventKind, RemoteEvent
+
+    _PullProvider.instances = []
+    _PullProvider.remote_events = [
+        RemoteEvent(
+            uid="user-ev@example.com",
+            remote_id="rid-1",
+            summary="User created",
+            start=__import__("datetime").datetime(2026, 9, 1, 10, 0),
+            kind=EventKind.EVENT,
+        )
+    ]
+    monkeypatch.setattr("doxtr_doto.calsync.providers.get_provider", lambda name: _PullProvider)
+    return _PullProvider
+
+
+class TestPull:
+    def test_pull_dry_run_imports_nothing(self, cli_runner, two_way_project, pull_provider):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(two_way_project), "calsync", "pull", "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "1 import" in result.output
+        # No state written on dry-run.
+        tasks = json.loads((two_way_project / ".doto" / "tasks.json").read_text())["tasks"]
+        assert len(tasks) == 1  # only the pre-existing local task
+
+    def test_pull_imports_remote_event(self, cli_runner, two_way_project, pull_provider):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(cli, ["--config", str(two_way_project), "calsync", "pull"])
+        assert result.exit_code == 0, result.output
+        assert "1 imported" in result.output
+        tasks = json.loads((two_way_project / ".doto" / "tasks.json").read_text())["tasks"]
+        # The imported task was added alongside the pre-existing one.
+        titles = {t["title"] for t in tasks.values()}
+        assert "User created" in titles
+
+
+class TestTwoWaySync:
+    def test_sync_runs_pull_then_push(self, cli_runner, two_way_project, pull_provider):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(cli, ["--config", str(two_way_project), "calsync", "sync"])
+        assert result.exit_code == 0, result.output
+        assert "imported" in result.output
+        assert "Pushed" in result.output
+
+    def test_sync_dry_run_previews_both(self, cli_runner, two_way_project, pull_provider):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(two_way_project), "calsync", "sync", "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Pull (calendar -> doto)" in result.output
+        assert "Push (doto -> calendar)" in result.output
+
+
+@pytest.fixture
+def conflict_project(tmp_path):
+    """A project whose single task carries an unresolved sync-conflict stash."""
+    doto_dir = tmp_path / ".doto"
+    doto_dir.mkdir()
+    (tmp_path / ".doto.toml").write_text(
+        """
+[doto]
+json_file = ".doto/tasks.json"
+id_prefix = "TEST"
+
+[calendar]
+enabled = true
+provider = "caldav"
+calendar = "work"
+event_mode = "event"
+username = "me@example.com"
+password = "pw"
+url = "https://dav.example.com/"
+"""
+    )
+    (doto_dir / "tasks.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    "TEST-001": {
+                        "title": "Local title",
+                        "status": "open",
+                        "due": "2026-08-15T09:00",
+                        "archived": False,
+                        "body": "<<<<<<< local\nLOCAL\n=======\nREMOTE\n>>>>>>> remote",
+                        "sync_conflict": True,
+                        "_sync": {
+                            "conflict": {
+                                "detected": "2026-07-26T10:00:00",
+                                "fields": [
+                                    {
+                                        "field": "body",
+                                        "base": "l1\nBASE\nl3",
+                                        "local": "l1\nLOCAL\nl3",
+                                        "remote": "l1\nREMOTE\nl3",
+                                        "both": "<<<<<<< local\nLOCAL\n"
+                                        "=======\nREMOTE\n>>>>>>> remote",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                },
+                "series": {},
+            }
+        )
+    )
+    return tmp_path
+
+
+class TestConflictsAndResolve:
+    def test_conflicts_lists_flagged_task(self, cli_runner, conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(cli, ["--config", str(conflict_project), "calsync", "conflicts"])
+        assert result.exit_code == 0, result.output
+        assert "TEST-001" in result.output
+        assert "body" in result.output
+
+    def test_conflicts_none(self, cli_runner, calsync_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(cli, ["--config", str(calsync_project), "calsync", "conflicts"])
+        assert result.exit_code == 0, result.output
+        assert "No unresolved" in result.output
+
+    def test_resolve_remote_clears_flag(self, cli_runner, conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(conflict_project), "calsync", "resolve", "TEST-001", "--remote"],
+        )
+        assert result.exit_code == 0, result.output
+        tasks = json.loads((conflict_project / ".doto" / "tasks.json").read_text())["tasks"]
+        t = tasks["TEST-001"]
+        assert t["body"] == "l1\nREMOTE\nl3"
+        assert t["sync_conflict"] is False
+        assert t["_sync"]["conflict"] is None
+
+    def test_resolve_both_keeps_markers(self, cli_runner, conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(conflict_project), "calsync", "resolve", "TEST-001", "--both"],
+        )
+        assert result.exit_code == 0, result.output
+        tasks = json.loads((conflict_project / ".doto" / "tasks.json").read_text())["tasks"]
+        assert "<<<<<<<" in tasks["TEST-001"]["body"]
+
+    def test_resolve_requires_a_choice(self, cli_runner, conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(conflict_project), "calsync", "resolve", "TEST-001"]
+        )
+        assert result.exit_code != 0
+        assert "Choose one of" in result.output
+
+    def test_resolve_no_conflict_errors(self, cli_runner, calsync_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(calsync_project), "calsync", "resolve", "TASK-001", "--local"],
+        )
+        assert result.exit_code != 0
+        assert "no unresolved" in result.output.lower()
+
+
+@pytest.fixture
+def legacy_conflict_project(tmp_path):
+    """A task flagged with markers in the body but no structured stash.
+
+    Mirrors a task merged before the ``_sync.conflict`` stash existed, so the
+    resolver must reconstruct the conflict from the git-style markers.
+    """
+    doto_dir = tmp_path / ".doto"
+    doto_dir.mkdir()
+    (tmp_path / ".doto.toml").write_text(
+        """
+[doto]
+json_file = ".doto/tasks.json"
+id_prefix = "TEST"
+
+[calendar]
+enabled = true
+provider = "caldav"
+calendar = "work"
+event_mode = "event"
+username = "me@example.com"
+password = "pw"
+url = "https://dav.example.com/"
+"""
+    )
+    (doto_dir / "tasks.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "updated": "2026-07-26T10:00:00",
+                "tasks": {
+                    "TEST-001": {
+                        "title": "Legacy conflict",
+                        "status": "open",
+                        "due": "2026-08-15T09:00",
+                        "archived": False,
+                        "sync_conflict": True,
+                        # No _sync.conflict stash -- only markers in the body.
+                        "_sync": {"rst_file": None, "snapshot": None},
+                        "body": (
+                            "shared\n\n"
+                            "<<<<<<< local (doto)\n"
+                            "LOCAL note\n"
+                            "=======\n"
+                            "REMOTE note\n"
+                            ">>>>>>> remote (calendar)"
+                        ),
+                    },
+                },
+                "series": {},
+            }
+        )
+    )
+    return tmp_path
+
+
+class TestLegacyMarkerConflict:
+    def test_conflicts_finds_legacy_marker_task(self, cli_runner, legacy_conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli, ["--config", str(legacy_conflict_project), "calsync", "conflicts"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "TEST-001" in result.output
+
+    def test_resolve_legacy_marker_task_local(self, cli_runner, legacy_conflict_project):
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(legacy_conflict_project), "calsync", "resolve", "TEST-001", "--local"],
+        )
+        assert result.exit_code == 0, result.output
+        tasks = json.loads((legacy_conflict_project / ".doto" / "tasks.json").read_text())["tasks"]
+        t = tasks["TEST-001"]
+        assert "LOCAL note" in t["body"]
+        assert "<<<<<<<" not in t["body"]
+        assert t["sync_conflict"] is False
+        assert t["_sync"]["conflict"] is None

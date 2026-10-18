@@ -4,8 +4,8 @@ The ``CalendarEvent`` dataclass is the shared currency between the engine and
 every provider: the engine builds it from a doto task, a provider serializes it
 to the wire format (iCalendar VEVENT/VTODO or a provider-native JSON body), and
 pushes it. Keeping it transport-neutral means the projection logic (workday /
-break windows, all-day handling) lives in exactly one place and is unit-testable
-without any network or SDK.
+break windows, per-task estimate sizing, all-day handling) lives in exactly one
+place and is unit-testable without any network or SDK.
 
 Time model: doto models due dates/times as *naive, local* wall-clock values
 (see :mod:`doxtr_doto.date_utils`). This module preserves that: the produced
@@ -31,6 +31,14 @@ if TYPE_CHECKING:
 #: created by the user or other tools.
 UID_PREFIX = "doto-"
 UID_DOMAIN = "@doxtr-doto"
+
+#: Opening marker of the back-reference line push appends to a calendar item's
+#: description (``[doto:<ref>]``). Defined once here and consumed by both the
+#: push writer (:func:`project_task_to_event`) and the pull stripper
+#: (:func:`doxtr_doto.calsync.engine._strip_back_reference`) so the two can
+#: never drift on the marker spelling.
+BACK_REFERENCE_OPEN = "[doto:"
+BACK_REFERENCE_CLOSE = "]"
 
 
 class EventKind(str, Enum):
@@ -99,6 +107,108 @@ def task_id_from_uid(uid: str) -> str | None:
     if not is_doto_uid(uid):
         return None
     return uid[len(UID_PREFIX) : -len(UID_DOMAIN)]
+
+
+@dataclass
+class RemoteEvent:
+    """A provider-neutral snapshot of an item read back from a calendar.
+
+    This is the inbound counterpart to :class:`CalendarEvent` (which is the
+    outbound projection). A provider's ``list_events`` maps its native item
+    shape onto this so the pull planner can reason about remote items without
+    any provider-specific knowledge.
+
+    Time model matches the rest of doto: ``start`` / ``end`` / ``due`` are
+    *naive, local* wall-clock datetimes (the provider strips any timezone at
+    the wire boundary), so they round-trip cleanly into a task's ``due``.
+
+    Attributes:
+        uid: iCalendar UID (``iCalUID``). May be a doto-owned UID (push created
+            it) or an arbitrary user/provider UID.
+        remote_id: Provider-native id (Google/MS event id); empty for CalDAV.
+        etag: Server ETag, when the provider exposes one.
+        summary: Item title.
+        description: Item body/notes.
+        start: Naive local start datetime (events), or None.
+        end: Naive local end datetime (events), or None.
+        all_day: True for an all-day/date-only item.
+        due: Naive local due datetime (to-dos), or None.
+        kind: EVENT or TODO.
+        status: Provider/iCal status string, when available.
+        categories: Tag/category list (iCalendar CATEGORIES), when the provider
+            surfaces them; empty otherwise.
+        extra: Provider-specific passthrough so the inbound contract can grow
+            without a model change (never serialized generically).
+        raw: Optional provider-native payload (diagnostic; never serialized).
+    """
+
+    uid: str
+    remote_id: str = ""
+    etag: str = ""
+    summary: str = ""
+    description: str = ""
+    start: datetime | None = None
+    end: datetime | None = None
+    all_day: bool = False
+    due: datetime | None = None
+    kind: EventKind = EventKind.EVENT
+    status: str | None = None
+    categories: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
+    raw: Any = None
+
+    def inbound_due(self) -> str | None:
+        """Return the naive-local ISO ``due`` string this item maps to.
+
+        Preference order mirrors the push projection: a to-do's ``due``, then
+        an event ``start``. All-day items yield a date-only string; timed
+        items keep ``YYYY-MM-DDTHH:MM``. Returns None when nothing is present.
+        """
+        anchor = self.due or self.start
+        if anchor is None:
+            return None
+        if self.all_day:
+            return anchor.date().isoformat()
+        return DotoDate(anchor.date(), anchor.time()).isoformat()
+
+    def inbound_estimate_minutes(self) -> int | None:
+        """Return the event's duration in whole minutes, or None.
+
+        The inbound counterpart to how push projects a task's ``estimate`` into
+        an event's end (``end = start + estimate``): for a **timed** event with
+        both a ``start`` and a later ``end``, this is ``end - start`` in
+        minutes, so the duration a user set on the calendar can be mapped back
+        onto the task's ``estimate`` (letting the end time be recomputed on the
+        next push).
+
+        Returns None for an all-day item (its end is an exclusive next-day
+        date, not a real duration), when ``start``/``end`` are missing, or when
+        ``end`` is not strictly after ``start`` -- so a zero/negative span never
+        produces a bogus estimate.
+        """
+        return timed_duration_minutes(self.all_day, self.start, self.end)
+
+
+def timed_duration_minutes(
+    all_day: bool, start: datetime | None, end: datetime | None
+) -> int | None:
+    """Return a timed event's ``end - start`` duration in whole minutes, or None.
+
+    The single source of truth for "how long is this timed event", shared by
+    :meth:`RemoteEvent.inbound_estimate_minutes`,
+    :func:`~doxtr_doto.calsync.ical.inbound_hash_of_pushed`, and the merge
+    baseline snapshot, so the inbound-change fingerprint, the push baseline, and
+    the merge ancestor can never disagree on the arithmetic (a mismatch would
+    reintroduce spurious two-way conflicts).
+
+    Returns None for an all-day item (its end is an exclusive next-day date, not
+    a real duration), when ``start``/``end`` are missing, or when the span is
+    not strictly positive.
+    """
+    if all_day or start is None or end is None:
+        return None
+    minutes = int((end - start).total_seconds() // 60)
+    return minutes if minutes > 0 else None
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +310,8 @@ def project_task_to_event(
 
     * ``event_mode == "todo"`` -> a VTODO with a ``due`` (date or datetime).
     * ``event_mode == "event"`` and the due has a **time** -> a timed VEVENT of
-      ``event_duration_minutes``, nudged out of the break window.
+      the task's ``estimate`` (when set) or ``event_duration_minutes``, nudged
+      out of the break window.
     * ``event_mode == "event"`` and the due is **date-only**:
         - ``all_day_for_dateless`` True -> an all-day VEVENT on that date.
         - otherwise -> a timed VEVENT starting at ``workday_start``.
@@ -232,7 +343,7 @@ def project_task_to_event(
     if body:
         description_parts.append(body)
     ref = back_reference or task_id
-    description_parts.append(f"[doto:{ref}]")
+    description_parts.append(f"{BACK_REFERENCE_OPEN}{ref}{BACK_REFERENCE_CLOSE}")
     description = "\n\n".join(description_parts)
 
     mode = (cal.event_mode or "event").lower()
@@ -250,7 +361,17 @@ def project_task_to_event(
         )
 
     # --- event mode ---------------------------------------------------------
-    duration = timedelta(minutes=max(1, int(cal.event_duration_minutes)))
+    # Prefer a per-task estimate (expected duration, in minutes) when present;
+    # fall back to the calendar's global ``event_duration_minutes``. This lets
+    # a task carrying ``:estimate: 4h`` project a 4-hour block while a dateless
+    # chore keeps the default slot size. Parsing is forgiving so malformed
+    # stored data cannot break a push (it just falls back to the default).
+    from doxtr_doto.date_utils import parse_duration_safe
+
+    estimate_minutes = parse_duration_safe(task.get("estimate"))
+    if estimate_minutes is None:
+        estimate_minutes = int(cal.event_duration_minutes)
+    duration = timedelta(minutes=max(1, estimate_minutes))
 
     if not due.has_time:
         if cal.all_day_for_dateless:

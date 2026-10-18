@@ -45,7 +45,15 @@ scrollable - each is a :class:`doxtr_doto.cli.tui.widgets.AltLayoutView`
 (a scroll container) that scrolls to keep the highlighted row visible as the
 cursor moves, using the shared smart-scroll algorithm (a configurable margin
 trigger + jump; see :attr:`AltLayoutView.SCROLL_MARGIN` /
-:attr:`AltLayoutView.SCROLL_JUMP`). The kanban board lays its status columns
+:attr:`AltLayoutView.SCROLL_JUMP`) for continuous ``j``/``k`` navigation. After
+a *discontinuous* selection change - switching swim lanes (``h``/``l``),
+selecting a task by id, a calendar day move, or a layout cycle (``v``/``V``)
+that re-selects a task - the active view instead repositions via
+:meth:`AltLayoutView.ensure_cursor_visible` so the whole selected item is
+always brought back on screen (e.g. switching from the bottom of a long
+``open`` lane to a one-card ``in-progress`` lane scrolls the viewport up so the
+selected card is visible), rather than relying on the now-stale move
+direction. The kanban board lays its status columns
 out left-to-right with framed, fixed-size *square* cards (constrained in both
 width and height, the body clipped with an ellipsis when it overflows); the
 selected card is marked by a highlighted *frame*, ``Enter`` opens the card
@@ -74,8 +82,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, NamedTuple
+from enum import Enum
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -89,18 +99,21 @@ from textual.widgets import (
     Input,
     Label,
     Markdown,
+    OptionList,
     Select,
     SelectionList,
     Static,
     TextArea,
     Tree,
 )
+from textual.widgets.option_list import Option
 
+from doxtr_doto.calsync import resolve
 from doxtr_doto.cli.display import DisplayScope
 from doxtr_doto.cli.id_resolver import namespaced_id as namespaced
 from doxtr_doto.cli.output import build_task_detail_lines
 from doxtr_doto.cli.session import render_time_spent_line
-from doxtr_doto.cli.tui import TERMINAL_TITLE, actions, data, filtersort, nudge
+from doxtr_doto.cli.tui import TERMINAL_TITLE, actions, calsync_tui, data, filtersort, nudge
 from doxtr_doto.cli.tui.theme import escape_markup, escape_title
 from doxtr_doto.cli.tui.time_mgmt import (
     BreaksConfigScreen,
@@ -126,20 +139,44 @@ from doxtr_doto.cli.tui.widgets import (
     weekday_range_label,
 )
 from doxtr_doto.constants import STATUS_LABELS
-from doxtr_doto.enums import TuiLayout
+from doxtr_doto.enums import SetParentResult, TuiLayout
+from doxtr_doto.fields import BY_NAME
 from doxtr_doto.raci import RACI_ROLE_LABELS, render_raci_differing_lines
 
 if TYPE_CHECKING:
-    from datetime import date
+    from datetime import date, time
     from pathlib import Path
 
+    from doxtr_doto.cli.config import DotoConfig
     from doxtr_doto.cli.json_store import JsonTaskStore
     from doxtr_doto.cli.main import DotoContext
     from doxtr_doto.cli.repo_registry import DiscoveredRepo
+    from doxtr_doto.cli.tui.add_series_fields import SeriesFormValues
+    from doxtr_doto.cli.tui.edit_series_fields import EditSeriesFormValues
     from doxtr_doto.cli.tui.filtersort import ViewPrefs
 
 #: How often (seconds) the live status-line counters refresh.
 COUNTER_INTERVAL = 1.0
+
+
+def _apply_modal_width(modal: Widget, terminal_width: int, width_percent: int) -> None:
+    """Size ``modal`` to ``width_percent`` percent of the terminal width.
+
+    Shared by the task pop-ups (:class:`CardViewerScreen`,
+    :class:`EditTaskScreen`, :class:`EditBodyScreen`) so they size identically
+    from the configurable ``tui_modal_width_ratio``. The width is set as an
+    explicit cell count derived from the live terminal width (rather than a
+    CSS percentage, whose base is the modal's padded container, not the whole
+    terminal), and is re-applied on terminal resize via each screen's
+    ``on_resize``. The height is left untouched.
+
+    Args:
+        modal: The modal's root container widget to resize.
+        terminal_width: The current terminal width in cells
+            (``self.app.size.width``).
+        width_percent: The target width as a percentage of the terminal width.
+    """
+    modal.styles.width = max(1, round(terminal_width * width_percent / 100))
 
 
 def _standalone_modifier_keys() -> frozenset[str]:
@@ -209,6 +246,29 @@ def filter_options(options: list[str], query: str) -> list[str]:
         if any(word.startswith(needle) for word in words):
             matches.append(option)
     return matches
+
+
+def substring_filter(options: list[str], query: str) -> list[str]:
+    """Return the options containing ``query`` as a case-insensitive substring.
+
+    The free-text matcher backing the :class:`SetParentScreen` search box.
+    Unlike :func:`filter_options` (which matches only on word prefixes), this
+    matches anywhere in the option, so typing a hyphenated task id
+    (``"T-003"``), a fragment of the title, or any contiguous run of
+    characters narrows the candidate list the way a general search box is
+    expected to. An empty/whitespace-only query returns every option.
+
+    Args:
+        options: The candidate option strings (the ``id  title`` labels).
+        query: The typed query buffer.
+
+    Returns:
+        The subset of ``options`` that contain ``query``, in original order.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return list(options)
+    return [option for option in options if needle in option.lower()]
 
 
 def build_repo_options(
@@ -443,14 +503,42 @@ class AddTaskResult(NamedTuple):
     title; an empty title (or ``Escape``) cancels and dismisses ``None``
     instead, so a non-``None`` result always carries a usable title.
 
+    The modal is field-configurable (see
+    :mod:`doxtr_doto.cli.tui.add_fields`): the ``minimal`` preset collects only
+    ``title`` + ``repo`` (the original behavior), while the ``default`` / ``all``
+    presets (or an explicit field list) collect the additional optional fields
+    below. Every optional field defaults to ``None`` so a result built by the
+    minimal path is unchanged, and :meth:`DotoApp.action_add` can forward every
+    field unconditionally.
+
     Attributes:
         title: The entered task title (already stripped, never empty).
         repo: The repository the task should be created in (the current repo
             by default, or whichever the user picked in the selector).
+        assignee: Assignee name, or None when the field was absent/empty.
+        priority: Priority value, or None.
+        status: Status value, or None.
+        due: Parsed due date (``YYYY-MM-DD`` / ``...THH:MM``), or None.
+        estimate: Estimate in whole minutes, or None.
+        tags: Comma-separated tags string, or None.
+        depends_on: Comma-separated dependency IDs, or None.
+        body: Task body/description, or None.
+        progress: Progress percentage (0-100), or None.
+        raci: Explicit RACI string (``"responsible alice, ..."``), or None.
     """
 
     title: str
     repo: DiscoveredRepo
+    assignee: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    due: str | None = None
+    estimate: int | None = None
+    tags: str | None = None
+    depends_on: str | None = None
+    body: str | None = None
+    progress: int | None = None
+    raci: str | None = None
 
 
 class KillRing:
@@ -752,6 +840,9 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
     Filters:
 
     * hide completed tasks (status ``done``),
+    * hide done tasks completed more than N days ago (the "recent done"
+      filter; the N days box seeds from the ``tui_recent_done_days`` config
+      default and is independent of "hide completed"),
     * show only tasks due today,
     * show only tasks due this week,
     * show only tasks with a chosen tag (from the known tags), and
@@ -784,6 +875,9 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
             selector.
         repos: The known repository names offered in the repository
             multi-select. Defaults to an empty list.
+        default_recent_done_days: The config-default "recent done" window (in
+            days) used to pre-fill the days box when the recent-done filter is
+            currently disabled. Defaults to 10.
     """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
@@ -805,6 +899,7 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
         tags: list[str],
         priorities: list[str],
         repos: list[str] | None = None,
+        default_recent_done_days: int = 10,
     ) -> None:
         """Initialize the modal from the current prefs and known values."""
         super().__init__()
@@ -812,6 +907,10 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
         self.tags = list(tags)
         self.priorities = list(priorities)
         self.repos = list(repos or [])
+        #: The config-default recent-done window used to pre-fill the days box
+        #: when the filter is currently disabled (so enabling it offers a
+        #: sensible N rather than an empty field).
+        self.default_recent_done_days = default_recent_done_days
 
     def compose(self) -> ComposeResult:
         """Build the filter + sort controls, pre-populated from the prefs."""
@@ -823,6 +922,26 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
                 "Hide completed tasks",
                 value=self.prefs.hide_completed,
                 id="viewprefs-hide-completed",
+            )
+            yield Checkbox(
+                "Hide done completed more than N days ago",
+                value=self.prefs.recent_done_days is not None,
+                id="viewprefs-recent-done",
+            )
+            yield Label("Recent-done window (days)")
+            yield Input(
+                value=str(
+                    self.prefs.recent_done_days
+                    if self.prefs.recent_done_days is not None
+                    else self.default_recent_done_days
+                ),
+                placeholder=str(self.default_recent_done_days),
+                id="viewprefs-recent-done-days",
+            )
+            yield Checkbox(
+                "Sync conflicts only",
+                value=self.prefs.conflicts_only,
+                id="viewprefs-conflicts-only",
             )
             yield Label("Due")
             yield self.select_class(
@@ -948,6 +1067,9 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
         from doxtr_doto.enums import DueFilter, SortKey, SortOrder
 
         hide = self.query_one("#viewprefs-hide-completed", Checkbox).value
+        recent_on = self.query_one("#viewprefs-recent-done", Checkbox).value
+        recent_days_raw = self.query_one("#viewprefs-recent-done-days", Input).value
+        conflicts = self.query_one("#viewprefs-conflicts-only", Checkbox).value
         due_raw = self.query_one("#viewprefs-due", Select).value
         tag_raw = self.query_one("#viewprefs-tag", Select).value
         pri_raw = self.query_one("#viewprefs-priority", Select).value
@@ -957,8 +1079,20 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
         repo_filter = tuple(str(v) for v in repos_widget.selected)
         tag = tag_raw if isinstance(tag_raw, str) else None
         pri = pri_raw if isinstance(pri_raw, str) else None
+        # Recent-done: active only when the box is checked and the days field
+        # parses to a positive int; otherwise the filter is disabled (None).
+        # A blank/invalid entry while checked falls back to the config default.
+        recent_done_days: int | None = None
+        if recent_on:
+            try:
+                parsed_days = int(str(recent_days_raw).strip())
+            except ValueError:
+                parsed_days = self.default_recent_done_days
+            recent_done_days = parsed_days if parsed_days > 0 else None
         return ViewPrefs(
             hide_completed=bool(hide),
+            recent_done_days=recent_done_days,
+            conflicts_only=bool(conflicts),
             due_filter=DueFilter(due_raw) if isinstance(due_raw, str) else DueFilter.ALL,
             tag_filter=tag or None,
             priority_filter=pri or None,
@@ -981,36 +1115,672 @@ class ViewPrefsScreen(ModalScreen["ViewPrefs | None"]):
         self.dismiss(None)
 
 
-class AddTaskScreen(ModalScreen["AddTaskResult | None"]):
-    """Modal prompting for a new task title and its target repository.
+class DetailRatioScreen(ModalScreen["str | None"]):
+    """Modal to configure the table-layout detail-pane size ratio.
 
-    Dismisses with an :class:`AddTaskResult` carrying the entered title and
-    the chosen repository, or ``None`` if cancelled (``Escape`` or an empty
-    title). The actual task creation is performed by the app via
-    :func:`doxtr_doto.cli.tui.actions.add_task` so the add logic matches
-    ``doto add``.
+    A small ``Config`` pop-up (reached via ``c`` -> ``d``) that lets the user
+    set how much of the *total* vertical space the lower detail pane takes, as
+    an ``"n/d"`` fraction: ``"3/4"`` (the default) gives the detail pane 3/4 of
+    the height and the task list the remaining 1/4, ``"1/2"`` splits them
+    evenly, ``"5/8"`` gives the detail pane five-eighths, and so on. The
+    numerator must be smaller than the denominator. On *Apply* the modal
+    dismisses with the (canonicalized) ratio string; ``Escape`` cancels and
+    dismisses ``None`` leaving the current ratio unchanged. The caller
+    (:meth:`DotoApp.action_configure_detail_ratio`) applies it immediately and
+    persists it for the next launch.
 
-    The repository selector lets the user pick which repository the task is
-    created in; it defaults to the current working directory's repository and
-    is populated from the cached repository list plus the current repo. The
-    select widget is overridable via :attr:`select_class` so a child theme can
-    replace the type-to-filter behavior, mirroring
-    :attr:`EditTaskScreen.select_class`. The ``(label, value)`` option list is
-    built by the pure, render-independent :func:`build_repo_options` helper.
+    Args:
+        ratio: The current ratio to pre-populate the text box with.
     """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    #: Overridable select widget class (the type-to-filter repository
-    #: control). A child theme can swap in a custom :class:`Select` subclass
-    #: without reimplementing :meth:`compose`, mirroring
-    #: :attr:`EditTaskScreen.select_class`.
+    def __init__(self, ratio: str) -> None:
+        """Initialize the modal from the current detail-pane ratio."""
+        super().__init__()
+        self.ratio = ratio
+
+    def compose(self) -> ComposeResult:
+        """Build the ratio text box and the Apply/Reset buttons."""
+        with Vertical(id="detailratio-modal"):
+            yield Label("Detail pane size", id="detailratio-title")
+            yield Label(
+                "How much of the total height the lower detail pane takes,\n"
+                "as an n/d fraction (e.g. 3/4 = detail 3/4, task list 1/4)."
+            )
+            yield Input(
+                value=self.ratio,
+                placeholder="3/4",
+                id="detailratio-input",
+            )
+            with Horizontal(id="detailratio-bottom"):
+                yield Button("Apply", id="detailratio-apply", variant="primary")
+                yield Button("Reset", id="detailratio-reset")
+
+    def collect_ratio(self) -> str:
+        """Return the entered ratio, canonicalized to a valid ``"n/d"`` string.
+
+        Reads the text box and normalizes it via
+        :func:`doxtr_doto.cli.tui.actions.normalize_detail_ratio` so a
+        malformed/empty entry falls back to the default rather than breaking
+        the layout.
+
+        Returns:
+            A canonical ``"n/d"`` detail-ratio string.
+        """
+        from doxtr_doto.cli.tui.actions import normalize_detail_ratio
+
+        return normalize_detail_ratio(self.query_one("#detailratio-input", Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Apply the entered ratio, or reset it to the default."""
+        from doxtr_doto.cli.tui.actions import DEFAULT_DETAIL_RATIO
+
+        if event.button.id == "detailratio-apply":
+            self.dismiss(self.collect_ratio())
+        elif event.button.id == "detailratio-reset":
+            self.dismiss(DEFAULT_DETAIL_RATIO)
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal, leaving the current ratio unchanged."""
+        self.dismiss(None)
+
+
+class ModalWidthScreen(ModalScreen["str | None"]):
+    """Modal to configure the task pop-up width ratio.
+
+    A small ``Config`` pop-up (reached via ``c`` -> ``m``) that lets the user
+    set how wide the task pop-ups are - the card viewer (``Enter``), the
+    edit-task modal (``e``) and the edit-note modal (``n``) - as an ``"n/d"``
+    fraction of the *total* terminal width: ``"3/4"`` (the default) makes each
+    modal three-quarters of the terminal width, ``"1/2"`` half, ``"1/1"`` full
+    width, and so on. The numerator must be positive and no larger than the
+    denominator. On *Apply* the modal dismisses with the (canonicalized) ratio
+    string; ``Escape`` cancels and dismisses ``None`` leaving the current
+    ratio unchanged. The caller (:meth:`DotoApp.action_configure_modal_width`)
+    persists it for the next launch.
+
+    Args:
+        ratio: The current ratio to pre-populate the text box with.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, ratio: str) -> None:
+        """Initialize the modal from the current pop-up width ratio."""
+        super().__init__()
+        self.ratio = ratio
+
+    def compose(self) -> ComposeResult:
+        """Build the ratio text box and the Apply/Reset buttons."""
+        with Vertical(id="modalwidth-modal"):
+            yield Label("Task pop-up width", id="modalwidth-title")
+            yield Label(
+                "How wide the task pop-ups (view, edit, note) are,\n"
+                "as an n/d fraction of the terminal width (e.g. 3/4)."
+            )
+            yield Input(
+                value=self.ratio,
+                placeholder="3/4",
+                id="modalwidth-input",
+            )
+            with Horizontal(id="modalwidth-bottom"):
+                yield Button("Apply", id="modalwidth-apply", variant="primary")
+                yield Button("Reset", id="modalwidth-reset")
+
+    def collect_ratio(self) -> str:
+        """Return the entered ratio, canonicalized to a valid ``"n/d"`` string.
+
+        Reads the text box and normalizes it via
+        :func:`doxtr_doto.cli.tui.actions.normalize_modal_width_ratio` so a
+        malformed/empty entry falls back to the default rather than breaking
+        the layout.
+
+        Returns:
+            A canonical ``"n/d"`` modal-width-ratio string.
+        """
+        from doxtr_doto.cli.tui.actions import normalize_modal_width_ratio
+
+        return normalize_modal_width_ratio(self.query_one("#modalwidth-input", Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Apply the entered ratio, or reset it to the default."""
+        from doxtr_doto.cli.tui.actions import DEFAULT_MODAL_WIDTH_RATIO
+
+        if event.button.id == "modalwidth-apply":
+            self.dismiss(self.collect_ratio())
+        elif event.button.id == "modalwidth-reset":
+            self.dismiss(DEFAULT_MODAL_WIDTH_RATIO)
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal, leaving the current ratio unchanged."""
+        self.dismiss(None)
+
+
+class SetParentScreen(ModalScreen["str | None"]):
+    """Modal to pick the PARENT task for the selected task(s) (attach feature).
+
+    Opened by the ``e P`` Edit-domain key. Shows a type-to-search box over a
+    live-filtered list of candidate parent tasks: the search :attr:`input_class`
+    box is focused the moment the modal opens, so the user can **start typing
+    immediately** to narrow the list - no need to press Enter / open a dropdown
+    first. The list below is an :attr:`option_list_class` that re-filters on
+    every keystroke (word-prefix match via :func:`filter_options` on the option
+    label). Dismisses with the chosen parent's id (the candidate ``value``) on
+    *Apply* / selecting a row / pressing Enter, or ``None`` on *Cancel* /
+    ``Escape``.
+
+    The caller (:meth:`DotoApp.action_set_parent`) is responsible for building
+    the candidate list - it excludes the child task(s) being parented and any
+    task that would create a cycle - and for the "remember last parent"
+    behavior: it passes the previously chosen parent as ``default`` so the
+    list opens pre-highlighted on it, making it fast to attach several tasks
+    to the SAME parent in a row.
+
+    Modular/overridable, mirroring :class:`ViewPrefsScreen`: a child theme
+    swaps the whole screen via :attr:`DotoApp.set_parent_screen_class`, the
+    search box via :attr:`input_class`, and the candidate list via
+    :attr:`option_list_class`. :attr:`select_class` is retained for backward
+    compatibility (so existing child themes / the public seam keep working)
+    but is no longer used to build the picker.
+
+    Args:
+        candidates: The ``(label, value)`` parent options, where ``value`` is
+            the task ref the chosen parent is reported back as and ``label`` is
+            the human-readable ``id  title`` row.
+        default: The value to pre-highlight (the remembered last parent), or
+            None to open with no pre-selection. Ignored when it is not among
+            the candidate values (e.g. the remembered parent no longer exists
+            or is one of the children being parented).
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    #: Retained for backward compatibility with child themes / the public
+    #: seam (the picker no longer uses a dropdown, but a theme may still read
+    #: or override this). Mirrors :attr:`EditTaskScreen.select_class` /
+    #: :attr:`ViewPrefsScreen.select_class`.
     select_class: type[Select[str]] = FilterableSelect
+
+    #: Overridable search-box class. Defaults to :class:`KillRingInput`
+    #: (bash-style kill/yank), mirroring :attr:`EditTaskScreen.input_class`.
+    #: Focused on mount so the user can type to search immediately.
+    input_class: type[Input] = KillRingInput
+
+    #: Overridable candidate-list class. Defaults to Textual's
+    #: :class:`~textual.widgets.OptionList`; a child theme can swap in a
+    #: custom subclass without reimplementing :meth:`compose`.
+    option_list_class: type[OptionList] = OptionList
+
+    #: The pure matching helper used to filter candidates as the user types.
+    #: Defaults to the case-insensitive :func:`substring_filter` (a general
+    #: free-text search box; matches anywhere in the ``id  title`` label, so
+    #: typing a hyphenated id or a fragment of the title works). Overridable
+    #: by child themes; mirrors :attr:`FilterableSelect.match_fn`.
+    match_fn = staticmethod(substring_filter)
+
+    def __init__(
+        self,
+        candidates: list[tuple[str, str]],
+        default: str | None = None,
+    ) -> None:
+        """Initialize the picker from the candidate parents + remembered default."""
+        super().__init__()
+        self.candidates = list(candidates)
+        self.default = default
+        #: The value currently highlighted in the list (the one *Apply* / Enter
+        #: would choose). Seeded from the remembered default when valid.
+        values = {value for _label, value in self.candidates}
+        self._highlighted_value: str | None = self.default if self.default in values else None
+
+    def _filtered_candidates(self, query: str) -> list[tuple[str, str]]:
+        """Return the ``(label, value)`` candidates matching ``query``.
+
+        An empty query returns every candidate; otherwise the word-prefix
+        :attr:`match_fn` is applied to the option labels (so typing part of a
+        task id or a word in the title narrows the list), preserving the
+        original candidate order.
+        """
+        if not query.strip():
+            return list(self.candidates)
+        matched_labels = set(self.match_fn([label for label, _v in self.candidates], query))
+        return [(label, value) for label, value in self.candidates if label in matched_labels]
+
+    def _populate(self, query: str = "") -> None:
+        """(Re)build the option list for ``query`` and restore the highlight.
+
+        The candidate ``value`` is stored as each :class:`Option` id so the
+        selection handlers can report the task ref directly. When the
+        previously highlighted value is still present it stays highlighted;
+        otherwise the first row is highlighted so Enter always has a target.
+        """
+        option_list = self.query_one("#setparent-list", OptionList)
+        filtered = self._filtered_candidates(query)
+        option_list.clear_options()
+        option_list.add_options([Option(label, id=value) for label, value in filtered])
+        values = [value for _label, value in filtered]
+        if self._highlighted_value in values:
+            option_list.highlighted = values.index(self._highlighted_value)
+        elif values:
+            option_list.highlighted = 0
+            self._highlighted_value = values[0]
+        else:
+            self._highlighted_value = None
+
+    def compose(self) -> ComposeResult:
+        """Build the search box, the live-filtered list, and Apply/Cancel."""
+        with Vertical(id="setparent-modal"):
+            yield Label("Set parent task", id="setparent-title")
+            yield self.input_class(
+                placeholder="Type to search tasks...",
+                id="setparent-search",
+            )
+            yield self.option_list_class(id="setparent-list")
+            with Horizontal(id="setparent-bottom"):
+                yield Button("Apply", id="setparent-apply", variant="primary")
+                yield Button("Cancel", id="setparent-cancel")
+
+    def on_mount(self) -> None:
+        """Populate the list and focus the search box for immediate typing."""
+        self._populate()
+        self.query_one("#setparent-search", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Re-filter the candidate list live as the search query changes."""
+        if event.input.id == "setparent-search":
+            self._populate(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Apply the highlighted candidate when Enter is pressed in the search."""
+        if event.input.id == "setparent-search":
+            self._apply()
+
+    #: Search-box keys forwarded to the candidate list so the user can both
+    #: type to filter and navigate the results without leaving the box.
+    _LIST_NAV_KEYS = {"up", "down", "pageup", "pagedown", "home", "end"}
+
+    def on_key(self, event: events.Key) -> None:
+        """Forward list-navigation keys from the search box to the list.
+
+        The search :attr:`input_class` is focused so the user can type to
+        filter immediately; forwarding Up/Down/PageUp/PageDown/Home/End lets
+        them move the highlight in the candidate list without tabbing away
+        from the search box. Other keys (letters, backspace, Enter, Escape)
+        fall through to the normal input / binding handling.
+        """
+        if self.focused is not self.query_one("#setparent-search", Input):
+            return
+        if event.key not in self._LIST_NAV_KEYS:
+            return
+        option_list = self.query_one("#setparent-list", OptionList)
+        if option_list.option_count == 0:
+            return
+        event.stop()
+        event.prevent_default()
+        if event.key == "up":
+            option_list.action_cursor_up()
+        elif event.key == "down":
+            option_list.action_cursor_down()
+        elif event.key == "pageup":
+            option_list.action_page_up()  # type: ignore[no-untyped-call]
+        elif event.key == "pagedown":
+            option_list.action_page_down()  # type: ignore[no-untyped-call]
+        elif event.key == "home":
+            option_list.action_first()
+        elif event.key == "end":
+            option_list.action_last()
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Track the highlighted candidate so *Apply* / Enter choose it."""
+        if event.option_list.id == "setparent-list":
+            self._highlighted_value = event.option.id
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Dismiss with the selected candidate (click / Enter on the list)."""
+        if event.option_list.id == "setparent-list":
+            self.dismiss(event.option.id)
+
+    def _apply(self) -> None:
+        """Dismiss with the currently highlighted candidate (or None)."""
+        self.dismiss(self._highlighted_value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dismiss with the chosen parent id, or cancel."""
+        if event.button.id == "setparent-apply":
+            self._apply()
+        elif event.button.id == "setparent-cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal without choosing a parent."""
+        self.dismiss(None)
+
+
+class _TaskFieldWidgetsMixin:
+    """Shared field-widget plumbing for the add/edit task modals.
+
+    Both :class:`AddTaskScreen` and :class:`EditTaskScreen` render the same
+    kinds of task-field widgets (single-line inputs, a body text area,
+    priority/status selects and the RACI role sub-inputs) and parse the same
+    date/duration inputs. This mixin factors out the identical pieces so the
+    behavior is defined once:
+
+    * the overridable widget classes :attr:`select_class` / :attr:`input_class`
+      / :attr:`text_area_class`,
+    * the auto-complete suggester seams :meth:`assignee_suggester` /
+      :meth:`tags_suggester` / :meth:`raci_suggester`,
+    * the input parsers :meth:`parse_due` / :meth:`parse_estimate`, and
+    * the RACI role inputs builder :meth:`build_raci_inputs`.
+
+    The RACI role widget ids differ per modal (``add-raci-*`` vs
+    ``edit-raci-*``), so each concrete screen keeps its own
+    :attr:`RACI_FIELDS` tuple (built with its prefix); :meth:`build_raci_inputs`
+    reads that per-subclass attribute, so it works unchanged for both. The
+    mixin relies on ``self.known_assignees`` / ``self.known_tags`` being set by
+    the concrete screen's ``__init__``.
+    """
+
+    #: The concrete screen supplies these candidate lists in ``__init__``.
+    known_assignees: list[str]
+    known_tags: list[str]
+    #: Each concrete screen defines its own RACI field tuple (ids are prefixed
+    #: per modal); :meth:`build_raci_inputs` reads this attribute.
+    RACI_FIELDS: tuple[tuple[str, str, str], ...]
+
+    #: Overridable select widget class (the type-to-filter priority/status
+    #: control). A child theme can swap in a custom :class:`Select` subclass
+    #: without reimplementing ``compose``.
+    select_class: type[Select[str]] = FilterableSelect
+
+    #: Overridable single-line input class for the text fields. Defaults to
+    #: :class:`KillRingInput` (bash-style kill/yank).
+    input_class: type[Input] = KillRingInput
+
+    #: Overridable multi-line text-area class for the body field. Defaults to
+    #: :class:`KillRingTextArea`.
+    text_area_class: type[TextArea] = KillRingTextArea
+
+    def assignee_suggester(self) -> Suggester | None:
+        """Return the auto-complete suggester for the assignee input (seam).
+
+        Prefix-matches the :attr:`known_assignees` candidates
+        case-insensitively, or None when there are no candidates. Overridable
+        by a child theme.
+        """
+        if not self.known_assignees:
+            return None
+        return SuggestFromList(self.known_assignees, case_sensitive=False)
+
+    def tags_suggester(self) -> Suggester | None:
+        """Return the auto-complete suggester for the tags input (seam).
+
+        A :class:`TagSuggester` completing only the final comma-separated
+        segment against :attr:`known_tags`, so already-entered tags are
+        preserved, or None when there are no candidates.
+        """
+        if not self.known_tags:
+            return None
+        return TagSuggester(self.known_tags)
+
+    def raci_suggester(self) -> Suggester | None:
+        """Return the auto-complete suggester for the RACI inputs (seam).
+
+        RACI role fields are comma-separated person names, so the default
+        completes the final comma-separated segment against
+        :attr:`known_assignees` (mirroring the tags suggester behavior), or
+        None when there are no candidate names.
+        """
+        if not self.known_assignees:
+            return None
+        return TagSuggester(self.known_assignees)
+
+    @staticmethod
+    def parse_due(raw: str) -> str | None:
+        """Parse the due-date input via the shared CLI relative-date parser.
+
+        Reuses :func:`doxtr_doto.cli.commands.add.parse_relative_date` (the
+        exact parser the ``doto add`` / ``doto update --due`` verbs use) so
+        absolute (``YYYY-MM-DD``) and relative (``+7d``, ``friday``, ...) forms
+        behave identically in the TUI and CLI. An empty/whitespace input means
+        "no due date" and returns None.
+
+        Args:
+            raw: The raw due-date input string.
+
+        Returns:
+            The normalized ``YYYY-MM-DD`` string, or None.
+
+        Raises:
+            ValueError: If the input is non-empty and cannot be parsed. The
+                message is suitable for surfacing to the user.
+        """
+        from doxtr_doto.cli.commands.add import parse_relative_date
+
+        value = raw.strip()
+        if not value:
+            return None
+        return parse_relative_date(value)
+
+    @staticmethod
+    def parse_estimate(raw: str) -> int | None:
+        """Parse the estimate input into whole minutes (shared CLI parser).
+
+        Reuses :func:`doxtr_doto.date_utils.parse_duration` (the same parser
+        the ``:estimate:`` directive option and ``doto update --estimate`` use)
+        so the compact duration syntax (``5m``, ``90m``, ``4h``, ``1h30m`` or a
+        bare number of minutes) behaves identically in the TUI and CLI. An
+        empty/whitespace input returns None.
+
+        Args:
+            raw: The raw estimate input string.
+
+        Returns:
+            The estimate in whole minutes, or None.
+
+        Raises:
+            ValueError: If the input is non-empty and cannot be parsed. The
+                message is suitable for surfacing to the user.
+        """
+        from doxtr_doto.date_utils import parse_duration
+
+        value = raw.strip()
+        if not value:
+            return None
+        return parse_duration(value)
+
+    def build_raci_inputs(self, fields: dict[str, str]) -> list[Widget]:
+        """Build the RACI role input widgets (overridable seam).
+
+        Each role gets a labelled comma-separated :class:`Input` pre-populated
+        from ``fields[f"raci_{role}"]`` (empty for a new task), reusing the
+        :meth:`raci_suggester`. Reads the concrete screen's :attr:`RACI_FIELDS`
+        (whose widget ids carry the per-modal prefix). A child theme can
+        override this to reshape the RACI region without reimplementing
+        ``compose``.
+
+        Args:
+            fields: The pre-populated field values (RACI roles keyed
+                ``raci_<role>``).
+
+        Returns:
+            The ordered list of label/input widgets to yield into the modal.
+        """
+        widgets: list[Widget] = []
+        for role, label, widget_id in self.RACI_FIELDS:
+            widgets.append(Label(label))
+            widgets.append(
+                self.input_class(
+                    value=fields.get(f"raci_{role}", ""),
+                    id=widget_id,
+                    suggester=self.raci_suggester(),
+                )
+            )
+        return widgets
+
+
+class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"]):
+    """Modal prompting for a new task's fields and its target repository.
+
+    Dismisses with an :class:`AddTaskResult` carrying the entered values and
+    the chosen repository, or ``None`` if cancelled (``Escape`` or - in the
+    minimal single-field layout - an empty title). The actual task creation is
+    performed by the app via :func:`doxtr_doto.cli.tui.actions.add_task` so the
+    add logic matches ``doto add``.
+
+    **Configurable fields.** Which fields the modal shows, in what order, is
+    driven by config (``tui_add_fields``) and resolved by the pure
+    :mod:`doxtr_doto.cli.tui.add_fields` helpers (:func:`resolve_field_names`).
+    Three presets are available - ``minimal`` (title only; the default and
+    backward-compatible behavior), ``default`` (title, tags, due, assignee,
+    body) and ``all`` (every user-settable field, derived dynamically from
+    :data:`doxtr_doto.fields.TASK_FIELDS`) - or an explicit list of field names
+    overriding a preset. Per-field defaults come from ``tui_add_defaults`` and
+    are resolved at modal-open time via
+    :func:`doxtr_doto.cli.tui.add_fields.resolve_default` (so a relative ``due``
+    like ``tomorrow`` becomes a concrete date).
+
+    **Layout.** The configured field order is the exact top-to-bottom render
+    order. The repository selector follows the title (when >1 repo). In the
+    single-field ``minimal`` layout the modal keeps its original compact form
+    (a title ``Input`` submitted with Enter); any multi-field layout renders
+    the fields in a scrolling region with a docked ``Save`` button, mirroring
+    :class:`EditTaskScreen`.
+
+    **Overridability (child themes).** The whole screen is swappable via
+    :attr:`DotoApp.add_task_screen_class`. Within the screen the widget classes
+    are overridable via :attr:`select_class` / :attr:`input_class` /
+    :attr:`text_area_class` (mirroring :class:`EditTaskScreen`), the
+    field->widget-kind mapping via :attr:`FIELD_KINDS`, the per-kind widget
+    builders via the data-driven :attr:`FIELD_KIND_BUILDERS` dispatch table (a
+    new render kind is a one-method + one-table-entry change - no ``if``/``elif``
+    chain), the field labels via :attr:`FIELD_LABELS`, the RACI sub-fields via
+    :attr:`RACI_FIELDS` / :meth:`build_raci_inputs`, the select choices via
+    :meth:`select_choices`, and the per-field suggesters via the
+    :meth:`field_suggester` dispatch seam (routing to :meth:`assignee_suggester`
+    / :meth:`tags_suggester` / :meth:`raci_suggester`). A theme can thus restyle
+    one field (or add a new one) without reimplementing :meth:`compose`. The
+    ``(label, value)`` repo option list is built by the pure,
+    render-independent :func:`build_repo_options` helper.
+
+    **Registering a new field (persistence caveat).** A newly registered
+    settable field in :data:`doxtr_doto.fields.TASK_FIELDS` *automatically*
+    appears in the ``all`` preset and *renders* (via the default ``input``
+    kind, or a mapped :attr:`FIELD_KINDS` kind). Its entered value, however, is
+    NOT persisted by registration alone: :meth:`collect_result` maps the
+    rendered widgets onto the fixed :class:`AddTaskResult` fields, and the
+    create pipeline
+    (:class:`AddTaskResult` -> :meth:`DotoApp.action_add` ->
+    :func:`doxtr_doto.cli.tui.actions.add_task` ->
+    :func:`doxtr_doto.cli.commands.add._build_task_data`) carries only the
+    known optional fields. To persist a brand-new field's value, add it to
+    :class:`AddTaskResult`, read it in :meth:`collect_result`, forward it in
+    :meth:`DotoApp.action_add` + :func:`doxtr_doto.cli.tui.actions.add_task`,
+    and store it in :func:`_build_task_data` - the same manual touch-points the
+    :mod:`doxtr_doto.fields` module docstring already lists for a new field.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    #: The widget classes (:attr:`select_class` / :attr:`input_class` /
+    #: :attr:`text_area_class`), the suggester seams and the
+    #: :meth:`parse_due` / :meth:`parse_estimate` parsers come from
+    #: :class:`_TaskFieldWidgetsMixin` (shared with :class:`EditTaskScreen`).
+
+    #: Data-driven field name -> render "kind" mapping. The kind selects which
+    #: per-widget builder runs (via :attr:`FIELD_KIND_BUILDERS`) in
+    #: :meth:`_build_field`. Each advertised kind is honored by a real builder:
+    #:
+    #: * ``input`` -- a single-line :attr:`input_class` text field. ``date``
+    #:   (``due``), ``duration`` (``estimate``) and ``depends`` (``depends_on``)
+    #:   render as a plain input *today* (their values are validated at submit
+    #:   via :meth:`parse_due` / :meth:`parse_estimate` / the store) but are
+    #:   kept as distinct kinds so a child theme can later override just that
+    #:   kind (e.g. a real date picker) by adding a builder method + a
+    #:   :attr:`FIELD_KIND_BUILDERS` entry, without editing :meth:`_build_field`.
+    #: * ``select`` -- a :attr:`select_class` dropdown (``priority`` / ``status``).
+    #: * ``textarea`` -- a multi-line :attr:`text_area_class` (``body``).
+    #: * ``tags`` -- a single-line input wired to the tags suggester.
+    #: * ``raci`` -- the RACI role sub-inputs (:meth:`build_raci_inputs`).
+    #:
+    #: A child theme can override this to change how a field renders (or to
+    #: wire a newly registered field) in one place. Fields not listed here
+    #: fall back to the ``input`` kind.
+    FIELD_KINDS: dict[str, str] = {
+        "title": "input",
+        "assignee": "input",
+        "priority": "select",
+        "status": "select",
+        "due": "date",
+        "estimate": "duration",
+        "tags": "tags",
+        "depends_on": "depends",
+        "body": "textarea",
+        "progress": "input",
+        "raci": "raci",
+    }
+
+    #: Data-driven kind -> builder-method-name dispatch table. :meth:`_build_field`
+    #: looks up the field's :attr:`FIELD_KINDS` kind here and calls the named
+    #: method ``(name, label, fields) -> list[Widget]`` to build its widgets.
+    #: A child theme adds a brand-new render kind by defining one builder
+    #: method and adding one entry here - no ``if``/``elif`` chain to edit. A
+    #: kind missing from this table falls back to the :attr:`_DEFAULT_KIND`
+    #: builder (a plain input). The ``date`` / ``duration`` / ``depends`` kinds
+    #: deliberately point at the same :meth:`_build_input` builder as ``input``
+    #: (they render as a plain input today) while staying distinct kinds, so a
+    #: theme can retarget just one of them later.
+    FIELD_KIND_BUILDERS: dict[str, str] = {
+        "input": "_build_input",
+        "date": "_build_input",
+        "duration": "_build_input",
+        "depends": "_build_input",
+        "tags": "_build_input",
+        "select": "_build_select_field",
+        "textarea": "_build_textarea",
+        "raci": "_build_raci",
+    }
+
+    #: The render kind used for fields absent from :attr:`FIELD_KINDS`.
+    _DEFAULT_KIND = "input"
+
+    #: The RACI role fields rendered when the ``raci`` field is shown, as
+    #: ``(role, label, widget_id)`` tuples. Derived from the canonical
+    #: :data:`doxtr_doto.raci.RACI_ROLE_LABELS` so adding/renaming a role is a
+    #: one-place change in :mod:`doxtr_doto.raci`. Overridable so a child theme
+    #: can reorder/relabel the RACI inputs (mirrors
+    #: :attr:`EditTaskScreen.RACI_FIELDS`).
+    RACI_FIELDS: tuple[tuple[str, str, str], ...] = tuple(
+        (role, f"{label} (comma-separated)", f"add-raci-{role}")
+        for role, label in RACI_ROLE_LABELS.items()
+    )
+
+    #: Human-readable labels for the per-field ``Label`` widget. Overridable
+    #: so a child theme can relabel a field in one place (listed in the
+    #: class-docstring overridability section). A field without an entry here
+    #: falls back to its :data:`doxtr_doto.fields.BY_NAME` ``display_label``.
+    FIELD_LABELS: dict[str, str] = {
+        "title": "Title",
+        "assignee": "Assignee",
+        "priority": "Priority",
+        "status": "Status",
+        "due": "Due (YYYY-MM-DD or +7d, friday)",
+        "estimate": "Estimate (e.g. 5m, 90m, 4h, 1h30m)",
+        "tags": "Tags (comma-separated)",
+        "depends_on": "Dependencies (comma-separated IDs)",
+        "body": "Body",
+        "progress": "Progress (0-100)",
+    }
 
     def __init__(
         self,
         repos: list[DiscoveredRepo],
         current: DiscoveredRepo,
+        *,
+        config: DotoConfig | None = None,
+        statuses: list[str] | None = None,
+        priorities: list[str] | None = None,
+        known_assignees: list[str] | None = None,
+        known_tags: list[str] | None = None,
     ) -> None:
         """Initialize the add-task modal.
 
@@ -1021,10 +1791,74 @@ class AddTaskScreen(ModalScreen["AddTaskResult | None"]):
             current: The current working directory's repository (from
                 :func:`doxtr_doto.cli.tui.data.current_repo`), used as the
                 selector's default.
+            config: The active config, used to resolve the field-set preset /
+                explicit list (``tui_add_fields``) and per-field defaults
+                (``tui_add_defaults``). When None the modal falls back to the
+                ``minimal`` preset with no prefilled defaults, preserving the
+                original title-only behavior.
+            statuses: The configured status choices for a status select.
+            priorities: The configured priority choices for a priority select.
+            known_assignees: Candidate assignee names for auto-complete
+                suggestions.
+            known_tags: Candidate tag names for auto-complete suggestions.
         """
         super().__init__()
         self.repos = repos
         self.current = current
+        self.config = config
+        self.statuses = statuses or []
+        self.priorities = priorities or []
+        self.known_assignees = known_assignees or []
+        self.known_tags = known_tags or []
+
+    def resolve_fields(self) -> tuple[str, ...]:
+        """Return the ordered task-field names this modal should render.
+
+        Delegates to the pure
+        :func:`doxtr_doto.cli.tui.add_fields.resolve_field_names` using the
+        config's ``tui_add_fields`` value (preset name or explicit list),
+        falling back to the ``minimal`` preset when no config was supplied.
+        The order is the exact top-to-bottom render order.
+
+        Returns:
+            The ordered tuple of field names (always starting with ``title``).
+        """
+        from doxtr_doto.cli.tui import add_fields
+
+        spec = self.config.tui_add_fields if self.config is not None else None
+        return add_fields.resolve_field_names(spec)
+
+    def build_fields(self) -> dict[str, str]:
+        """Return the initial (resolved-default) string value for each field.
+
+        Each field in :meth:`resolve_fields` gets its resolved default from
+        :func:`doxtr_doto.cli.tui.add_fields.resolve_default` (the
+        ``tui_add_defaults`` table, with the classic ``default_*`` config
+        fallbacks and relative-date resolution). The RACI field expands to its
+        four role keys (``raci_responsible`` etc.), which have no configurable
+        default and start empty. Pure/testable: no widgets are touched.
+
+        Returns:
+            A mapping of field (or RACI-role) key to its prefilled string value.
+        """
+        from doxtr_doto.cli.config import DotoConfig
+        from doxtr_doto.cli.tui import add_fields
+
+        config = self.config if self.config is not None else DotoConfig()
+        defaults = config.tui_add_defaults or {}
+        values: dict[str, str] = {}
+        for name in self.resolve_fields():
+            if name == add_fields.REPO_FIELD:
+                # The repo selector is a pseudo-field, not a text field: its
+                # default is handled by ``default_repo_value()`` and it has no
+                # text value in the field map.
+                continue
+            if name == "raci":
+                for role, _label, _wid in self.RACI_FIELDS:
+                    values[f"raci_{role}"] = ""
+                continue
+            values[name] = add_fields.resolve_default(name, defaults, config)
+        return values
 
     def repo_options(self) -> list[tuple[str, str]]:
         """Return the ``(label, value)`` options for the repo selector.
@@ -1038,6 +1872,35 @@ class AddTaskScreen(ModalScreen["AddTaskResult | None"]):
             The selector options, current repo first.
         """
         return build_repo_options(self.repos, self.current)
+
+    def default_repo_value(self) -> str:
+        """Return the repo-selector value to default-select at modal open.
+
+        Honors a ``repo`` entry in ``tui_add_defaults``: the name is matched
+        case-insensitively against the known repos, falling back to a path
+        match. An unknown/empty default falls back to the current repo's path
+        (the original behavior), so a bad default never surfaces an error.
+
+        Returns:
+            The repo path to pre-select in the selector.
+        """
+        default = ""
+        if self.config is not None:
+            default = str((self.config.tui_add_defaults or {}).get("repo", "")).strip()
+        if not default:
+            return self.current.path
+        lowered = default.lower()
+        if self.current.name.lower() == lowered:
+            return self.current.path
+        for repo in self.repos:
+            if repo.name.lower() == lowered:
+                return repo.path
+        if self.current.path == default:
+            return self.current.path
+        for repo in self.repos:
+            if repo.path == default:
+                return repo.path
+        return self.current.path
 
     def repo_for_value(self, value: str) -> DiscoveredRepo:
         """Resolve a selected option value (a repo path) to its repository.
@@ -1059,24 +1922,269 @@ class AddTaskScreen(ModalScreen["AddTaskResult | None"]):
                 return repo
         return self.current
 
-    def compose(self) -> ComposeResult:
-        """Build the modal's widgets (title input and repo selector).
+    def field_suggester(self, name: str) -> Suggester | None:
+        """Return the auto-complete suggester for a single input field (seam).
 
-        The repository selector defaults to the current repo and is omitted
-        when only the current repository is available, so single-repo setups
-        still create tasks in the current repo without an empty control.
+        The single dispatch point that wires a field name to its suggester, so
+        a child theme can give a new field a suggester (or change an existing
+        one) by overriding this method alone rather than reimplementing
+        :meth:`_build_input`. The default routes the ``tags`` field to
+        :meth:`tags_suggester` and the ``assignee`` field to
+        :meth:`assignee_suggester`; every other field gets no suggester. (RACI
+        role inputs are wired separately in :meth:`build_raci_inputs`.)
+
+        Args:
+            name: The field name being built.
+
+        Returns:
+            A :class:`textual.suggester.Suggester` for the field, or None when
+            the field has no suggestions.
+        """
+        if name == "tags":
+            return self.tags_suggester()
+        if name == "assignee":
+            return self.assignee_suggester()
+        return None
+
+    def select_choices(self, name: str) -> list[str]:
+        """Return the choice list for a ``select``-kind field (seam).
+
+        The default maps ``priority`` to :attr:`priorities` and every other
+        select field (e.g. ``status``) to :attr:`statuses`. A child theme can
+        override this to supply choices for a new select field without
+        reimplementing :meth:`_build_select_field`.
+
+        Args:
+            name: The select field name.
+
+        Returns:
+            The ordered choice values for the field's dropdown.
+        """
+        if name == "priority":
+            return self.priorities
+        return self.statuses
+
+    def _is_minimal(self) -> bool:
+        """Return True when the modal shows only the title field.
+
+        The title-only layout keeps the original compact modal (Enter submits,
+        no Save button), which is the backward-compatible default.
+        """
+        return self.resolve_fields() == ("title",)
+
+    def compose(self) -> ComposeResult:
+        """Build the modal's widgets from the resolved field list.
+
+        The minimal (title-only) layout renders the original compact form (a
+        single title ``Input`` plus the repo selector). Any multi-field layout
+        renders each configured field in registered order inside a scrolling
+        region with a docked ``Save`` button (mirroring
+        :class:`EditTaskScreen`). The repository selector follows the title
+        when more than one repo is available.
+        """
+        if self._is_minimal():
+            yield from self._compose_minimal()
+            return
+        yield from self._compose_full()
+
+    def _compose_minimal(self) -> ComposeResult:
+        """Render the original title-only layout (backward compatible).
+
+        Keeps the historical widget ids (``#add-label`` / ``#add-input`` /
+        ``#add-repo``) and a plain :class:`~textual.widgets.Input` submitted
+        with Enter, so single-field setups behave exactly as before.
         """
         options = self.repo_options()
         yield Label("New task title:", id="add-label")
         yield Input(placeholder="Task title", id="add-input")
-        if len(options) > 1:
-            yield Label("Repository:", id="add-repo-label")
-            yield self.select_class(
+        yield from self._build_repo_selector(options)
+
+    def _build_repo_selector(self, options: list[tuple[str, str]]) -> list[Widget]:
+        """Build the repository-selector label + dropdown (overridable seam).
+
+        Factored out so both placement paths - the explicit ``repo``-in-list
+        position (:meth:`_compose_full`) and the implicit after-title fallback
+        (presets / :meth:`_compose_minimal`) - build the selector identically,
+        and a child theme can restyle the picker by overriding this one method.
+        Renders nothing when there is at most one repo (no empty selector), the
+        same rule used before. Keeps the widget id ``#add-repo`` and label id
+        ``#add-repo-label`` unchanged so :meth:`_selected_repo` still finds it.
+
+        Args:
+            options: The ``(label, value)`` repo options from
+                :meth:`repo_options`.
+
+        Returns:
+            The selector widgets to yield, or an empty list when there is at
+            most one repo.
+        """
+        if len(options) <= 1:
+            return []
+        return [
+            Label("Repository:", id="add-repo-label"),
+            self.select_class(
                 options,
-                value=self.current.path,
+                value=self.default_repo_value(),
                 allow_blank=False,
                 id="add-repo",
-            )
+            ),
+        ]
+
+    def _compose_full(self) -> ComposeResult:
+        """Render the multi-field layout in configured order.
+
+        Each field is rendered by the per-kind builder selected from
+        :attr:`FIELD_KINDS`. The repository selector's position depends on the
+        resolved field list: if ``repo`` (:data:`~doxtr_doto.cli.tui.add_fields.REPO_FIELD`)
+        is listed, the selector renders at that exact position via
+        :meth:`_build_repo_selector`; otherwise (presets or a list without
+        ``repo``) it is injected right after the title, preserving the historical
+        placement. Either way nothing is rendered when there is at most one repo.
+        """
+        from doxtr_doto.cli.tui import add_fields
+
+        fields = self.build_fields()
+        names = self.resolve_fields()
+        options = self.repo_options()
+        repo_is_positioned = add_fields.REPO_FIELD in names
+        with Vertical(id="add-modal"):
+            with VerticalScroll(id="add-body-scroll"):
+                yield Label("New task", id="add-heading")
+                for name in names:
+                    if name == add_fields.REPO_FIELD:
+                        # Render the repo selector at its configured position.
+                        yield from self._build_repo_selector(options)
+                        continue
+                    yield from self._build_field(name, fields)
+                    if name == "title" and not repo_is_positioned:
+                        # No explicit ``repo`` entry: keep the historical
+                        # after-title placement.
+                        yield from self._build_repo_selector(options)
+            with Horizontal(id="add-bottom"):
+                yield Button("Save", id="add-save", variant="primary")
+
+    def _build_field(self, name: str, fields: dict[str, str]) -> list[Widget]:
+        """Build the label + widget(s) for one field (data-driven dispatch).
+
+        The field's render kind comes from :attr:`FIELD_KINDS` (defaulting to
+        :attr:`_DEFAULT_KIND`). The kind is mapped to a builder method name via
+        the :attr:`FIELD_KIND_BUILDERS` table and that builder is invoked with
+        ``(name, label, fields)``. This data-driven dispatch (no ``if``/``elif``
+        chain) is the seam a child theme extends: adding a new render kind is a
+        one-method + one-:attr:`FIELD_KIND_BUILDERS`-entry change.
+
+        Args:
+            name: The field name to render.
+            fields: The resolved field values from :meth:`build_fields`.
+
+        Returns:
+            The ordered list of widgets to yield for this field.
+        """
+        kind = self.FIELD_KINDS.get(name, self._DEFAULT_KIND)
+        builder_name = self.FIELD_KIND_BUILDERS.get(
+            kind, self.FIELD_KIND_BUILDERS[self._DEFAULT_KIND]
+        )
+        builder = getattr(self, builder_name)
+        label = self.FIELD_LABELS.get(
+            name, BY_NAME[name].display_label if name in BY_NAME else name.title()
+        )
+        result: list[Widget] = builder(name, label, fields)
+        return result
+
+    def _build_input(self, name: str, label: str, fields: dict[str, str]) -> list[Widget]:
+        """Build a labelled single-line input for a text/date/duration field.
+
+        The ``input`` kind (and the ``date`` / ``duration`` / ``depends`` /
+        ``tags`` kinds, which render as a plain input today) all route here.
+        Its suggester comes from the :meth:`field_suggester` dispatch seam, so
+        a theme can wire a suggester for a new field without overriding this
+        builder.
+
+        Args:
+            name: The field name.
+            label: The field label.
+            fields: The resolved field values from :meth:`build_fields`.
+
+        Returns:
+            The label + input widgets.
+        """
+        return [
+            Label(label),
+            self.input_class(
+                value=fields.get(name, ""),
+                id=f"add-{name}",
+                suggester=self.field_suggester(name),
+            ),
+        ]
+
+    def _build_textarea(self, name: str, label: str, fields: dict[str, str]) -> list[Widget]:
+        """Build a labelled multi-line text area for the ``textarea`` kind.
+
+        Args:
+            name: The field name (e.g. ``body``).
+            label: The field label.
+            fields: The resolved field values from :meth:`build_fields`.
+
+        Returns:
+            The label + text-area widgets.
+        """
+        return [
+            Label(label),
+            self.text_area_class(
+                text=fields.get(name, ""),
+                soft_wrap=True,
+                id=f"add-{name}",
+            ),
+        ]
+
+    def _build_raci(self, name: str, label: str, fields: dict[str, str]) -> list[Widget]:
+        """Build the RACI role sub-inputs for the ``raci`` kind.
+
+        A thin :attr:`FIELD_KIND_BUILDERS` adapter delegating to
+        :meth:`build_raci_inputs` (the overridable RACI seam). ``name`` /
+        ``label`` are unused because the RACI region supplies its own role
+        labels.
+
+        Args:
+            name: The field name (``raci``); unused.
+            label: The field label; unused (per-role labels are used instead).
+            fields: The resolved field values from :meth:`build_fields`.
+
+        Returns:
+            The RACI role label/input widgets.
+        """
+        return self.build_raci_inputs(fields)
+
+    def _build_select_field(self, name: str, label: str, fields: dict[str, str]) -> list[Widget]:
+        """Build a labelled priority/status select pre-selected to its default.
+
+        The choice list comes from the :meth:`select_choices` seam. An initial
+        value that is not a valid choice falls back to
+        :data:`textual.widgets.Select.BLANK`.
+
+        Args:
+            name: The field name (``priority`` or ``status``).
+            label: The field label.
+            fields: The resolved field values from :meth:`build_fields`.
+
+        Returns:
+            The label + select widgets.
+        """
+        choices = self.select_choices(name)
+        default = fields.get(name, "")
+        # Passing ``Select.BLANK`` explicitly as ``value=`` is rejected by
+        # Textual's validator, so only pass a real selection; an invalid/empty
+        # default lets the select default to blank (allow_blank=True).
+        value_kwargs: dict[str, Any] = {"value": default} if default in choices else {}
+        return [
+            Label(label),
+            self.select_class(
+                [(c, c) for c in choices],
+                allow_blank=True,
+                id=f"add-{name}",
+                **value_kwargs,
+            ),
+        ]
 
     def _selected_repo(self) -> DiscoveredRepo:
         """Return the repository chosen in the selector (or the current repo).
@@ -1093,20 +2201,954 @@ class AddTaskScreen(ModalScreen["AddTaskResult | None"]):
             return self.current
         return self.repo_for_value(value)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Dismiss with the title and chosen repo (ignores empty titles)."""
-        title = event.value.strip()
+    @staticmethod
+    def parse_progress(raw: str) -> int | None:
+        """Parse the progress input into a 0-100 integer percentage.
+
+        ``progress`` is typed as ``int | None`` end to end (see
+        :class:`doxtr_doto.collectors.DotoTask`,
+        :class:`doxtr_doto.sync.json_store.TaskData`) and is interpreted as a
+        0-100 percent-complete value - the same range the ``:progress:``
+        directive option validates
+        (:meth:`doxtr_doto.directives.doto.DotoDirective._get_progress`) and the
+        HTML template renders as a percent bar
+        (:func:`doxtr_doto.template_loader`). An empty/whitespace input returns
+        None; a non-integer or out-of-range value raises :class:`ValueError`
+        with a user-friendly message so :meth:`_submit` keeps the modal open
+        rather than storing a value that would crash at render time (mirroring
+        :meth:`parse_due` / :meth:`parse_estimate`).
+
+        Args:
+            raw: The raw progress input string.
+
+        Returns:
+            The progress percentage (0-100), or None to leave it unset.
+
+        Raises:
+            ValueError: If the input is non-empty and not an integer in 0-100.
+        """
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            progress = int(value)
+        except ValueError as err:
+            raise ValueError(f"Invalid progress '{value}': must be a whole number 0-100.") from err
+        if not 0 <= progress <= 100:
+            raise ValueError(f"Progress must be between 0 and 100, got {progress}.")
+        return progress
+
+    def collect_result(self) -> AddTaskResult | None:
+        """Collect the modal's widget values into an :class:`AddTaskResult`.
+
+        Iterates :meth:`resolve_fields` (the exact fields this modal rendered)
+        and reads each field's widget value generically, dispatching on its
+        :attr:`FIELD_KINDS` kind: ``select`` reads the dropdown, ``textarea``
+        reads the body text, ``raci`` assembles the role inputs, and every
+        other (input-like) kind reads the text input, with the ``due`` /
+        ``estimate`` / ``progress`` values parsed via :meth:`parse_due` /
+        :meth:`parse_estimate` / :meth:`parse_progress` so an invalid value
+        raises :class:`ValueError` here rather than writing a corrupt task.
+        Absent fields keep their :class:`AddTaskResult` default of None.
+
+        The collected values are mapped onto the fixed :class:`AddTaskResult`
+        fields. A newly registered field that is not representable in
+        :class:`AddTaskResult` renders but is intentionally not persisted - see
+        the "Registering a new field" note in the class docstring for the exact
+        touch-points needed to carry a new field through the create pipeline.
+
+        The title is required: an empty title returns None (cancel). Tags /
+        depends_on are kept as their raw comma-separated strings
+        (``_build_task_data`` splits them, matching ``doto add``).
+
+        Returns:
+            The assembled result, or None when the title is empty.
+
+        Raises:
+            ValueError: If a due-date, estimate or progress input is non-empty
+                and invalid (surfaced to the user; the modal stays open).
+        """
+        from doxtr_doto.cli.tui import add_fields
+
+        names = self.resolve_fields()
+        collected: dict[str, Any] = {}
+        for name in names:
+            if name == add_fields.REPO_FIELD:
+                # ``repo`` is the selector pseudo-field, not a value field: it
+                # is collected separately via ``_selected_repo()`` below. Skip
+                # it here so it is not read as a (nonexistent) text input.
+                continue
+            kind = self.FIELD_KINDS.get(name, self._DEFAULT_KIND)
+            if kind == "raci":
+                collected["raci"] = self._collect_raci_string()
+            elif kind == "select":
+                collected[name] = self._field_select(name)
+            elif kind == "textarea":
+                collected[name] = self._field_body(name) or None
+            elif name == "due":
+                collected["due"] = self.parse_due(self._field_text(name))
+            elif name == "estimate":
+                collected["estimate"] = self.parse_estimate(self._field_text(name))
+            elif name == "progress":
+                collected["progress"] = self.parse_progress(self._field_text(name))
+            else:
+                collected[name] = self._field_text(name).strip() or None
+
+        title = (collected.get("title") or "").strip()
         if not title:
-            self.dismiss(None)
+            return None
+
+        # Map the generically-collected values onto the fixed result fields.
+        # Unknown/unrepresentable field names are dropped here (they render but
+        # are not persisted; see the class docstring's new-field caveat).
+        known = set(AddTaskResult._fields)
+        kwargs = {k: v for k, v in collected.items() if k in known and k not in ("title",)}
+        return AddTaskResult(
+            title=title,
+            repo=self._selected_repo(),
+            **kwargs,
+        )
+
+    def _field_text(self, name: str) -> str:
+        """Return the text value of a single-line input field, or "" if absent."""
+        try:
+            return self.query_one(f"#add-{name}", Input).value
+        except NoMatches:
+            # The minimal layout uses the historical ``#add-input`` id for title.
+            if name == "title":
+                try:
+                    return self.query_one("#add-input", Input).value
+                except NoMatches:
+                    return ""
+            return ""
+
+    def _field_body(self, name: str) -> str:
+        """Return the text of a body text-area field, or "" if absent."""
+        try:
+            return self.query_one(f"#add-{name}", TextArea).text
+        except NoMatches:
+            return ""
+
+    def _field_select(self, name: str) -> str | None:
+        """Return a select field's value, or None when absent/blank."""
+        try:
+            select = self.query_one(f"#add-{name}", Select)
+        except NoMatches:
+            return None
+        value = select.value
+        if value is Select.BLANK or not isinstance(value, str):
+            return None
+        return value
+
+    def _collect_raci_string(self) -> str | None:
+        """Assemble the RACI role inputs into a ``"role names, ..."`` string.
+
+        Each role's comma-separated input is parsed via
+        :func:`doxtr_doto.raci.split_names` and rendered back as
+        ``"<role> name1, name2"`` segments joined with ``", "`` so
+        ``_build_task_data``'s :func:`doxtr_doto.raci.parse_raci` reparses it.
+        Returns None when the RACI field is absent or every role is empty (so
+        ``_build_task_data`` applies its current-user default).
+
+        Returns:
+            The RACI directive string, or None.
+        """
+        from doxtr_doto.raci import split_names
+
+        segments: list[str] = []
+        for role, _label, widget_id in self.RACI_FIELDS:
+            try:
+                raw = self.query_one(f"#{widget_id}", Input).value
+            except NoMatches:
+                return None
+            names = split_names(raw)
+            if names:
+                segments.append(f"{role} {', '.join(names)}")
+        return ", ".join(segments) if segments else None
+
+    def _submit(self) -> None:
+        """Collect the result and dismiss (or stay open on an invalid value).
+
+        Mirrors :meth:`EditTaskScreen._submit`: a :class:`ValueError` from
+        :meth:`collect_result` (bad due/estimate) surfaces a notification and
+        keeps the modal open rather than writing a corrupt task. An empty title
+        dismisses with None (cancel).
+        """
+        try:
+            result = self.collect_result()
+        except ValueError as exc:
+            self.notify(str(exc), title="Invalid field value", severity="error")
             return
-        self.dismiss(AddTaskResult(title=title, repo=self._selected_repo()))
+        self.dismiss(result)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Submit when the Save button is pressed (multi-field layout)."""
+        if event.button.id == "add-save":
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Submit on Enter in a single-line input.
+
+        In the minimal (title-only) layout this preserves the original
+        behavior: an empty title dismisses with None, otherwise the task is
+        created. In a multi-field layout Enter in any input also submits (the
+        body text area does not fire this event, so Enter there inserts a
+        newline), mirroring :meth:`EditTaskScreen.on_input_submitted`.
+        """
+        self._submit()
 
     def action_cancel(self) -> None:
         """Dismiss the modal without creating a task."""
         self.dismiss(None)
 
 
-class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
+class AddSeriesResult(NamedTuple):
+    """The outcome of the add-series modal.
+
+    Dismissed by :class:`AddSeriesScreen` when the user submits a valid form;
+    an invalid form keeps the modal open (errors surfaced via a notification)
+    and ``Escape`` cancels and dismisses ``None`` instead, so a non-``None``
+    result always carries a usable, already-validated series spec.
+
+    The validated fields come from
+    :func:`doxtr_doto.cli.tui.add_series_fields.validate_series_form`; they are
+    forwarded by :meth:`DotoApp.action_add_series` to
+    :func:`doxtr_doto.cli.tui.actions.add_series` (the SAME reusable series
+    builder the CLI ``doto add --repeat`` path uses).
+
+    Attributes:
+        title: The series title template (stripped, never empty).
+        pattern_str: The full pattern string (base pattern + any ``at`` /
+            ``for`` suffix), ready for
+            :func:`doxtr_doto.cli.recurrence.parse_recurrence`.
+        from_date: The resolved series start date.
+        until_date: The resolved series end date.
+        repo: The repository the series should be created in (the current repo
+            by default, or whichever the user picked in the selector).
+    """
+
+    title: str
+    pattern_str: str
+    from_date: date
+    until_date: date
+    repo: DiscoveredRepo
+
+
+class AddSeriesScreen(ModalScreen["AddSeriesResult | None"]):
+    """Modal prompting for a new recurring *series* and its target repository.
+
+    Dismisses with an :class:`AddSeriesResult` carrying the validated series
+    spec and the chosen repository, or ``None`` if cancelled (``Escape``). The
+    actual series creation is performed by the app via
+    :func:`doxtr_doto.cli.tui.actions.add_series` -- the SAME reusable builder
+    the CLI ``doto add --repeat`` path uses -- so the TUI never duplicates the
+    occurrence/series-building code.
+
+    **Fields.** The dialog collects a free-text recurrence *pattern* (e.g.
+    ``every 2 weeks on monday``) plus dedicated *start time* (``at``) and
+    *duration* (``for``) inputs, a *from* date (optional, defaults to today), a
+    required *until* date, and a repository selector (when >1 repo, like
+    :class:`AddTaskScreen`). The title supports ``{date}`` templating like the
+    CLI. All data/validation logic lives in the terminal-free
+    :mod:`doxtr_doto.cli.tui.add_series_fields` helper
+    (:func:`~doxtr_doto.cli.tui.add_series_fields.validate_series_form`), so it
+    is unit-tested without a live terminal; the screen is a thin view over it.
+
+    **Overridability (child themes).** The whole screen is swappable via
+    :attr:`DotoApp.add_series_screen_class` (mirroring
+    :attr:`DotoApp.add_task_screen_class`). The single-line input class
+    (:attr:`input_class`) and the repo selector class (:attr:`select_class`)
+    are overridable so a theme can restyle the fields without reimplementing
+    :meth:`compose`. The ``(label, value)`` repo option list is built by the
+    pure, render-independent :func:`build_repo_options` helper (shared with
+    :class:`AddTaskScreen`).
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    #: Overridable single-line input class for the text fields. Defaults to
+    #: :class:`KillRingInput` (bash-style kill/yank), mirroring
+    #: :class:`AddTaskScreen`.
+    input_class: type[Input] = KillRingInput
+
+    #: Overridable select widget class for the repo picker. Defaults to
+    #: :class:`FilterableSelect` (type-to-filter), mirroring
+    #: :class:`AddTaskScreen`.
+    select_class: type[Select[str]] = FilterableSelect
+
+    def __init__(
+        self,
+        repos: list[DiscoveredRepo],
+        current: DiscoveredRepo,
+        *,
+        width_percent: int = 75,
+    ) -> None:
+        """Initialize the add-series modal.
+
+        Args:
+            repos: The cached repositories (from
+                :func:`doxtr_doto.cli.tui.data.list_repos`) offered in the repo
+                selector.
+            current: The current working directory's repository (from
+                :func:`doxtr_doto.cli.tui.data.current_repo`), used as the
+                selector's default.
+            width_percent: The modal's width as a percentage of the terminal
+                width (applied in :meth:`on_mount`). Defaults to ``75`` so the
+                screen can be constructed directly in tests.
+        """
+        super().__init__()
+        self.repos = repos
+        self.current = current
+        self.width_percent = width_percent
+
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS)."""
+        _apply_modal_width(
+            self.query_one("#add-series-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-apply the configurable width when the terminal is resized."""
+        _apply_modal_width(
+            self.query_one("#add-series-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def repo_options(self) -> list[tuple[str, str]]:
+        """Return the ``(label, value)`` options for the repo selector.
+
+        Delegates to the pure :func:`build_repo_options` helper so the current
+        repo is listed first (and defaulted), mirroring
+        :meth:`AddTaskScreen.repo_options`.
+        """
+        return build_repo_options(self.repos, self.current)
+
+    def repo_for_value(self, value: str) -> DiscoveredRepo:
+        """Resolve a selected option value (a repo path) to its repository.
+
+        Falls back to the current repo when the value does not match a known
+        repository (e.g. the selector is blank), so the result is always
+        usable. Mirrors :meth:`AddTaskScreen.repo_for_value`.
+        """
+        if value == self.current.path:
+            return self.current
+        for repo in self.repos:
+            if repo.path == value:
+                return repo
+        return self.current
+
+    def compose(self) -> ComposeResult:
+        """Build the modal's widgets (fields in a scroll + a docked Save).
+
+        Mirrors :meth:`EditTaskScreen.compose`: the fields live in a scrolling
+        region (``#add-series-body``) and the ``Save`` button is docked at the
+        bottom (``#add-series-bottom``). The repo selector renders only when
+        more than one repo is available (same rule as
+        :class:`AddTaskScreen`).
+        """
+        options = self.repo_options()
+        with Vertical(id="add-series-modal"):
+            with VerticalScroll(id="add-series-body"):
+                yield Label("New recurring series", id="add-series-heading")
+                yield Label("Title (supports {date})")
+                yield self.input_class(placeholder="Series title", id="add-series-title")
+                yield Label("Repeat pattern (e.g. every 2 weeks on monday)")
+                yield self.input_class(placeholder="every friday", id="add-series-pattern")
+                yield Label("Start time (optional, e.g. 16:00)")
+                yield self.input_class(placeholder="16:00", id="add-series-time")
+                yield Label("Duration (optional, e.g. 2h, 90m, 1h30m)")
+                yield self.input_class(placeholder="2h", id="add-series-duration")
+                yield Label("From date (optional, default today)")
+                yield self.input_class(placeholder="today", id="add-series-from")
+                yield Label("Until date (required, e.g. 2027-10-10 or +6m)")
+                yield self.input_class(placeholder="+6m", id="add-series-until")
+                if len(options) > 1:
+                    yield Label("Repository:", id="add-series-repo-label")
+                    yield self.select_class(
+                        options,
+                        value=self.current.path,
+                        allow_blank=False,
+                        id="add-series-repo",
+                    )
+            with Horizontal(id="add-series-bottom"):
+                yield Button("Save", id="add-series-save", variant="primary")
+
+    def _field_text(self, widget_id: str) -> str:
+        """Return a single-line input's value, or "" when the field is absent."""
+        try:
+            return self.query_one(f"#{widget_id}", Input).value
+        except NoMatches:
+            return ""
+
+    def form_values(self) -> SeriesFormValues:
+        """Read the raw field values into a terminal-free form-values tuple.
+
+        The returned :class:`~doxtr_doto.cli.tui.add_series_fields.SeriesFormValues`
+        is validated by
+        :func:`doxtr_doto.cli.tui.add_series_fields.validate_series_form` (which
+        has no terminal dependency), keeping the screen a thin view over the
+        pure helper.
+        """
+        from doxtr_doto.cli.tui.add_series_fields import SeriesFormValues
+
+        return SeriesFormValues(
+            title=self._field_text("add-series-title"),
+            pattern=self._field_text("add-series-pattern"),
+            start_time=self._field_text("add-series-time"),
+            duration=self._field_text("add-series-duration"),
+            from_date=self._field_text("add-series-from"),
+            until_date=self._field_text("add-series-until"),
+        )
+
+    def _selected_repo(self) -> DiscoveredRepo:
+        """Return the repository chosen in the selector (or the current repo).
+
+        When the selector is absent (single-repo setups) or blank, the current
+        repo is used so a series is always created somewhere sensible.
+        """
+        try:
+            select = self.query_one("#add-series-repo", Select)
+        except NoMatches:
+            return self.current
+        value = select.value
+        if value is Select.BLANK or not isinstance(value, str):
+            return self.current
+        return self.repo_for_value(value)
+
+    def collect_result(self) -> AddSeriesResult | None:
+        """Validate the form and build an :class:`AddSeriesResult`.
+
+        Delegates validation to the pure
+        :func:`doxtr_doto.cli.tui.add_series_fields.validate_series_form`. On
+        success returns the assembled result (with the chosen repo); on failure
+        raises :class:`ValueError` whose message lists every field error, so
+        :meth:`_submit` surfaces them and keeps the modal open.
+
+        Returns:
+            The validated :class:`AddSeriesResult`.
+
+        Raises:
+            ValueError: If the form has one or more validation errors.
+        """
+        from doxtr_doto.cli.tui.add_series_fields import validate_series_form
+
+        result, errors = validate_series_form(self.form_values())
+        if errors:
+            raise ValueError("\n".join(errors))
+        assert result is not None
+        return AddSeriesResult(
+            title=result.title,
+            pattern_str=result.pattern_str,
+            from_date=result.from_date,
+            until_date=result.until_date,
+            repo=self._selected_repo(),
+        )
+
+    def _submit(self) -> None:
+        """Collect the result and dismiss (or stay open on an invalid form).
+
+        Mirrors :meth:`AddTaskScreen._submit`: a :class:`ValueError` from
+        :meth:`collect_result` surfaces a notification listing the field
+        errors and keeps the modal open rather than creating a bad series.
+        """
+        try:
+            result = self.collect_result()
+        except ValueError as exc:
+            self.notify(str(exc), title="Invalid series", severity="error")
+            return
+        self.dismiss(result)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Submit when the Save button is pressed."""
+        if event.button.id == "add-series-save":
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Submit on Enter in any single-line input."""
+        self._submit()
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal without creating a series."""
+        self.dismiss(None)
+
+
+class EditSeriesResult(NamedTuple):
+    """The outcome of the edit-series modal.
+
+    Dismissed by :class:`EditSeriesScreen` when the user submits a valid form;
+    an invalid form keeps the modal open (errors surfaced via a notification)
+    and ``Escape`` cancels and dismisses ``None`` instead.
+
+    The validated fields come from
+    :func:`doxtr_doto.cli.tui.edit_series_fields.validate_edit_series_form`;
+    they are forwarded by :meth:`DotoApp.action_edit_series` to
+    :func:`doxtr_doto.cli.tui.actions.update_series` (the SAME reusable
+    series-update function the CLI ``doto series update`` path uses).
+
+    Attributes:
+        series_id: The id of the series being edited.
+        pattern_str: The composed pattern string (base pattern + any ``at`` /
+            ``for`` suffix), ready for
+            :func:`doxtr_doto.cli.recurrence.parse_recurrence`, or ``None`` when
+            the pattern field was left blank (keep the stored calendar shape).
+        title: The new title template, or ``None`` when the title field was
+            left blank (keep the stored title).
+        start_time: The parsed start time, or ``None`` when the start-time
+            field was blank (CLEAR the per-occurrence start time).
+        duration_minutes: The parsed duration in whole minutes, or ``None``
+            when the duration field was blank (CLEAR the per-occurrence
+            duration).
+    """
+
+    series_id: str
+    pattern_str: str | None
+    title: str | None
+    start_time: time | None
+    duration_minutes: int | None
+
+
+class EditSeriesScreen(ModalScreen["EditSeriesResult | None"]):
+    """Modal for editing an existing *series* from a selected occurrence forward.
+
+    Dismisses with an :class:`EditSeriesResult` carrying the validated edit, or
+    ``None`` if cancelled (``Escape``). The actual series update (the
+    forward-only re-stamp) is performed by the app via
+    :func:`doxtr_doto.cli.tui.actions.update_series` -- the SAME reusable
+    function the CLI ``doto series update`` path uses -- so the TUI never
+    duplicates the update logic.
+
+    **Fields.** The dialog pre-populates the title, base pattern (no ``at`` /
+    ``for`` suffix, via :func:`doxtr_doto.cli.recurrence.pattern_base_str`),
+    start time (``HH:MM``) and duration (via
+    :func:`doxtr_doto.date_utils.format_duration_minutes`) from the stored
+    series. Unlike :class:`AddSeriesScreen` it has NO from/until/apply-to
+    fields: the forward-only anchor comes from the selected row (captured by
+    the app), shown here as a read-only context line. Blank start-time /
+    duration CLEAR those fields; blank pattern / title KEEP them unchanged (see
+    :mod:`doxtr_doto.cli.tui.edit_series_fields`).
+
+    **Overridability (child themes).** The whole screen is swappable via
+    :attr:`DotoApp.edit_series_screen_class` (mirroring
+    :attr:`DotoApp.add_series_screen_class`). The single-line input class
+    (:attr:`input_class`) is overridable so a theme can restyle the fields
+    without reimplementing :meth:`compose`.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    #: Overridable single-line input class for the text fields. Defaults to
+    #: :class:`KillRingInput`, mirroring :class:`AddSeriesScreen`.
+    input_class: type[Input] = KillRingInput
+
+    def __init__(
+        self,
+        series_id: str,
+        series_data: dict[str, Any],
+        anchor_date: date,
+        forward_count: int,
+        earlier_count: int,
+        *,
+        width_percent: int = 75,
+    ) -> None:
+        """Initialize the edit-series modal.
+
+        Args:
+            series_id: The id of the series being edited.
+            series_data: The stored series dict (used to pre-populate fields
+                and the context line).
+            anchor_date: The forward-only anchor (the selected occurrence's
+                due date) -- occurrences on/after it are affected.
+            forward_count: The number of occurrences on/after the anchor.
+            earlier_count: The number of occurrences before the anchor (left
+                unchanged).
+            width_percent: The modal's width as a percentage of the terminal
+                width (applied in :meth:`on_mount`). Defaults to ``75`` so the
+                screen can be constructed directly in tests.
+        """
+        super().__init__()
+        self.series_id = series_id
+        self.series_data = series_data
+        self.anchor_date = anchor_date
+        self.forward_count = forward_count
+        self.earlier_count = earlier_count
+        self.width_percent = width_percent
+
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS)."""
+        _apply_modal_width(
+            self.query_one("#edit-series-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-apply the configurable width when the terminal is resized."""
+        _apply_modal_width(
+            self.query_one("#edit-series-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def initial_fields(self) -> dict[str, str]:
+        """Return the pre-populated string values for the editable fields.
+
+        The base pattern uses :func:`doxtr_doto.cli.recurrence.pattern_base_str`
+        (so it round-trips through :func:`parse_recurrence`), the start time is
+        ``HH:MM`` (empty when the series has none) and the duration is rendered
+        via :func:`doxtr_doto.date_utils.format_duration_minutes` (empty when
+        the series has none).
+
+        Returns:
+            A mapping of field id suffix to its pre-populated string value.
+        """
+        from doxtr_doto.cli.recurrence import RecurrencePattern, format_time, pattern_base_str
+        from doxtr_doto.date_utils import format_duration_minutes
+
+        pattern = RecurrencePattern.from_dict(self.series_data["pattern"])
+        start_time = format_time(pattern.start_time) or ""
+        duration = (
+            format_duration_minutes(pattern.duration_minutes)
+            if pattern.duration_minutes is not None
+            else ""
+        )
+        return {
+            "title": str(self.series_data.get("title_template") or ""),
+            "pattern": pattern_base_str(pattern),
+            "time": start_time,
+            "duration": duration,
+        }
+
+    def context_line(self) -> str:
+        """Return the read-only context line shown above the fields.
+
+        Names the series id, its current pattern description and the
+        forward-only anchor with the affected / unchanged occurrence counts, so
+        the user knows exactly what the edit will re-stamp.
+        """
+        from doxtr_doto.cli.recurrence import RecurrencePattern
+
+        pattern = RecurrencePattern.from_dict(self.series_data["pattern"])
+        return (
+            f"{self.series_id}  ({pattern.describe()})\n"
+            f"Applies to {self.anchor_date.isoformat()} and later "
+            f"({self.forward_count} occurrences); "
+            f"{self.earlier_count} earlier occurrences unchanged."
+        )
+
+    def compose(self) -> ComposeResult:
+        """Build the modal's widgets (fields in a scroll + a docked Save).
+
+        Mirrors :meth:`AddSeriesScreen.compose`: the fields live in a scrolling
+        region (``#edit-series-body``) and the ``Save`` button is docked at the
+        bottom (``#edit-series-bottom``). A read-only context line
+        (``#edit-series-context``) shows the anchor + occurrence counts.
+        """
+        fields = self.initial_fields()
+        with Vertical(id="edit-series-modal"):
+            with VerticalScroll(id="edit-series-body"):
+                yield Label(
+                    "Edit series (from selected occurrence forward)", id="edit-series-heading"
+                )
+                yield Label(self.context_line(), id="edit-series-context")
+                yield Label("Title (supports {date}; blank keeps current)")
+                yield self.input_class(value=fields["title"], id="edit-series-title")
+                yield Label("Repeat pattern (blank keeps current shape)")
+                yield self.input_class(value=fields["pattern"], id="edit-series-pattern")
+                yield Label("Start time (blank clears, e.g. 16:00)")
+                yield self.input_class(value=fields["time"], id="edit-series-time")
+                yield Label("Duration (blank clears, e.g. 2h, 90m)")
+                yield self.input_class(value=fields["duration"], id="edit-series-duration")
+            with Horizontal(id="edit-series-bottom"):
+                yield Button("Save", id="edit-series-save", variant="primary")
+
+    def _field_text(self, widget_id: str) -> str:
+        """Return a single-line input's value, or "" when the field is absent."""
+        try:
+            return self.query_one(f"#{widget_id}", Input).value
+        except NoMatches:
+            return ""
+
+    def form_values(self) -> EditSeriesFormValues:
+        """Read the raw field values into a terminal-free form-values tuple.
+
+        The returned
+        :class:`~doxtr_doto.cli.tui.edit_series_fields.EditSeriesFormValues` is
+        validated by
+        :func:`doxtr_doto.cli.tui.edit_series_fields.validate_edit_series_form`
+        (which has no terminal dependency), keeping the screen a thin view.
+        """
+        from doxtr_doto.cli.tui.edit_series_fields import EditSeriesFormValues
+
+        return EditSeriesFormValues(
+            title=self._field_text("edit-series-title"),
+            pattern=self._field_text("edit-series-pattern"),
+            start_time=self._field_text("edit-series-time"),
+            duration=self._field_text("edit-series-duration"),
+        )
+
+    def collect_result(self) -> EditSeriesResult:
+        """Validate the form and build an :class:`EditSeriesResult`.
+
+        Delegates validation to the pure
+        :func:`doxtr_doto.cli.tui.edit_series_fields.validate_edit_series_form`.
+        On success returns the assembled result; on failure raises
+        :class:`ValueError` whose message lists every field error, so
+        :meth:`_submit` surfaces them and keeps the modal open.
+
+        Returns:
+            The validated :class:`EditSeriesResult`.
+
+        Raises:
+            ValueError: If the form has one or more validation errors.
+        """
+        from doxtr_doto.cli.tui.edit_series_fields import validate_edit_series_form
+
+        result, errors = validate_edit_series_form(self.form_values())
+        if errors:
+            raise ValueError("\n".join(errors))
+        assert result is not None
+        return EditSeriesResult(
+            series_id=self.series_id,
+            pattern_str=result.pattern_str,
+            title=result.title,
+            start_time=result.start_time,
+            duration_minutes=result.duration_minutes,
+        )
+
+    def _submit(self) -> None:
+        """Collect the result and dismiss (or stay open on an invalid form).
+
+        Mirrors :meth:`AddSeriesScreen._submit`: a :class:`ValueError` from
+        :meth:`collect_result` surfaces a notification listing the field errors
+        and keeps the modal open rather than applying a bad edit.
+        """
+        try:
+            result = self.collect_result()
+        except ValueError as exc:
+            self.notify(str(exc), title="Invalid series edit", severity="error")
+            return
+        self.dismiss(result)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Submit when the Save button is pressed."""
+        if event.button.id == "edit-series-save":
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Submit on Enter in any single-line input."""
+        self._submit()
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal without editing the series."""
+        self.dismiss(None)
+
+
+class ConfirmResult(str, Enum):
+    """The outcome of a :class:`ConfirmScreen`.
+
+    A string enum so a plain yes/no confirm can compare against
+    :attr:`CONFIRM` and a three-way series-delete confirm can distinguish
+    :attr:`CONFIRM` (delete series + tasks), :attr:`KEEP_TASKS` (remove the
+    series but keep its tasks) and :attr:`CANCEL`.
+    """
+
+    CONFIRM = "confirm"
+    KEEP_TASKS = "keep_tasks"
+    CANCEL = "cancel"
+
+
+class ConfirmScreen(ModalScreen["ConfirmResult"]):
+    """A generic yes/no (or three-way) confirmation modal.
+
+    Dismisses with a :class:`ConfirmResult`. ``Escape`` cancels
+    (:attr:`ConfirmResult.CANCEL`). For a plain confirm only a ``Confirm`` /
+    ``Cancel`` pair is shown and the result is :attr:`~ConfirmResult.CONFIRM`
+    or :attr:`~ConfirmResult.CANCEL`. When ``keep_tasks_label`` is given a
+    third button offers :attr:`~ConfirmResult.KEEP_TASKS` (parity with the CLI
+    ``series delete --keep-tasks``), so the series-delete flow can offer
+    "Delete series + tasks" / "Keep tasks, remove series" / Cancel.
+
+    Overridable via :attr:`DotoApp.confirm_screen_class` (mirroring the other
+    modal seams).
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        confirm_label: str = "Confirm",
+        keep_tasks_label: str | None = None,
+        cancel_label: str = "Cancel",
+        width_percent: int = 75,
+    ) -> None:
+        """Initialize the confirmation modal.
+
+        Args:
+            message: The prompt message shown to the user.
+            confirm_label: The label for the primary confirm button.
+            keep_tasks_label: When given, adds a third "keep tasks" button
+                (series-delete flow); when None the modal is a plain yes/no.
+            cancel_label: The label for the cancel button.
+            width_percent: The modal's width as a percentage of the terminal
+                width. Defaults to ``75`` so the screen can be constructed
+                directly in tests.
+        """
+        super().__init__()
+        self.message = message
+        self.confirm_label = confirm_label
+        self.keep_tasks_label = keep_tasks_label
+        self.cancel_label = cancel_label
+        self.width_percent = width_percent
+
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS)."""
+        _apply_modal_width(
+            self.query_one("#confirm-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def compose(self) -> ComposeResult:
+        """Build the prompt label and the confirm/(keep)/cancel buttons."""
+        with Vertical(id="confirm-modal"):
+            yield Label(self.message, id="confirm-message")
+            with Horizontal(id="confirm-bottom"):
+                yield Button(self.confirm_label, id="confirm-yes", variant="error")
+                if self.keep_tasks_label is not None:
+                    yield Button(self.keep_tasks_label, id="confirm-keep", variant="primary")
+                yield Button(self.cancel_label, id="confirm-no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dismiss with the result matching the pressed button."""
+        if event.button.id == "confirm-yes":
+            self.dismiss(ConfirmResult.CONFIRM)
+        elif event.button.id == "confirm-keep":
+            self.dismiss(ConfirmResult.KEEP_TASKS)
+        else:
+            self.dismiss(ConfirmResult.CANCEL)
+
+    def action_cancel(self) -> None:
+        """Dismiss the modal as cancelled."""
+        self.dismiss(ConfirmResult.CANCEL)
+
+
+class ConflictResolveScreen(ModalScreen["str | None"]):
+    """Modal to resolve a task's calendar-sync conflict (keep local/remote/both).
+
+    Shows each field that diverged on both sides with a short preview of the
+    local and remote values, then offers three one-press choices:
+
+    * **Local** -- keep the local value, discard the remote edit.
+    * **Remote** -- take the calendar value, discard the local edit.
+    * **Both** -- keep both (the diff3-merged body with markers / joined
+      scalar), so nothing is lost and the user trims it in the editor.
+
+    Dismisses with the chosen :class:`doxtr_doto.calsync.resolve.ResolutionChoice`
+    *value* (``"local"`` / ``"remote"`` / ``"both"``), or ``None`` on cancel so
+    the caller leaves the conflict untouched. The modal only renders the choice;
+    applying it (and clearing the flag) is the caller's job via the shared
+    :func:`doxtr_doto.calsync.resolve.resolve_conflict` helper, so the TUI and
+    the ``doto calsync resolve`` CLI can never diverge.
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("l", "local", "Keep local"),
+        ("r", "remote", "Keep remote"),
+        ("b", "both", "Keep both"),
+    ]
+
+    def __init__(
+        self,
+        task_id: str,
+        conflicts: list[dict[str, str]],
+        *,
+        width_percent: int = 75,
+    ) -> None:
+        """Initialize the resolver from a task's conflict records.
+
+        Args:
+            task_id: The conflicted task id (for the title).
+            conflicts: The per-field records (``field``/``local``/``remote``/
+                ``both``) from ``task["_sync"]["conflict"]["fields"]``.
+            width_percent: Modal width as a percent of terminal width.
+        """
+        super().__init__()
+        self.task_id = task_id
+        self.conflicts = conflicts
+        self.width_percent = width_percent
+
+    @staticmethod
+    def _preview(value: str, width: int = 60) -> str:
+        """One-line, width-capped preview of a (possibly multi-line) value."""
+        one_line = " ".join(str(value).split())
+        if len(one_line) > width:
+            return one_line[: width - 1] + "\u2026"
+        return one_line or "(empty)"
+
+    def compose(self) -> ComposeResult:
+        """Build the per-field preview and the local/remote/both/cancel buttons."""
+        with Vertical(id="conflict-modal"):
+            yield Label(f"Resolve sync conflict - {self.task_id}", id="conflict-title")
+            with VerticalScroll(id="conflict-fields"):
+                for rec in self.conflicts:
+                    field = str(rec.get("field", ""))
+                    local_prev, remote_prev = resolve.conflict_preview(rec)
+                    yield Label(f"[{field}]", classes="conflict-field-name")
+                    yield Static(
+                        f"  local : {escape_markup(self._preview(local_prev))}",
+                        classes="conflict-local",
+                    )
+                    yield Static(
+                        f"  remote: {escape_markup(self._preview(remote_prev))}",
+                        classes="conflict-remote",
+                    )
+            with Horizontal(id="conflict-bottom"):
+                yield Button("Keep Local (l)", id="conflict-local", variant="primary")
+                yield Button("Keep Remote (r)", id="conflict-remote", variant="primary")
+                yield Button("Keep Both (b)", id="conflict-both")
+                yield Button("Cancel", id="conflict-cancel")
+
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS)."""
+        _apply_modal_width(
+            self.query_one("#conflict-modal", Vertical),
+            self.app.size.width,
+            self.width_percent,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dismiss with the choice matching the pressed button."""
+        mapping = {
+            "conflict-local": "local",
+            "conflict-remote": "remote",
+            "conflict-both": "both",
+        }
+        self.dismiss(mapping.get(event.button.id or ""))
+
+    def action_local(self) -> None:
+        """Keep the local value (``l``)."""
+        self.dismiss("local")
+
+    def action_remote(self) -> None:
+        """Keep the remote value (``r``)."""
+        self.dismiss("remote")
+
+    def action_both(self) -> None:
+        """Keep both values (``b``)."""
+        self.dismiss("both")
+
+    def action_cancel(self) -> None:
+        """Dismiss without resolving."""
+        self.dismiss(None)
+
+
+class EditTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["dict[str, Any] | None"]):
     """Modal for editing the selected task's fields.
 
     Pre-populates inputs from the current task and, on submit, dismisses with
@@ -1137,25 +3179,14 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
     submit happens via the ``Save`` button.
 
     The select widget is overridable via :attr:`select_class` so a child theme
-    can replace the type-to-filter behavior.
+    can replace the type-to-filter behavior. The widget classes
+    (:attr:`select_class` / :attr:`input_class` / :attr:`text_area_class`), the
+    suggester seams and the :meth:`parse_due` / :meth:`parse_estimate` parsers
+    come from :class:`_TaskFieldWidgetsMixin` (shared with
+    :class:`AddTaskScreen`).
     """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
-
-    #: Overridable select widget class (the type-to-filter priority/status
-    #: control). A child theme can swap in a custom :class:`Select` subclass.
-    select_class: type[Select[str]] = FilterableSelect
-
-    #: Overridable single-line input class for the Title/Assignee/Tags fields.
-    #: Defaults to :class:`KillRingInput` (bash-style kill/yank). A child theme
-    #: can swap in a custom :class:`~textual.widgets.Input` subclass without
-    #: reimplementing :meth:`compose`, mirroring :attr:`select_class`.
-    input_class: type[Input] = KillRingInput
-
-    #: Overridable multi-line text-area class for the Body field. Defaults to
-    #: :class:`KillRingTextArea`. A child theme can swap in a custom
-    #: :class:`~textual.widgets.TextArea` subclass the same way.
-    text_area_class: type[TextArea] = KillRingTextArea
 
     def __init__(
         self,
@@ -1164,6 +3195,7 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
         priorities: list[str],
         known_assignees: list[str] | None = None,
         known_tags: list[str] | None = None,
+        width_percent: int = 75,
     ) -> None:
         """Initialize the edit modal.
 
@@ -1178,6 +3210,12 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
             known_tags: Candidate tag names offered as auto-complete
                 suggestions in the tags input (from :func:`known_tag_names`).
                 Defaults to an empty list.
+            width_percent: The modal's width as a percentage of the terminal
+                width (applied in :meth:`on_mount`), from the configurable
+                ``tui_modal_width_ratio`` (see
+                :func:`doxtr_doto.cli.tui.actions.modal_width_percent`).
+                Defaults to ``75`` (3/4) so the screen can be constructed
+                directly in tests.
         """
         super().__init__()
         self.edit_task = task
@@ -1185,38 +3223,26 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
         self.priorities = priorities
         self.known_assignees = known_assignees or []
         self.known_tags = known_tags or []
+        self.width_percent = width_percent
 
-    def assignee_suggester(self) -> Suggester | None:
-        """Return the auto-complete suggester for the assignee input (seam).
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS).
 
-        This is the overridable seam a child theme can replace to customize
-        assignee suggestions: return a :class:`textual.suggester.Suggester`
-        (or None to disable suggestions). The default prefix-matches the
-        :attr:`known_assignees` candidates case-insensitively.
-
-        Returns:
-            A suggester for the assignee field, or None when there are no
-            candidate names.
+        The width is computed from the live terminal width (see
+        :func:`_apply_modal_width`) rather than static CSS so the modal is
+        exactly :attr:`width_percent` percent of the *total* terminal width;
+        the height is left untouched. :meth:`on_resize` re-applies it so the
+        modal tracks a terminal resize while open.
         """
-        if not self.known_assignees:
-            return None
-        return SuggestFromList(self.known_assignees, case_sensitive=False)
+        _apply_modal_width(
+            self.query_one("#edit-modal", Vertical), self.app.size.width, self.width_percent
+        )
 
-    def tags_suggester(self) -> Suggester | None:
-        """Return the auto-complete suggester for the tags input (seam).
-
-        This is the overridable seam a child theme can replace to customize
-        tag suggestions. The default is a :class:`TagSuggester` that completes
-        only the final comma-separated segment against :attr:`known_tags`, so
-        already-entered tags are preserved.
-
-        Returns:
-            A suggester for the tags field, or None when there are no candidate
-            tags.
-        """
-        if not self.known_tags:
-            return None
-        return TagSuggester(self.known_tags)
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-apply the configurable width when the terminal is resized."""
+        _apply_modal_width(
+            self.query_one("#edit-modal", Vertical), self.app.size.width, self.width_percent
+        )
 
     @classmethod
     def build_fields(
@@ -1230,10 +3256,13 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
 
         Returns:
             A mapping of field name to its pre-populated string value for the
-            ``title``, ``assignee``, ``tags``, ``due`` and ``body`` inputs, plus
-            the four RACI role fields (``raci_responsible``, ``raci_accountable``,
-            ``raci_consulted``, ``raci_informed``) as comma-separated names.
+            ``title``, ``assignee``, ``tags``, ``due``, ``estimate`` and
+            ``body`` inputs, plus the four RACI role fields
+            (``raci_responsible``, ``raci_accountable``, ``raci_consulted``,
+            ``raci_informed``) as comma-separated names.
         """
+        from doxtr_doto.date_utils import format_duration_minutes
+
         tags = task.get("tags") or []
         raci = task.get("raci") or {}
         return {
@@ -1241,6 +3270,7 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
             "assignee": str(task.get("assignee") or ""),
             "tags": ", ".join(tags),
             "due": str(task.get("due") or ""),
+            "estimate": format_duration_minutes(task.get("estimate")),
             "body": str(task.get("body") or ""),
             "raci_responsible": ", ".join(raci.get("responsible", [])),
             "raci_accountable": ", ".join(raci.get("accountable", [])),
@@ -1290,6 +3320,8 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
                 )
                 yield Label("Due (YYYY-MM-DD or +7d, friday; empty clears)")
                 yield self.input_class(value=fields["due"], id="edit-due")
+                yield Label("Estimate (e.g. 5m, 90m, 4h, 1h30m; empty clears)")
+                yield self.input_class(value=fields["estimate"], id="edit-estimate")
                 yield from self.build_raci_inputs(fields)
                 yield Label("Body")
                 yield self.text_area_class(
@@ -1327,94 +3359,24 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
         for role, label in RACI_ROLE_LABELS.items()
     )
 
-    def build_raci_inputs(self, fields: dict[str, str]) -> list[Widget]:
-        """Build the four RACI role input widgets (overridable seam).
-
-        Each role (Responsible, Accountable, Consulted, Informed) gets a
-        labelled comma-separated :class:`Input` pre-populated from the task's
-        existing RACI data. The inputs reuse the assignee suggester (from
-        :meth:`raci_suggester`) because RACI names are people names.
-
-        A child theme can override this to reshape the RACI input region
-        without reimplementing :meth:`compose`.
-
-        Args:
-            fields: The pre-populated field values from :meth:`build_fields`.
-
-        Returns:
-            The ordered list of label/input widgets to yield into the modal.
-        """
-        widgets: list[Widget] = []
-        for role, label, widget_id in self.RACI_FIELDS:
-            widgets.append(Label(label))
-            widgets.append(
-                self.input_class(
-                    value=fields[f"raci_{role}"],
-                    id=widget_id,
-                    suggester=self.raci_suggester(),
-                )
-            )
-        return widgets
-
-    def raci_suggester(self) -> Suggester | None:
-        """Return the auto-complete suggester for the RACI inputs (seam).
-
-        RACI role fields are comma-separated person names, so the default
-        completes the final comma-separated segment against
-        :attr:`known_assignees` (mirroring the tags suggester behavior).
-
-        Returns:
-            A suggester for the RACI fields, or None when there are no
-            candidate names.
-        """
-        if not self.known_assignees:
-            return None
-        return TagSuggester(self.known_assignees)
-
-    @staticmethod
-    def parse_due(raw: str) -> str | None:
-        """Parse the due-date input the same way ``doto update`` does.
-
-        Reuses :func:`doxtr_doto.cli.commands.add.parse_relative_date` (the
-        exact parser the ``doto update --due`` verb uses) so absolute
-        (``YYYY-MM-DD``) and relative (``+7d``, ``friday``, ``next-monday``,
-        ...) forms behave identically in the TUI and CLI. An empty/whitespace
-        input means "clear the due date" and returns None.
-
-        Args:
-            raw: The raw due-date input string.
-
-        Returns:
-            The normalized ``YYYY-MM-DD`` string, or None to clear the due
-            date.
-
-        Raises:
-            ValueError: If the input is non-empty and cannot be parsed. The
-                message is suitable for surfacing to the user.
-        """
-        from doxtr_doto.cli.commands.add import parse_relative_date
-
-        value = raw.strip()
-        if not value:
-            return None
-        return parse_relative_date(value)
-
     def collect_updates(self) -> dict[str, Any]:
         """Collect the edited field values into an updates dict.
 
         Only fields that changed from the task's current value are included,
         mirroring the single-task behavior of ``doto update``. Tags are parsed
         from the comma-separated input into a sorted list. The due date is
-        parsed via :meth:`parse_due` (the same parser as ``doto update``), so
-        an invalid date raises :class:`ValueError` here rather than writing a
-        corrupt value to the store.
+        parsed via :meth:`parse_due` and the estimate via
+        :meth:`parse_estimate` (the same parsers as ``doto update``), so an
+        invalid due date or estimate raises :class:`ValueError` here rather
+        than writing a corrupt value to the store.
 
         Returns:
             The updates mapping to pass to
             :func:`doxtr_doto.cli.tui.actions.update_task`.
 
         Raises:
-            ValueError: If the due-date input is non-empty and invalid.
+            ValueError: If the due-date or estimate input is non-empty and
+                invalid.
         """
         updates: dict[str, Any] = {}
 
@@ -1442,6 +3404,10 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
         new_due = self.parse_due(self.query_one("#edit-due", Input).value)
         if new_due != (self.edit_task.get("due") or None):
             updates["due"] = new_due
+
+        new_estimate = self.parse_estimate(self.query_one("#edit-estimate", Input).value)
+        if new_estimate != (self.edit_task.get("estimate") or None):
+            updates["estimate"] = new_estimate
 
         body = self.query_one("#edit-body-input", TextArea).text
         if body != (self.edit_task.get("body") or ""):
@@ -1479,14 +3445,15 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
     def _submit(self) -> None:
         """Collect updates and dismiss with them (or None if nothing changed).
 
-        If the due-date input is invalid, :meth:`collect_updates` raises
-        :class:`ValueError`; the modal stays open and the error is surfaced via
-        a notification so an invalid date never corrupts the store.
+        If the due-date or estimate input is invalid, :meth:`collect_updates`
+        raises :class:`ValueError`; the modal stays open and the error is
+        surfaced via a notification so an invalid value never corrupts the
+        store.
         """
         try:
             updates = self.collect_updates()
         except ValueError as exc:
-            self.notify(str(exc), title="Invalid due date", severity="error")
+            self.notify(str(exc), title="Invalid field value", severity="error")
             return
         self.dismiss(updates or None)
 
@@ -1507,6 +3474,117 @@ class EditTaskScreen(ModalScreen["dict[str, Any] | None"]):
 
     def action_cancel(self) -> None:
         """Dismiss the modal without applying any edits."""
+        self.dismiss(None)
+
+
+class EditBodyScreen(_TaskFieldWidgetsMixin, ModalScreen["str | None"]):
+    """Focused modal for editing *only* a task's Markdown body (quick ``b``).
+
+    Unlike :class:`EditTaskScreen` - which edits every task field - this modal
+    is a single full-height :class:`~textual.widgets.TextArea` dedicated to the
+    task ``body`` (the free-text notes rendered as Markdown by
+    :class:`CardViewerScreen`). It is reached directly with the ``n`` quick key
+    (from the board or the card viewer) so capturing a quick note never goes
+    through the full multi-field edit dialog.
+
+    On submit it dismisses with the new body *string* (``""`` is a valid value
+    - it clears the body); on cancel it dismisses with ``None`` so the caller
+    leaves the body untouched. The body text area reuses the mixin's
+    overridable :attr:`text_area_class` (bash-style kill/yank), so the editing
+    affordances match :class:`EditTaskScreen`'s body field. ``Escape`` cancels
+    and ``Ctrl+S`` saves; ``Enter`` inside the text area inserts a newline
+    (so multi-line notes are natural) rather than submitting.
+
+    The modal needs none of the mixin's candidate lists (there is no
+    assignee/tags input here), so :attr:`known_assignees` / :attr:`known_tags`
+    are set empty and :attr:`RACI_FIELDS` is empty; they exist only to satisfy
+    the shared mixin contract.
+    """
+
+    #: The mixin requires these; the body editor has no assignee/tags/RACI
+    #: inputs, so they are empty.
+    RACI_FIELDS: tuple[tuple[str, str, str], ...] = ()
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+s", "save", "Save"),
+    ]
+
+    def __init__(self, task: dict[str, Any], width_percent: int = 75) -> None:
+        """Initialize the body editor for a task.
+
+        Args:
+            task: The task dict whose ``body`` is edited (used for the title
+                label and to pre-populate the text area).
+            width_percent: The modal's width as a percentage of the terminal
+                width (applied in :meth:`on_mount`), from the configurable
+                ``tui_modal_width_ratio`` (see
+                :func:`doxtr_doto.cli.tui.actions.modal_width_percent`).
+                Defaults to ``75`` (3/4) so the screen can be constructed
+                directly in tests.
+        """
+        super().__init__()
+        self.edit_task = task
+        self.width_percent = width_percent
+        self.known_assignees = []
+        self.known_tags = []
+
+    def compose(self) -> ComposeResult:
+        """Build the modal: a title label, the body text area, and Save.
+
+        The text area fills the modal (``#edit-body-area`` is ``height: 1fr``)
+        while the ``Save`` button is docked at the bottom (``#editbody-bottom``)
+        so it stays visible; ``Ctrl+S`` saves without reaching for the mouse.
+        """
+        task_id = self.edit_task.get("id", "")
+        body = str(self.edit_task.get("body") or "")
+        with Vertical(id="editbody-modal"):
+            yield Label(f"Edit body - {task_id}", id="editbody-title")
+            yield self.text_area_class(
+                text=body,
+                soft_wrap=True,
+                id="editbody-input",
+            )
+            with Horizontal(id="editbody-bottom"):
+                yield Button("Save", id="editbody-save", variant="primary")
+
+    def on_mount(self) -> None:
+        """Apply the configurable width and focus the body text area.
+
+        The modal width is computed from the live terminal width (see
+        :func:`_apply_modal_width`) so the modal is exactly
+        :attr:`width_percent` percent of the *total* terminal width; the
+        height stays as defined in CSS. :meth:`on_resize` re-applies it so the
+        modal tracks a terminal resize while open. The body text area is
+        focused so the user can type immediately.
+        """
+        _apply_modal_width(
+            self.query_one("#editbody-modal", Vertical), self.app.size.width, self.width_percent
+        )
+        self.query_one("#editbody-input", TextArea).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-apply the configurable width when the terminal is resized."""
+        _apply_modal_width(
+            self.query_one("#editbody-modal", Vertical), self.app.size.width, self.width_percent
+        )
+
+    def _submit(self) -> None:
+        """Dismiss with the edited body string (``""`` clears the body)."""
+        body = self.query_one("#editbody-input", TextArea).text
+        self.dismiss(body)
+
+    def action_save(self) -> None:
+        """Save the body via the ``Ctrl+S`` keybinding."""
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Save when the ``Save`` button is pressed."""
+        if event.button.id == "editbody-save":
+            self._submit()
+
+    def action_cancel(self) -> None:
+        """Dismiss without changing the body."""
         self.dismiss(None)
 
 
@@ -1612,10 +3690,21 @@ class CardViewerScreen(ModalScreen["str | None"]):
 
     BINDINGS = [
         ("escape,enter", "close", "Close"),
+        # Intentionally a DIRECT edit within this focused card-viewer modal
+        # (distinct from the main app's two-key ``e e`` Edit domain). This
+        # modal is self-contained and not routed through the prefix
+        # dispatcher, so a bare ``e`` editing the viewed card is correct here;
+        # do not "promote" it to a prefix.
         ("e", "edit", "Edit"),
+        ("n", "edit_body", "Edit note"),
     ]
 
-    def __init__(self, task: dict[str, Any], default_user: str = "") -> None:
+    def __init__(
+        self,
+        task: dict[str, Any],
+        default_user: str = "",
+        width_percent: int = 75,
+    ) -> None:
         """Initialize the viewer for a task.
 
         Args:
@@ -1628,10 +3717,37 @@ class CardViewerScreen(ModalScreen["str | None"]):
                 Defaults to ``""`` (no default user) so the screen can still
                 be constructed directly in tests; with no default user nothing
                 is suppressed.
+            width_percent: The modal's width as a percentage of the terminal
+                width (applied in :meth:`on_mount`), from the configurable
+                ``tui_modal_width_ratio`` (see
+                :func:`doxtr_doto.cli.tui.actions.modal_width_percent`). Shares
+                the same setting as the edit/note pop-ups so all three stay the
+                same width. Defaults to ``75`` (3/4) so the screen can be
+                constructed directly in tests.
         """
         super().__init__()
         self.view_task = task
         self.default_user = default_user
+        self.width_percent = width_percent
+
+    def on_mount(self) -> None:
+        """Apply the configurable modal width (height stays as defined in CSS).
+
+        The width is computed from the live terminal width (see
+        :func:`_apply_modal_width`) so the viewer is exactly
+        :attr:`width_percent` percent of the *total* terminal width - matching
+        the edit/note pop-ups; the height is left untouched. :meth:`on_resize`
+        re-applies it so the viewer tracks a terminal resize while open.
+        """
+        _apply_modal_width(
+            self.query_one("#viewer-modal", Vertical), self.app.size.width, self.width_percent
+        )
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-apply the configurable width when the terminal is resized."""
+        _apply_modal_width(
+            self.query_one("#viewer-modal", Vertical), self.app.size.width, self.width_percent
+        )
 
     @classmethod
     def build_detail_lines(cls, task: dict[str, Any]) -> list[str]:
@@ -1879,6 +3995,19 @@ class CardViewerScreen(ModalScreen["str | None"]):
         """
         self.dismiss("edit")
 
+    def action_edit_body(self) -> None:
+        """Close the viewer and open the focused body/note editor (``n``).
+
+        Dismisses with the ``"note"`` sentinel; the close-callback registered
+        by :meth:`DotoApp._open_card_viewer` interprets it and opens the
+        body-only editor via :meth:`DotoApp._open_edit_body` (which pushes
+        :attr:`DotoApp.edit_body_screen_class`) for the same task, so the
+        note-editing flow (and its
+        :func:`doxtr_doto.cli.tui.actions.update_task` write + board refresh)
+        is reused rather than reimplemented in the viewer.
+        """
+        self.dismiss("note")
+
 
 #: The flat (single-press) keys and their descriptions, the single source of
 #: truth the top-level :class:`HelpScreen` renders (the stream keys come from
@@ -1891,9 +4020,11 @@ FLAT_KEY_HELP: tuple[tuple[str, str], ...] = (
     ("Tab", "cycle panes (kanban: move card forward; calendar: regions)"),
     ("Shift+Tab", "cycle panes in reverse"),
     ("Enter", "open / reveal / activate the selected task"),
-    ("Space", "select / deselect task (multi-select)"),
+    ("Space", "expand/collapse sub-tasks (parent row) or select task (leaf)"),
     ("e", "edit the selected task"),
+    ("n", "edit the selected task's note/body (Markdown)"),
     ("a", "add a task"),
+    ("r", "add a recurring series (pattern + at/for + from/until dates)"),
     ("A", "calendar: assign the selected day as the no-due task's due date"),
     ("w", "start / stop working (status -> in-progress + focus timer)"),
     ("d", "mark done (flat alias of s d)"),
@@ -1919,6 +4050,18 @@ class HelpScreen(ModalScreen[None]):
 
     BINDINGS = [("escape,question_mark,q", "close", "Close")]
 
+    def __init__(self, keymap: dict[str, DomainSpec] | None = None) -> None:
+        """Store the stream registry to render (defaults to the global one).
+
+        Args:
+            keymap: The stream-domain registry to list. Defaults to the
+                module-level :data:`KEYMAP`; a child theme that overrides
+                :attr:`DotoApp.keymap` passes its own so the help never drifts
+                from the app's actual dispatcher.
+        """
+        super().__init__()
+        self._keymap = keymap if keymap is not None else KEYMAP
+
     def _body(self) -> str:
         """Return the top-level help markup (flat keys + stream domains)."""
         lines = ["[bold]doto TUI - keybindings[/bold]", ""]
@@ -1927,7 +4070,7 @@ class HelpScreen(ModalScreen[None]):
             lines.append(f"  {key:<14} {desc}")
         lines.append("")
         lines.append("[bold]Stream keys (press the prefix, then a sub-key)[/bold]")
-        for prefix, spec in KEYMAP.items():
+        for prefix, spec in self._keymap.items():
             lines.append(f"  {prefix:<14} {spec.label} - press {prefix}? for its keys")
         lines.append("")
         lines.append("  ?              this help     Esc / q    close")
@@ -2188,12 +4331,15 @@ class DomainSpec(NamedTuple):
 class DotoApp(App[None]):
     """The doto 3-pane Textual application.
 
-    Panes:
+    Panes (the default table layout):
 
     * left - repo tree + favorites + scope indicator (:class:`RepoTree`),
-    * middle - task list with running/done/priority/tag badges
+    * right, upper - task list with running/done/priority/tag badges
       (:class:`TaskList`),
-    * right - task details + session interval log (:class:`TaskDetails`).
+    * right, lower - task details + session interval log
+      (:class:`TaskDetails`), stacked *below* the task list inside the
+      ``#task-pane`` column; its share of the height is set by the ``c`` ->
+      ``d`` detail-size ratio (see :meth:`apply_detail_ratio`).
 
     A persistent :class:`StatusLine` shows the two live counters (Layer-1 work
     clock and Layer-2 focus), refreshed on a Textual timer. A top-right
@@ -2212,13 +4358,24 @@ class DotoApp(App[None]):
         width: 28;
         border-right: solid $panel;
     }
-    TaskList {
+    #task-pane {
         width: 2fr;
     }
-    TaskDetails {
-        width: 1fr;
+    /* The task list and detail pane are stacked inside #task-pane. The real
+       split is applied at runtime by DotoApp.apply_detail_ratio() from the
+       persisted tui_detail_ratio (default actions.DEFAULT_DETAIL_RATIO); these
+       static heights are only the pre-mount placeholder, so they are kept as
+       a neutral even split to avoid a second, drift-prone copy of the default
+       ratio. Selected by #id (not the TaskList/TaskDetails type) so a theme
+       that swaps task_list_class / task_details_class for a non-subclass
+       widget still picks up the layout styling. */
+    #task-list {
+        height: 1fr;
+    }
+    #task-details {
+        height: 1fr;
         padding: 0 1;
-        border-left: solid $panel;
+        border-top: solid $panel;
     }
     StatusLine {
         height: 1;
@@ -2261,11 +4418,55 @@ class DotoApp(App[None]):
     AddTaskScreen, FilterScreen, HelpScreen, EditTaskScreen {
         align: center middle;
     }
+    EditBodyScreen {
+        align: center middle;
+    }
     DomainHelpScreen {
         align: center middle;
     }
     ViewPrefsScreen {
         align: center middle;
+    }
+    DetailRatioScreen {
+        align: center middle;
+    }
+    ModalWidthScreen {
+        align: center middle;
+    }
+    SetParentScreen {
+        align: center middle;
+    }
+    #detailratio-modal {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #detailratio-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #detailratio-bottom {
+        height: auto;
+        align: center middle;
+        padding-top: 1;
+    }
+    #modalwidth-modal {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #modalwidth-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #modalwidth-bottom {
+        height: auto;
+        align: center middle;
+        padding-top: 1;
     }
     #viewprefs-modal {
         width: 60;
@@ -2288,6 +4489,32 @@ class DotoApp(App[None]):
         align: center middle;
         padding-top: 1;
     }
+    #setparent-modal {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #setparent-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #setparent-search {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #setparent-list {
+        height: 12;
+        max-height: 12;
+        border: round $primary;
+        margin-bottom: 1;
+    }
+    #setparent-bottom {
+        height: auto;
+        align: center middle;
+        padding-top: 1;
+    }
     CardViewerScreen {
         align: center middle;
     }
@@ -2299,6 +4526,89 @@ class DotoApp(App[None]):
     }
     AddTaskScreen > Label, AddTaskScreen > Select {
         width: 60;
+    }
+    #add-modal {
+        width: 70;
+        height: 90%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #add-body-scroll {
+        height: 1fr;
+    }
+    #add-body {
+        height: 8;
+        border: round $panel;
+    }
+    #add-bottom {
+        dock: bottom;
+        height: auto;
+        align: center middle;
+        padding-top: 1;
+    }
+    #add-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #add-series-modal {
+        width: 70;
+        height: 90%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #add-series-body {
+        height: 1fr;
+    }
+    #add-series-bottom {
+        dock: bottom;
+        height: auto;
+        align: center middle;
+        padding-top: 1;
+    }
+    #add-series-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #edit-series-modal {
+        width: 70;
+        height: 90%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #edit-series-body {
+        height: 1fr;
+    }
+    #edit-series-bottom {
+        dock: bottom;
+        height: auto;
+        align: center middle;
+        padding-top: 1;
+    }
+    #edit-series-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #edit-series-context {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    #confirm-modal {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #confirm-message {
+        margin-bottom: 1;
+    }
+    #confirm-bottom {
+        height: auto;
+        align: center middle;
+        padding-top: 1;
     }
     #edit-modal {
         width: 70;
@@ -2323,6 +4633,27 @@ class DotoApp(App[None]):
     #edit-title {
         text-style: bold;
         margin-bottom: 1;
+    }
+    #editbody-modal {
+        width: 80;
+        height: 80%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #editbody-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #editbody-input {
+        height: 1fr;
+        border: round $panel;
+    }
+    #editbody-bottom {
+        dock: bottom;
+        height: auto;
+        align: center middle;
+        padding-top: 1;
     }
     #viewer-modal {
         width: 70;
@@ -2548,8 +4879,19 @@ class DotoApp(App[None]):
         ("space", "select", "Select"),
         ("d", "done", "Done"),
         ("D", "cycle_status", "Cycle status"),
-        ("e", "edit", "Edit"),
+        # ``e`` is now a PREFIX for the Edit stream domain (see the ``"e"``
+        # entry in :data:`KEYMAP`), not a flat binding: ``e e`` edits the
+        # selected entry, ``e d`` deletes it, and -- only when the selection
+        # is a series occurrence -- ``e E`` / ``e D`` edit / delete the whole
+        # series. The flat ``("e", "edit")`` binding was removed so the prefix
+        # dispatcher (:meth:`on_key`) owns the key.
+        ("n", "edit_body", "Edit note/body"),
         ("a", "add", "Add"),
+        # Add a recurring *series* (NEW): opens the add-series dialog. The
+        # lowercase ``r`` is chosen because the suggested ``R`` (Shift+R) is
+        # already the rescan binding and ``r`` was unbound; it reads as "add
+        # Recurring series".
+        ("r", "add_series", "Add recurring series"),
         # Calendar layout: assign the selected day as the highlighted no-due
         # task's due date (Feature C). ``A`` (Shift+A) is chosen because the
         # lowercase ``a`` is already the add-task binding; ``A`` is unbound. A
@@ -2606,11 +4948,36 @@ class DotoApp(App[None]):
     work_time_summary_class: type[WorkTimeSummary] = WorkTimeSummary
     kickstart_screen_class: type[KickstartScreen] = KickstartScreen
     edit_task_screen_class: type[EditTaskScreen] = EditTaskScreen
-    #: Overridable add-task modal screen: the modal opened by ``a`` that
-    #: prompts for a new task's title and target repository. A child theme can
-    #: swap it without rewriting the app, mirroring
-    #: :attr:`edit_task_screen_class`.
+    #: Overridable body-editor modal (the ``n`` quick key): a focused,
+    #: full-height text area editing only the task's Markdown ``body``/notes.
+    #: Mirrors :attr:`edit_task_screen_class` so a child theme can swap it.
+    edit_body_screen_class: type[EditBodyScreen] = EditBodyScreen
+    #: Overridable add-task modal screen: the field-configurable modal opened
+    #: by ``a`` that prompts for a new task's fields (which fields it shows is
+    #: driven by ``tui_add_fields`` / ``tui_add_defaults``) and its target
+    #: repository. A child theme can swap it without rewriting the app,
+    #: mirroring :attr:`edit_task_screen_class`.
     add_task_screen_class: type[AddTaskScreen] = AddTaskScreen
+    #: Overridable add-series modal screen: the dialog opened by ``r`` that
+    #: prompts for a new recurring series' pattern (with ``at`` / ``for``
+    #: suffixes via dedicated start-time / duration fields), its from/until
+    #: dates and its target repository, then creates the series via the same
+    #: reusable :func:`doxtr_doto.cli.tui.actions.add_series` the CLI
+    #: ``doto add --repeat`` path uses. A child theme can swap it without
+    #: rewriting the app, mirroring :attr:`add_task_screen_class`.
+    add_series_screen_class: type[AddSeriesScreen] = AddSeriesScreen
+    #: Overridable edit-series modal: edits an existing series from the
+    #: selected occurrence forward, then applies the forward-only re-stamp via
+    #: the same reusable :func:`doxtr_doto.cli.tui.actions.update_series` the
+    #: CLI ``doto series update`` path uses. Mirrors
+    #: :attr:`add_series_screen_class`.
+    edit_series_screen_class: type[EditSeriesScreen] = EditSeriesScreen
+    #: Overridable yes/no (or three-way) confirmation modal, used by the
+    #: single-entry delete (``e d``) and the series delete (``e D``). Mirrors
+    #: :attr:`edit_task_screen_class`.
+    confirm_screen_class: type[ConfirmScreen] = ConfirmScreen
+    #: Overridable calendar-sync conflict resolver modal (keep local/remote/both).
+    conflict_resolve_screen_class: type[ConflictResolveScreen] = ConflictResolveScreen
     #: Overridable "card viewer" popup screen (Feature 3): the modal opened by
     #: ``Enter`` on a kanban card that lists a task's full detail. Mirrors
     #: :attr:`edit_task_screen_class` so a child theme can swap it.
@@ -2620,6 +4987,22 @@ class DotoApp(App[None]):
     #: swap it without rewriting the app, mirroring
     #: :attr:`edit_task_screen_class`.
     view_prefs_screen_class: type[ViewPrefsScreen] = ViewPrefsScreen
+
+    #: Overridable parent-picker modal (``e P``). Lets the user attach the
+    #: selected task(s) to a PARENT task (the :data:`TaskData` ``parent``
+    #: link, distinct from ``depends_on``). A child theme can swap it without
+    #: rewriting the app, mirroring :attr:`view_prefs_screen_class`; its
+    #: dropdown widget is itself overridable via
+    #: :attr:`SetParentScreen.select_class`.
+    set_parent_screen_class: type[SetParentScreen] = SetParentScreen
+
+    #: Overridable detail-pane ratio configurator (``c d``). Lets the user set
+    #: how much of the total table-layout height the detail pane takes.
+    detail_ratio_screen_class: type[DetailRatioScreen] = DetailRatioScreen
+    #: Overridable task pop-up width configurator (``c m``). Lets the user set
+    #: the card-viewer, edit-task and edit-note pop-up width as a fraction of
+    #: the terminal width, mirroring :attr:`detail_ratio_screen_class`.
+    modal_width_screen_class: type[ModalWidthScreen] = ModalWidthScreen
 
     #: Overridable time-management screens (Feature: work-hours reporting).
     #: ``c b`` opens the breaks configurator; ``t w`` opens the work-time
@@ -2649,6 +5032,19 @@ class DotoApp(App[None]):
     help_screen_class: type[HelpScreen] = HelpScreen
     domain_help_screen_class: type[DomainHelpScreen] = DomainHelpScreen
 
+    #: Overridable stream-domain registry (the two-key keymap). Bound to the
+    #: module-level :data:`KEYMAP` just after it is defined (KEYMAP is declared
+    #: below the class, so it is attached via ``DotoApp.keymap = KEYMAP`` after
+    #: the class body rather than referenced here). A child theme subclasses
+    #: :class:`DotoApp` and sets its own, e.g.
+    #: ``keymap = {**DotoApp.keymap, "X": DomainSpec(...)}`` to add a domain, or
+    #: a filtered copy to remove/relabel one, without editing core. The
+    #: dispatcher (:meth:`on_key`), hint bar, and help screens all read through
+    #: this attribute, so overriding it keeps the three in lockstep -- mirroring
+    #: the ``*_screen_class`` override seams above and the
+    #: :func:`~doxtr_doto.calsync.providers.register_provider` registry pattern.
+    keymap: dict[str, DomainSpec]
+
     #: Overridable filter/sort pipeline step seams (Features A/C). Each is a
     #: ``staticmethod`` wrapper over the matching
     #: :mod:`doxtr_doto.cli.tui.filtersort` function, passed into
@@ -2671,7 +5067,7 @@ class DotoApp(App[None]):
         TuiLayout.LIST: AltLayoutSpec(
             "list_view_class",
             "list-view",
-            lambda app: app.query_one(app.list_view_class).rebuild(app._tasks),
+            lambda app: app.query_one(app.list_view_class).rebuild(app._tasks, app._collapsed_ids),
             cycles_details=False,
         ),
         TuiLayout.KANBAN: AltLayoutSpec(
@@ -2715,18 +5111,43 @@ class DotoApp(App[None]):
         self.scope = DisplayScope.GLOBAL
         self.filter_term = ""
         self._tasks: list[dict[str, Any]] = []
+        #: Session-scoped set of parent task ids whose sub-tasks are COLLAPSED
+        #: (hidden) in the task list tree. Parents not in this set default to
+        #: EXPANDED (children visible), so newly-created parents show their
+        #: children without any action. Tracked here (not persisted) like other
+        #: transient view state; Space toggles membership for the cursor's
+        #: parent row (see :meth:`action_select`). Passed into
+        #: :meth:`~doxtr_doto.cli.tui.widgets.TaskList.rebuild` each refresh and
+        #: pruned to still-visible ids there is unnecessary - a stale id simply
+        #: has no effect until that parent reappears.
+        self._collapsed_ids: set[str] = set()
         #: The active task-list layout, seeded from the persisted preference
         #: (defaults to the table view when none is saved - backward compat).
         self.layout_view: TuiLayout = actions.load_tui_layout(ctx)
         #: The persisted filter/sort preferences (Feature C), loaded on start
         #: so the last filter/sort state is remembered across sessions.
         self.view_prefs: ViewPrefs = actions.load_view_prefs(ctx)
+        #: The persisted table-layout detail-pane ratio (an ``"n/d"`` string;
+        #: the lower detail pane takes ``n/d`` of the total height, the task
+        #: list the remaining ``(d-n)/d``). Loaded on start so the last chosen
+        #: ratio is restored across sessions; defaults to
+        #: :data:`actions.DEFAULT_DETAIL_RATIO`.
+        self.detail_ratio: str = actions.load_detail_ratio(ctx)
+        self.modal_width_ratio: str = actions.load_modal_width_ratio(ctx)
         #: The pending stream prefix for the two-key dispatcher (None when no
         #: prefix is armed). Set by :meth:`on_key` when a prefix key is
         #: pressed; cleared by :meth:`_clear_pending` once the second key
         #: resolves it (or ``escape``/an unknown key cancels). See the
         #: :data:`KEYMAP` stream registry and the dispatcher in :meth:`on_key`.
         self._pending: str | None = None
+
+        #: Session-scoped memory of the last task chosen as a PARENT via the
+        #: ``e P`` set-parent picker. Pre-selects the picker's dropdown on
+        #: reopen (when the remembered task still exists), so attaching several
+        #: tasks to the SAME parent in a row is fast. Intentionally NOT
+        #: persisted across launches (the feature only requires session-scoped
+        #: memory); it is reset to None here on each app start.
+        self._last_parent_id: str | None = None
 
     def compose(self) -> ComposeResult:
         """Build the app layout.
@@ -2742,8 +5163,12 @@ class DotoApp(App[None]):
         yield self.task_time_line_class(id="task-time-line")
         with Horizontal(id="panes"):
             yield self.repo_tree_class("Scope", id="repo-tree")
-            yield self.task_list_class(id="task-list")
-            yield self.task_details_class(id="task-details")
+            # The task list sits on top of the details pane in a vertical
+            # split so the selected task's detail information renders *under*
+            # the task list rather than to its right.
+            with Vertical(id="task-pane"):
+                yield self.task_list_class(id="task-list")
+                yield self.task_details_class(id="task-details")
         with Vertical(id="alt-view"):
             for layout, spec in self.ALT_LAYOUTS.items():
                 if layout is TuiLayout.TIME:
@@ -2769,13 +5194,14 @@ class DotoApp(App[None]):
         #: idle state on mount. The dispatcher repaints it (domain on a pending
         #: prefix, idle on clear) through this handle.
         self._hintbar = self.query_one(self.key_hint_bar_class)
-        self._hintbar.show_idle(KEYMAP)
+        self._hintbar.show_idle(self.keymap)
         self.refresh_repos()
         # Must publish the accent highlights (title bracket runs *and* the
         # selected kanban frame) *before* the first refresh_tasks so the
         # initial render already colours them.
         self.refresh_accent_highlights()
         self.apply_layout()
+        self.apply_detail_ratio()
         self.refresh_tasks()
         self.refresh_counters()
         self.set_interval(COUNTER_INTERVAL, self.refresh_counters)
@@ -2962,6 +5388,96 @@ class DotoApp(App[None]):
             return self.query_one(self.task_list_class).selected_id()
         return view.selected_id()
 
+    def _selected_is_series_member(self) -> bool:
+        """Return True when the current selection is part of a recurring series.
+
+        Drives the dynamic ``e`` Edit domain: the whole-series entries
+        (``e E`` edit series / ``e D`` delete series) are offered ONLY when the
+        selected task carries a ``series_id``; a standalone task's Edit domain
+        shows just ``e e`` / ``e d``. No selection yields False (so the menu
+        falls back to the entry-only form).
+
+        Returns:
+            True when a task is selected and it belongs to a series.
+        """
+        selected = self._current_selected_id()
+        if not selected:
+            return False
+        task = actions.find_task(self.ctx, self._action_ref(selected))
+        return bool(task and task.get("series_id"))
+
+    def select_task(self, task_id: str) -> bool:
+        """Select (highlight + scroll into view) the task with id ``task_id``.
+
+        The app-level, overridable seam used to reveal a specific task - in
+        particular a freshly created one (see :meth:`action_add` and the
+        ``tui_auto_select_new_task`` config). It delegates the actual cursor
+        move to whichever view is active (the structural
+        :attr:`task_list_class` table for :attr:`TuiLayout.TABLE`, otherwise
+        the active :class:`~doxtr_doto.cli.tui.widgets.AltLayoutView`) via that
+        view's overridable
+        :meth:`~doxtr_doto.cli.tui.widgets.AltLayoutView.select_id` seam, so a
+        child theme can swap either the per-view selection or this whole
+        operation by subclassing and swapping the matching ``*_view_class`` /
+        ``task_list_class`` attribute, or by overriding this method.
+
+        Alternate selection *strategies* (e.g. select-then-scroll-to-top, or
+        select-then-enter-edit) are intended to be composed by overriding this
+        method - the per-view :meth:`select_id` seam owns row *placement*,
+        while strategy variation lives here.
+
+        Scope-robustness: :func:`doxtr_doto.cli.tui.actions.add_task` returns a
+        *bare* local id, but the id the views report and store in their rows is
+        the *display* id, which :func:`doxtr_doto.cli.display.apply_scope`
+        namespaces (``repo#id``) in GLOBAL scope when a base prefix is not
+        unique. So the bare id is first mapped to the display id present in the
+        current (possibly filtered) :attr:`_tasks` set by matching the
+        preserved ``_local_id`` for the current repo; the resolved display id
+        (or the bare id itself in LOCAL scope / when already a display id) is
+        then handed to the active view. When the created task is not in the
+        visible set (e.g. filtered out), no row matches and this is a no-op.
+
+        Args:
+            task_id: The id of the task to select. Accepts the bare local id
+                returned by :func:`add_task` or an already-namespaced display
+                id.
+
+        Returns:
+            True when a matching row was found and selected, False otherwise.
+        """
+        display_id = self._display_id_for(task_id)
+        view = self._active_view()
+        if view is None:
+            return self.query_one(self.task_list_class).select_id(display_id)
+        return view.select_id(display_id)
+
+    def _display_id_for(self, task_id: str) -> str:
+        """Map a bare / namespaced id to the display id used by the views.
+
+        The inverse direction of :meth:`_action_ref`: the views key their rows
+        on the *display* id (bare in LOCAL scope, possibly ``repo#id`` in
+        GLOBAL scope - see :func:`doxtr_doto.cli.display.apply_scope`), while
+        :func:`doxtr_doto.cli.tui.actions.add_task` returns a bare local id. A
+        task created in the current repo therefore needs its bare id resolved
+        to whatever display id the current scope assigned it.
+
+        The mapping is derived from the gathered :attr:`_tasks`, which carry
+        both the preserved ``_local_id`` and the display ``id``: when a row for
+        the current repo has ``_local_id == task_id`` its display ``id`` is
+        returned. Falls back to ``task_id`` unchanged when no such row exists
+        (the task is filtered out, or ``task_id`` is already a display id).
+
+        Args:
+            task_id: A bare local id (as returned by ``add_task``) or an
+                already-namespaced display id.
+
+        Returns:
+            The display id the active view uses for that task, or ``task_id``
+            unchanged when it cannot be mapped.
+        """
+        current = data.current_repo_name(self.ctx)
+        return self._display_id_for_repo(current, task_id)
+
     def _action_ref(self, selected: str) -> str:
         """Return the task ref to use for a mutating action on ``selected``.
 
@@ -3106,9 +5622,9 @@ class DotoApp(App[None]):
         just-pushed screen is torn down again.
         """
         if self._pending is None:
-            if event.key in KEYMAP:
+            if event.key in self.keymap:
                 self._pending = event.key
-                spec = KEYMAP[event.key]
+                spec = self.keymap[event.key]
                 self._hintbar.show_domain(event.key, spec, spec.entries_fn(self))
                 self._arm_prefix_timeout()
                 event.stop()
@@ -3144,7 +5660,7 @@ class DotoApp(App[None]):
         if event.key == "question_mark":
             self.call_after_refresh(self._open_domain_help, domain)
             return
-        entry = KEYMAP[domain].lookup(self, event.key)
+        entry = self.keymap[domain].lookup(self, event.key)
         if entry is None:
             return
         self._run_entry(domain, entry)
@@ -3162,10 +5678,16 @@ class DotoApp(App[None]):
           registry row (``set_status_<name>`` -> the status string).
         * ``toggle_timer`` (the ``t t`` key) is a per-task mutation like flat
           ``w``, so it also routes through :meth:`_bulk_apply` (spec §8.1).
-        * Every other action (the ``t`` domain's remaining task/global actions
-          and the ``c``/``S`` global actions) dispatches to its existing
+        * Every other action (the ``t`` domain's remaining task/global actions,
+          the ``c``/``S`` global actions, and the ``e`` Edit domain's
+          ``edit`` / ``delete_task`` / ``edit_series`` / ``delete_series`` /
+          ``series_next`` / ``series_prev`` actions) dispatches to its existing
           ``action_*`` method, which already resolves the single selected task
-          or scopes itself appropriately.
+          or scopes itself appropriately. The ``e`` domain needs no new branch
+          here: its actions route straight to ``action_edit`` /
+          ``action_delete_task`` / ``action_edit_series`` /
+          ``action_delete_series`` / ``action_series_next`` /
+          ``action_series_prev``.
 
         Args:
             domain: The pending prefix key the entry belongs to.
@@ -3238,7 +5760,7 @@ class DotoApp(App[None]):
     def _clear_pending(self) -> None:
         """Clear the pending stream prefix and repaint the hint bar to idle."""
         self._pending = None
-        self._hintbar.show_idle(KEYMAP)
+        self._hintbar.show_idle(self.keymap)
 
     def _open_domain_help(self, domain: str) -> None:
         """Open the per-domain help modal for a stream ``domain`` prefix.
@@ -3246,7 +5768,7 @@ class DotoApp(App[None]):
         Args:
             domain: The prefix key (``s``/``t``/``c``/``S``).
         """
-        spec = KEYMAP[domain]
+        spec = self.keymap[domain]
         self.push_screen(self.domain_help_screen_class(domain, spec, spec.entries_fn(self)))
 
     def _focus_active_view(self) -> None:
@@ -3277,6 +5799,26 @@ class DotoApp(App[None]):
         for layout, spec in self.ALT_LAYOUTS.items():
             self.query_one(getattr(self, spec.class_attr)).display = self.layout_view is layout
 
+    def apply_detail_ratio(self) -> None:
+        """Resize the table layout's task-list / detail panes from the ratio.
+
+        Applies :attr:`detail_ratio` (an ``"n/d"`` string) to the stacked
+        table-layout panes: the lower detail pane is given ``n`` fractional
+        height units and the task list the remaining ``d - n`` (so the detail
+        pane takes ``n/d`` of the total height), via
+        :func:`doxtr_doto.cli.tui.actions.parse_detail_ratio`. Setting the
+        ``fr`` heights at runtime (rather than only in the static ``CSS``)
+        lets a ratio change from the ``c`` -> ``d`` config pop-up take effect
+        immediately, without restarting ``doto tui``.
+        """
+        from textual.css.scalar import Scalar, Unit
+
+        top_fr, detail_fr = actions.parse_detail_ratio(self.detail_ratio)
+        task_list = self.query_one("#task-list")
+        task_details = self.query_one("#task-details")
+        task_list.styles.height = Scalar(float(top_fr), Unit.FRACTION, Unit.HEIGHT)
+        task_details.styles.height = Scalar(float(detail_fr), Unit.FRACTION, Unit.HEIGHT)
+
     def _cycle_layout(self, step: int) -> None:
         """Advance the task-list layout by ``step`` positions and persist it.
 
@@ -3287,6 +5829,17 @@ class DotoApp(App[None]):
         the newly active view's selection, and persists the choice via
         :func:`doxtr_doto.cli.tui.actions.save_tui_layout` so it is restored on
         the next launch (the "configure", not just toggle, requirement).
+
+        Switching layouts is a *discontinuous* selection change: the newly
+        active view may carry a stale scroll offset from a previous visit while
+        its selected task sits elsewhere (e.g. the kanban was scrolled to the
+        bottom of a long lane and now its selection is a single top-of-lane
+        card), so the active alt-view is repositioned via
+        :meth:`doxtr_doto.cli.tui.widgets.AltLayoutView.ensure_cursor_visible`
+        to guarantee the selected item is in view on the new layout. The
+        reposition is deferred with :meth:`call_after_refresh` so it runs after
+        the just-shown view's scrollable region is recomputed (a synchronous
+        call would be lost to that relayout).
         """
         order = list(TuiLayout)
         nxt = order[(order.index(self.layout_view) + step) % len(order)]
@@ -3294,6 +5847,17 @@ class DotoApp(App[None]):
         actions.save_tui_layout(self.ctx, nxt)
         self.apply_layout()
         self._focus_active_view()
+        view = self._active_view()
+        if view is not None:
+            # Defer the reposition until the newly shown view's layout settles:
+            # ``apply_layout`` only just toggled the view visible, so its
+            # scrollable region is recomputed on the next refresh and a
+            # :meth:`~doxtr_doto.cli.tui.widgets.AltLayoutView.ensure_cursor_visible`
+            # issued synchronously here would be lost to that relayout (leaving
+            # a stale deep offset from a previous visit). ``call_after_refresh``
+            # runs it once the region is established, mirroring the help/router
+            # deferral pattern used elsewhere.
+            self.call_after_refresh(view.ensure_cursor_visible)
         self.refresh_details()
         self.refresh_task_time()
         self.notify(f"Layout: {nxt.value}")
@@ -3404,7 +5968,9 @@ class DotoApp(App[None]):
         the ``"edit"`` sentinel (``e`` pressed inside it) the existing edit
         dialog is opened for the same task (Feature 4) via :meth:`_open_edit`,
         reusing the :func:`doxtr_doto.cli.tui.actions.update_task` write and
-        the board refresh rather than duplicating the edit flow.
+        the board refresh rather than duplicating the edit flow. The ``"note"``
+        sentinel (``n`` pressed inside it) likewise opens the focused
+        body/note editor via :meth:`_open_edit_body`.
 
         Args:
             selected: The selected task's id.
@@ -3417,9 +5983,15 @@ class DotoApp(App[None]):
         def _on_close(result: str | None) -> None:
             if result == "edit":
                 self._open_edit(selected)
+            elif result == "note":
+                self._open_edit_body(selected)
 
         self.push_screen(
-            self.card_viewer_screen_class(view_task, self._default_user()),
+            self.card_viewer_screen_class(
+                view_task,
+                self._default_user(),
+                actions.modal_width_percent(self.modal_width_ratio),
+            ),
             _on_close,
         )
 
@@ -3472,12 +6044,24 @@ class DotoApp(App[None]):
         at either edge (no wrap). The details pane auto-refreshes on the
         selection change so navigation keeps it reachable/current.
 
+        A lane switch is discontinuous, so after the rebuild re-renders the
+        board the view is repositioned via
+        :meth:`doxtr_doto.cli.tui.widgets.AltLayoutView.ensure_cursor_visible`
+        to guarantee the selected card is on screen even when the new lane is
+        much shorter than the old one. The reposition must run *after*
+        :meth:`_rebuild_alt_views`: the rebuild re-renders and re-runs the
+        direction-inferring smart scroll (``move_column`` itself only runs the
+        continuous :meth:`~doxtr_doto.cli.tui.widgets.AltLayoutView.scroll_to_cursor`,
+        which the rebuild would overwrite anyway), so this explicit post-rebuild
+        reposition is what actually brings the selected card back into view.
+
         Args:
             delta: ``-1`` left, ``+1`` right.
         """
         board = self.query_one(self.kanban_view_class)
         if board.move_column(delta):
             self._rebuild_alt_views()
+            board.ensure_cursor_visible()
             self.refresh_details()
             self.refresh_task_time()
 
@@ -3699,7 +6283,7 @@ class DotoApp(App[None]):
         """Rebuild the active layout's task view and refresh the details pane."""
         self._tasks = self._visible_tasks()
         table = self.query_one(self.task_list_class)
-        table.rebuild(self._tasks)
+        table.rebuild(self._tasks, self._collapsed_ids)
         self._rebuild_alt_views()
         self.refresh_details()
 
@@ -4231,19 +6815,52 @@ class DotoApp(App[None]):
     # Mutations (all routed through actions.py / CLI verb functions)
     # ------------------------------------------------------------------
     def action_select(self) -> None:
-        """Toggle the current task in the multi-selection set.
+        """Toggle tree expansion on a parent row, else multi-select the task.
 
-        Space no longer completes a task; it marks the current cursor row as
-        selected (or deselects it). When one or more tasks are selected, the
-        ``d`` and ``D`` actions operate on the whole selection. Multi-select
+        Space is the tree-expand toggle *and* the multi-select toggle, split by
+        the cursor row's shape (mirroring how tree UIs - including the repo
+        explorer - treat Space on a branch vs a leaf): when the cursor row has
+        children (is an expandable parent) Space toggles whether its sub-tasks
+        are shown (flipping the row's membership in :attr:`_collapsed_ids` and
+        refreshing); when it is a leaf Space keeps its multi-select behaviour
+        so parenting and the ``d``/``D`` bulk actions still work. Multi-select
         is a table-layout affordance; in the single-selection list/kanban/
         calendar layouts Space is a no-op.
         """
         if self.layout_view is not TuiLayout.TABLE:
             return
         table = self.query_one(self.task_list_class)
+        if table.cursor_has_children():
+            task_id = table.selected_id()
+            if task_id is not None:
+                # Default-expanded: membership in _collapsed_ids means hidden,
+                # so toggling membership flips show/hide of the sub-tasks.
+                if task_id in self._collapsed_ids:
+                    self._collapsed_ids.discard(task_id)
+                else:
+                    self._collapsed_ids.add(task_id)
+                self.refresh_tasks()
+            return
         table.toggle_selected()
         self.refresh_tasks()
+
+    def _bulk_target_ids(self) -> list[str]:
+        """Resolve the current bulk-action target ids for the active layout.
+
+        The shared target-resolution used by :meth:`_bulk_apply` and
+        :meth:`action_set_parent`: in the table layout the multi-selection
+        (when non-empty, else the single cursor row) via
+        :meth:`~doxtr_doto.cli.tui.widgets.TaskList.target_ids`; in the
+        single-selection layouts (list/kanban/calendar/time) just the single
+        selected id. Empty when nothing is selectable.
+
+        Returns:
+            The display ids a bulk action should operate on.
+        """
+        if self.layout_view is TuiLayout.TABLE:
+            return self.query_one(self.task_list_class).target_ids()
+        selected = self._current_selected_id()
+        return [selected] if selected is not None else []
 
     def _bulk_apply(
         self,
@@ -4269,11 +6886,7 @@ class DotoApp(App[None]):
                 when more than one task was affected.
         """
         table = self.query_one(self.task_list_class)
-        if self.layout_view is TuiLayout.TABLE:
-            targets = table.target_ids()
-        else:
-            selected = self._current_selected_id()
-            targets = [selected] if selected is not None else []
+        targets = self._bulk_target_ids()
         if not targets:
             return
         affected: list[tuple[str, Any]] = []
@@ -4313,12 +6926,377 @@ class DotoApp(App[None]):
             lambda count: f"Cycled {count} tasks.",
         )
 
+    def action_set_parent(self) -> None:
+        """Attach the target task(s) to a PARENT task picked from a pop-up.
+
+        The ``e P`` Edit-domain action. Resolves the child targets with the
+        SAME bulk-target logic as :meth:`_bulk_apply` (:meth:`_bulk_target_ids`:
+        the multi-selection when non-empty, else the single cursor task), so
+        whatever is currently selected becomes the set of CHILDREN. Opens
+        :attr:`set_parent_screen_class` listing every OTHER visible task as a
+        candidate parent - the children themselves are excluded - pre-seeded
+        with the remembered last parent (:attr:`_last_parent_id`) so assigning
+        several tasks to the same parent is quick.
+
+        On confirm the chosen parent is applied to every child via
+        :func:`doxtr_doto.cli.tui.actions.set_parent`, which rejects
+        self-parenting / cycles (:func:`~doxtr_doto.sync.json_store.would_create_cycle`)
+        and cross-repo parents per child; rejected children are skipped and
+        counted into a trailing notice. The remembered parent is updated and
+        the board refreshed, mirroring the singular/plural notify shape of
+        :meth:`_bulk_apply`. The list also offers a leading "(no parent)" entry
+        (value :data:`~doxtr_doto.cli.tui.actions.CLEAR_PARENT`) that *removes*
+        the parent from every target, making them top-level again. ``Escape``
+        cancels without changes.
+        """
+        targets = self._bulk_target_ids()
+        if not targets:
+            return
+        target_set = set(targets)
+        # Candidate parents: every OTHER visible task (exclude the children
+        # being parented and, implicitly, each child's own row). ``value`` is
+        # the action ref the parent resolves through; ``label`` is the display
+        # ``id  title`` the user reads. A leading "(no parent)" entry clears the
+        # parent link instead of attaching one.
+        candidates: list[tuple[str, str]] = [("(no parent)", actions.CLEAR_PARENT)]
+        for task in self._tasks:
+            display_id = str(task.get("id", ""))
+            if not display_id or display_id in target_set:
+                continue
+            title = str(task.get("title", ""))
+            label = f"{display_id}  {title}" if title else display_id
+            candidates.append((label, self._action_ref(display_id)))
+        # ``candidates`` always has the "(no parent)" row, so there is always
+        # at least the clear option available (even with no other tasks).
+
+        def _chosen(parent_ref: str | None) -> None:
+            if parent_ref is None:
+                return
+            clearing = parent_ref == actions.CLEAR_PARENT
+            affected: list[str] = []
+            skipped = 0
+            for child_id in targets:
+                result = actions.set_parent(self.ctx, self._action_ref(child_id), parent_ref)
+                if result in (SetParentResult.OK, SetParentResult.CLEARED):
+                    affected.append(child_id)
+                else:
+                    skipped += 1
+            table = self.query_one(self.task_list_class)
+            table.clear_selection()
+            if affected and not clearing:
+                # Remember the chosen parent for the next open so the picker
+                # pre-selects it (session-scoped; see ``_last_parent_id``).
+                # Clearing is never remembered as a "last parent".
+                self._last_parent_id = parent_ref
+            suffix = f" ({skipped} skipped)" if skipped else ""
+            if clearing:
+                if len(affected) == 1:
+                    self.notify(f"Removed parent of {affected[0]}.{suffix}")
+                elif affected:
+                    self.notify(f"Removed parent of {len(affected)} tasks.{suffix}")
+                else:
+                    self.notify("No parent to remove.")
+            elif len(affected) == 1:
+                self.notify(f"Set parent of {affected[0]} to {parent_ref}.{suffix}")
+            elif affected:
+                self.notify(f"Set parent of {len(affected)} tasks to {parent_ref}.{suffix}")
+            elif skipped:
+                self.notify(
+                    "Could not set parent (self/cycle or cross-repo).",
+                    severity="warning",
+                )
+            self.refresh_tasks()
+
+        self.push_screen(
+            self.set_parent_screen_class(candidates, default=self._last_parent_id),
+            _chosen,
+        )
+
     def action_edit(self) -> None:
         """Open the edit modal for the current task and apply the result."""
         selected = self._current_selected_id()
         if not selected:
             return
         self._open_edit(selected)
+
+    def action_edit_series(self) -> None:
+        """Edit the selected occurrence's series from this occurrence forward.
+
+        The ``e E`` Edit-domain action (shown only for a series occurrence).
+        Resolves the selected task, reads its ``series_id`` (notifies and
+        returns when absent -- defensive; the menu already hides it), and
+        captures the task's due DATE (time stripped) as the forward-only
+        anchor. Pushes :attr:`edit_series_screen_class` pre-populated from the
+        stored series; on submit the validated pattern/title are handed to
+        :func:`doxtr_doto.cli.tui.actions.update_series` -- the SAME reusable
+        function the CLI ``doto series update`` path uses -- then the store is
+        reloaded and the board/details refreshed. Modeled on :meth:`_open_edit`
+        + :meth:`action_add_series`.
+        """
+        from doxtr_doto.cli.recurrence import parse_recurrence
+
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        ref = self._action_ref(selected)
+        task = actions.find_task(self.ctx, ref)
+        if task is None:
+            return
+        series_id = task.get("series_id")
+        if not isinstance(series_id, str) or not series_id:
+            self.notify("Selected task is not part of a series.")
+            return
+        anchor = actions.occurrence_date(task.get("due"))
+        if anchor is None:
+            self.notify("Selected occurrence has no due date to anchor on.", severity="error")
+            return
+        series_data = self.ctx.store.get_series(series_id)
+        if series_data is None:
+            self.notify(f"Series {series_id} not found.", severity="error")
+            return
+        series_dict = cast("dict[str, Any]", series_data)
+
+        # Count forward / earlier occurrences for the context line.
+        forward = 0
+        earlier = 0
+        for occ in self.ctx.store.get_tasks_in_series(series_id):
+            occ_date = actions.occurrence_date(occ.get("due"))
+            if occ_date is None:
+                continue
+            if occ_date >= anchor:
+                forward += 1
+            else:
+                earlier += 1
+
+        def _apply(result: EditSeriesResult | None) -> None:
+            if result is None:
+                return
+            # The dialog already validated the pattern, so this cannot fail.
+            if result.pattern_str is not None:
+                pattern = parse_recurrence(result.pattern_str)
+            else:
+                # Keep the stored calendar shape; apply time/duration (which
+                # may clear) over it.
+                from doxtr_doto.cli.recurrence import RecurrencePattern
+
+                pattern = RecurrencePattern.from_dict(series_dict["pattern"])
+                pattern.start_time = result.start_time
+                pattern.duration_minutes = result.duration_minutes
+            update = actions.update_series(
+                self.ctx,
+                series_id,
+                pattern=pattern,
+                title_template=result.title,
+                anchor_date=anchor,
+            )
+            self.ctx.store.load()
+            self.refresh_tasks()
+            self.refresh_details()
+            self.notify(
+                f"Updated series {series_id} from {anchor.isoformat()} "
+                f"({len(update.updated_task_ids)} occurrences)."
+            )
+
+        self.push_screen(
+            self.edit_series_screen_class(
+                series_id,
+                series_dict,
+                anchor,
+                forward,
+                earlier,
+                width_percent=actions.modal_width_percent(self.modal_width_ratio),
+            ),
+            _apply,
+        )
+
+    def action_series_next(self) -> None:
+        """Jump the selection to the next occurrence of the current series (``e n``).
+
+        The forward half of the series-navigation pair (shown in the ``e`` Edit
+        domain only for a series occurrence, alongside ``e E`` / ``e D``).
+        Delegates to :meth:`_move_in_series`; a no-op at the last occurrence
+        (clamp, with a subtle notify) rather than wrapping, so the user keeps
+        their sense of chronological position within the series.
+        """
+        self._move_in_series(1)
+
+    def action_series_prev(self) -> None:
+        """Jump the selection to the previous occurrence of the series (``e p``).
+
+        The backward counterpart of :meth:`action_series_next`; a no-op at the
+        first occurrence (see that method).
+        """
+        self._move_in_series(-1)
+
+    def _move_in_series(self, delta: int) -> None:
+        """Move the selection to a neighbouring occurrence of its own series.
+
+        Shared by :meth:`action_series_next` (``delta == 1``) and
+        :meth:`action_series_prev` (``delta == -1``). The jump follows
+        OCCURRENCE order (the series' tasks sorted by due date), independent of
+        the current list sort / filter, so it always steps to the adjacent
+        meeting in the series regardless of how the board is arranged.
+
+        Resolution mirrors the series-aware actions (:meth:`action_edit_series`
+        etc.): the selected task is resolved to its owning store via
+        :func:`doxtr_doto.cli.id_resolver.resolve_task_ref` (so a foreign-repo
+        series in GLOBAL scope resolves against the right store), the store's
+        :meth:`~doxtr_doto.sync.json_store.JsonTaskStore.get_tasks_in_series`
+        yields the occurrences in due-date order, and the neighbour's bare
+        local id is mapped back to the display id the active view selects on
+        (:meth:`_display_id_for_repo`).
+
+        Edge behaviour: at the first (``delta < 0``) or last (``delta > 0``)
+        occurrence the move clamps (no wrap) and emits a subtle notify, keeping
+        the user's position. A non-series selection, an unresolvable ref, or a
+        neighbour that is currently filtered out of the view are all graceful
+        no-ops (the last notifies, since the target exists but is hidden).
+
+        Args:
+            delta: ``1`` to step to the next occurrence, ``-1`` to the previous.
+        """
+        from doxtr_doto.cli.id_resolver import resolve_task_ref
+
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        ref = self._action_ref(selected)
+        resolved = resolve_task_ref(self.ctx, ref)
+        if resolved is None:
+            return
+        task = resolved.store.get_task(resolved.task_id)
+        if task is None:
+            return
+        series_id = task.get("series_id")
+        if not isinstance(series_id, str) or not series_id:
+            return
+        occurrences = resolved.store.get_tasks_in_series(series_id)
+        local_ids = [str(occ.get("id")) for occ in occurrences]
+        try:
+            index = local_ids.index(str(resolved.task_id))
+        except ValueError:
+            return
+        target = index + delta
+        if target < 0 or target >= len(local_ids):
+            edge = "first" if delta < 0 else "last"
+            self.notify(f"Already at the {edge} occurrence in this series.")
+            return
+        display_id = self._display_id_for_repo(resolved.repo, local_ids[target])
+        if not self.select_task(display_id):
+            word = "Previous" if delta < 0 else "Next"
+            self.notify(f"{word} occurrence is not currently visible (filtered out).")
+            return
+        self.refresh_details()
+        self.refresh_task_time()
+
+    def _display_id_for_repo(self, repo: str, local_id: str) -> str:
+        """Map an owning ``repo`` + bare ``local_id`` to the view's display id.
+
+        The repo-aware generalisation of :meth:`_display_id_for` (which only
+        resolves the *current* repo): series navigation may step to an
+        occurrence owned by a foreign repo in GLOBAL scope, so the lookup keys
+        on the preserved ``_repo`` / ``_local_id`` tags of the gathered
+        :attr:`_tasks` for the given ``repo``. Falls back to ``local_id``
+        unchanged when no visible row matches (the occurrence is filtered out,
+        so :meth:`select_task` will no-op and the caller notifies).
+
+        Args:
+            repo: The occurrence's owning repo name.
+            local_id: The occurrence's bare local id.
+
+        Returns:
+            The display id the active view selects on, or ``local_id`` when it
+            cannot be mapped.
+        """
+        for task in self._tasks:
+            if task.get("_repo") == repo and str(task.get("_local_id")) == local_id:
+                return str(task.get("id", local_id))
+        return local_id
+
+    def action_delete_task(self) -> None:
+        """Delete the selected entry after a yes/no confirmation (``e d``).
+
+        Pushes a plain :attr:`confirm_screen_class`; on confirm the task is
+        deleted via :func:`doxtr_doto.cli.tui.actions.delete_task` (which prunes
+        the owning series link in the store) and the board/details refreshed.
+        """
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        ref = self._action_ref(selected)
+
+        def _apply(result: ConfirmResult | None) -> None:
+            if result is not ConfirmResult.CONFIRM:
+                return
+            if actions.delete_task(self.ctx, ref):
+                self.ctx.store.load()
+                self.notify(f"Deleted {selected}.")
+                self.refresh_tasks()
+                self.refresh_details()
+            else:
+                self.notify(f"Could not delete {selected}.", severity="error")
+
+        self.push_screen(
+            self.confirm_screen_class(
+                f"Delete {selected}? This cannot be undone.",
+                confirm_label="Delete",
+                width_percent=actions.modal_width_percent(self.modal_width_ratio),
+            ),
+            _apply,
+        )
+
+    def action_delete_series(self) -> None:
+        """Delete the selected occurrence's whole series (``e D``).
+
+        Shown only for a series occurrence. Pushes a three-way
+        :attr:`confirm_screen_class` offering "Delete series + tasks", "Keep
+        tasks, remove series" (parity with the CLI ``--keep-tasks``) and
+        Cancel. The chosen branch calls
+        :func:`doxtr_doto.cli.tui.actions.delete_series` with the matching
+        ``delete_tasks`` flag, then refreshes and notifies (mirroring the CLI
+        messages).
+        """
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        task = actions.find_task(self.ctx, self._action_ref(selected))
+        if task is None:
+            return
+        series_id = task.get("series_id")
+        if not isinstance(series_id, str) or not series_id:
+            self.notify("Selected task is not part of a series.")
+            return
+        series_data = self.ctx.store.get_series(series_id)
+        if series_data is None:
+            self.notify(f"Series {series_id} not found.", severity="error")
+            return
+        task_count = len(series_data.get("task_ids", []))
+
+        def _apply(result: ConfirmResult | None) -> None:
+            if result is None or result is ConfirmResult.CANCEL:
+                return
+            delete_tasks = result is ConfirmResult.CONFIRM
+            success, deleted = actions.delete_series(self.ctx, series_id, delete_tasks=delete_tasks)
+            if not success:
+                self.notify(f"Could not delete series {series_id}.", severity="error")
+                return
+            self.ctx.store.load()
+            self.refresh_tasks()
+            self.refresh_details()
+            if delete_tasks:
+                self.notify(f"Deleted series {series_id} ({len(deleted)} tasks).")
+            else:
+                self.notify(f"Deleted series {series_id} (kept {task_count} tasks).")
+
+        self.push_screen(
+            self.confirm_screen_class(
+                f"Delete series {series_id} and its {task_count} tasks?",
+                confirm_label="Delete series + tasks",
+                keep_tasks_label="Keep tasks, remove series",
+                width_percent=actions.modal_width_percent(self.modal_width_ratio),
+            ),
+            _apply,
+        )
 
     def action_assign_due(self) -> None:
         """Assign the selected calendar day to the highlighted no-due task (``A``).
@@ -4375,7 +7353,14 @@ class DotoApp(App[None]):
         def _apply(updates: dict[str, Any] | None) -> None:
             if not updates:
                 return
-            if actions.update_task(self.ctx, self._action_ref(selected), updates):
+            from doxtr_doto.exceptions import DotoValidationError
+
+            try:
+                applied = actions.update_task(self.ctx, self._action_ref(selected), updates)
+            except DotoValidationError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            if applied:
                 self.notify(f"Updated {selected}.")
                 self.refresh_tasks()
                 self.refresh_details()
@@ -4387,6 +7372,52 @@ class DotoApp(App[None]):
                 list(self.ctx.config.priorities),
                 known_assignee_names(self.ctx),
                 known_tag_names(self.ctx),
+                actions.modal_width_percent(self.modal_width_ratio),
+            ),
+            _apply,
+        )
+
+    def action_edit_body(self) -> None:
+        """Open the focused body/note editor for the current task (``n``)."""
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        self._open_edit_body(selected)
+
+    def _open_edit_body(self, selected: str) -> None:
+        """Open the body-only editor for ``selected`` and apply the result.
+
+        The single place :attr:`edit_body_screen_class` is pushed, so both the
+        ``n`` keybinding (:meth:`action_edit_body`) and the card viewer's ``n``
+        (:meth:`CardViewerScreen.action_edit_body`, routed through
+        :meth:`_open_card_viewer`) reuse the same flow. The edited body is
+        written via :func:`doxtr_doto.cli.tui.actions.update_task` - the single
+        ``doto update`` path - and the board/details refreshed. The modal
+        dismisses with the new body string (``""`` clears the body) or ``None``
+        to leave it untouched; an unchanged value is a harmless no-op write.
+
+        Args:
+            selected: The task id whose body to edit.
+        """
+        task = actions.find_task(self.ctx, self._action_ref(selected))
+        if task is None:
+            return
+        edit_task = {"id": selected, **task}
+
+        def _apply(body: str | None) -> None:
+            if body is None:
+                return
+            if body == (task.get("body") or ""):
+                return
+            if actions.update_task(self.ctx, self._action_ref(selected), {"body": body}):
+                self.notify(f"Updated note for {selected}.")
+                self.refresh_tasks()
+                self.refresh_details()
+
+        self.push_screen(
+            self.edit_body_screen_class(
+                edit_task,
+                actions.modal_width_percent(self.modal_width_ratio),
             ),
             _apply,
         )
@@ -4463,6 +7494,226 @@ class DotoApp(App[None]):
             self.breaks_config_screen_class(list(state.breaks), list(state.workweek_days)),
             _apply,
         )
+
+    def action_configure_detail_ratio(self) -> None:
+        """Open the detail-pane ratio configurator and apply + persist it.
+
+        Opened from the ``Config`` domain with ``c`` -> ``d``. Pushes
+        :attr:`detail_ratio_screen_class` pre-populated with the current
+        :attr:`detail_ratio`. On *Apply* the chosen ``"n/d"`` ratio is stored
+        on the app, applied immediately to the live table-layout pane heights
+        via :meth:`apply_detail_ratio` (so the change is visible without a
+        restart), and persisted via
+        :func:`doxtr_doto.cli.tui.actions.save_detail_ratio` so it is restored
+        on the next ``doto tui`` launch. ``Escape`` leaves the ratio
+        unchanged.
+        """
+
+        def _apply(ratio: str | None) -> None:
+            if ratio is None:
+                return
+            self.detail_ratio = ratio
+            actions.save_detail_ratio(self.ctx, ratio)
+            self.apply_detail_ratio()
+            self.notify(f"Detail pane set to {ratio} of the total height.")
+
+        self.push_screen(self.detail_ratio_screen_class(self.detail_ratio), _apply)
+
+    def action_configure_modal_width(self) -> None:
+        """Open the task pop-up width configurator (``c`` -> ``m``).
+
+        Pushes :attr:`modal_width_screen_class` pre-populated with the current
+        :attr:`modal_width_ratio`. On *Apply* the chosen ``"n/d"`` ratio is
+        stored on the app (so the next task pop-up - card viewer, edit or note
+        - opens at the new width without a restart) and persisted via
+        :func:`doxtr_doto.cli.tui.actions.save_modal_width_ratio` so it is
+        restored on the next ``doto tui`` launch. ``Escape`` leaves the ratio
+        unchanged.
+        """
+
+        def _apply(ratio: str | None) -> None:
+            if ratio is None:
+                return
+            self.modal_width_ratio = ratio
+            actions.save_modal_width_ratio(self.ctx, ratio)
+            self.notify(f"Task pop-ups set to {ratio} of the terminal width.")
+
+        self.push_screen(self.modal_width_screen_class(self.modal_width_ratio), _apply)
+
+    # -- Calendar sync (``C`` domain) --------------------------------------
+    #
+    # Each action kicks off a Textual *thread* worker because provider
+    # connect / list / push / OAuth are blocking network calls that would
+    # freeze the UI if run on the event loop. The worker runs the Textual-free
+    # orchestration in :mod:`doxtr_doto.cli.tui.calsync_tui` and marshals the
+    # resulting notification back onto the UI thread. A notification is posted
+    # up front so a slow network round-trip does not look like a dead key.
+    def action_calsync_sync(self) -> None:
+        """``C`` -> ``s``: sync every *displayed* calendar-enabled repo.
+
+        Rather than syncing only the launch directory, this syncs each repo the
+        TUI is currently showing (per the active scope and repo filter) that is
+        itself configured for calendar sync, each with its own direction /
+        conflict policy / calendar. pull/two-way directions import tasks, so the
+        view is refreshed on success.
+        """
+        # Capture the view state on the UI thread; the worker runs off-thread.
+        scope = self.scope
+        repo_filter = tuple(self.view_prefs.repo_filter)
+        self.notify("Syncing calendar...", title="Calendar sync")
+        self._calsync_sync_worker(scope, repo_filter)
+
+    def action_calsync_push(self) -> None:
+        """``C`` -> ``p``: one-way push (doto -> calendar)."""
+        self._run_calsync("push", "Pushing to calendar...")
+
+    def action_calsync_pull(self) -> None:
+        """``C`` -> ``l``: one-way pull (calendar -> doto), then refresh the view."""
+        self._run_calsync("pull", "Pulling from calendar...", refresh_after=True)
+
+    def action_calsync_status(self) -> None:
+        """``C`` -> ``t``: show the current config + dry-run plan.
+
+        ``status`` is computed from the local store/state (no network), so it
+        runs inline rather than in a worker.
+        """
+        outcome = calsync_tui.status(self.ctx)
+        self.notify(
+            outcome.message,
+            title=outcome.title,
+            severity="information" if outcome.ok else "error",
+        )
+
+    def action_calsync_login(self) -> None:
+        """``C`` -> ``i``: run the provider's interactive login."""
+        self._run_calsync("login", "Opening login...")
+
+    def action_calsync_logout(self) -> None:
+        """``C`` -> ``o``: clear the cached provider token."""
+        self._run_calsync("logout", "Clearing calendar token...")
+
+    def action_calsync_resolve(self) -> None:
+        """``C`` -> ``r``: resolve the selected task's sync conflict.
+
+        Opens the keep-local/remote/both dialog for the currently selected
+        task when it carries an unresolved ``_sync.conflict`` stash, then
+        applies the choice through the shared
+        :func:`doxtr_doto.calsync.resolve.resolve_conflict` helper (the same
+        path as ``doto calsync resolve``) and clears the flag. A no-op (with a
+        hint) when the selection has no recorded conflict.
+        """
+        from doxtr_doto.calsync.resolve import (
+            ResolutionChoice,
+            conflict_fields,
+            resolve_conflict,
+        )
+
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        task = actions.find_task(self.ctx, self._action_ref(selected))
+        if task is None:
+            return
+        task_dict = {"id": selected, **task}
+        records = conflict_fields(task_dict)
+        if not records:
+            self.notify(
+                f"{selected} has no unresolved sync conflict.",
+                title="Calendar sync",
+                severity="information",
+            )
+            return
+
+        def _apply(choice: str | None) -> None:
+            if choice is None:
+                return
+            try:
+                updates = resolve_conflict(task_dict, ResolutionChoice(choice))
+            except ValueError as exc:  # pragma: no cover - defensive
+                self.notify(str(exc), title="Calendar sync", severity="error")
+                return
+            if actions.update_task(self.ctx, self._action_ref(selected), updates):
+                self.notify(f"Resolved {selected} -> kept {choice}.", title="Calendar sync")
+                self.refresh_tasks()
+                self.refresh_details()
+
+        self.push_screen(
+            self.conflict_resolve_screen_class(
+                selected,
+                records,
+                width_percent=actions.modal_width_percent(self.modal_width_ratio),
+            ),
+            _apply,
+        )
+
+    def _run_calsync(self, op: str, pending: str, *, refresh_after: bool = False) -> None:
+        """Post a pending toast and dispatch the calsync ``op`` to a worker.
+
+        Args:
+            op: The :mod:`calsync_tui` function name to invoke
+                (``sync``/``push``/``pull``/``login``/``logout``).
+            pending: A short "working..." notification shown immediately so a
+                slow network call still gives feedback.
+            refresh_after: When True (pull), reload the task list on success so
+                freshly imported/updated tasks appear without a manual rescan.
+        """
+        self.notify(pending, title="Calendar sync")
+        self._calsync_worker(op, refresh_after)
+
+    @work(thread=True, exclusive=True, group="calsync")
+    def _calsync_worker(self, op: str, refresh_after: bool) -> None:
+        """Thread worker: run the blocking calsync op, then notify on the UI thread.
+
+        Exclusive within the ``calsync`` group so a second trigger while a sync
+        is in flight supersedes the first rather than running two concurrent
+        provider sessions against the same calendar/state.
+        """
+        fn = getattr(calsync_tui, op)
+        try:
+            outcome = fn(self.ctx)
+        except Exception as exc:  # defensive: surface, don't crash the worker
+            self.call_from_thread(self.notify, str(exc), title="Calendar sync", severity="error")
+            return
+        self.call_from_thread(
+            self.notify,
+            outcome.message,
+            title=outcome.title,
+            severity="information" if outcome.ok else "error",
+        )
+        if refresh_after and outcome.ok:
+            self.call_from_thread(self._reload_after_calsync)
+
+    @work(thread=True, exclusive=True, group="calsync")
+    def _calsync_sync_worker(self, scope: Any, repo_filter: tuple[str, ...]) -> None:
+        """Thread worker for ``C s``: sync every displayed calendar-enabled repo.
+
+        Shares the ``calsync`` exclusive group with :meth:`_calsync_worker` so a
+        sync never runs concurrently with another calendar operation. Scope and
+        repo filter are captured on the UI thread and passed in. Refreshes the
+        task view on success (pull/two-way may have imported tasks).
+        """
+        try:
+            outcome = calsync_tui.sync_displayed(self.ctx, scope=scope, repo_filter=repo_filter)
+        except Exception as exc:  # defensive: surface, don't crash the worker
+            self.call_from_thread(self.notify, str(exc), title="Calendar sync", severity="error")
+            return
+        self.call_from_thread(
+            self.notify,
+            outcome.message,
+            title=outcome.title,
+            severity="information" if outcome.ok else "error",
+        )
+        if outcome.ok:
+            self.call_from_thread(self._reload_after_calsync)
+
+    def _reload_after_calsync(self) -> None:
+        """Reload the task view after a pull imported/updated tasks.
+
+        The worker mutates and saves ``ctx.store`` in place, so the task set
+        the view gathers is already current; rebuilding the active layout picks
+        up the imported/updated rows without a manual rescan.
+        """
+        self.refresh_tasks()
 
     def action_manage_work_time(self) -> None:
         """Open the work-time interval manager for today."""
@@ -4549,8 +7800,13 @@ class DotoApp(App[None]):
     def action_add(self) -> None:
         """Open the add-task modal and create the task on submit.
 
-        The modal lets the user choose the target repository (defaulting to
-        the current repo). The chosen repo is passed through to
+        The modal is field-configurable (see :class:`AddTaskScreen`): this
+        forwards the active config (so ``tui_add_fields`` / ``tui_add_defaults``
+        select which fields show and their prefills), the configured statuses /
+        priorities (for the select fields) and the cross-repo known assignee /
+        tag names (for auto-complete). The user can also choose the target
+        repository (defaulting to the current repo). On submit every collected
+        field on the :class:`AddTaskResult` is forwarded to
         :func:`doxtr_doto.cli.tui.actions.add_task`, and the notification names
         the repo when it differs from the current one.
         """
@@ -4559,15 +7815,150 @@ class DotoApp(App[None]):
         def _created(result: AddTaskResult | None) -> None:
             if result is None:
                 return
-            task_id = actions.add_task(self.ctx, result.title, repo=result.repo)
+            from doxtr_doto.exceptions import DotoValidationError
+
+            try:
+                task_id = actions.add_task(
+                    self.ctx,
+                    result.title,
+                    priority=result.priority,
+                    status=result.status,
+                    assignee=result.assignee,
+                    tags=result.tags,
+                    due=result.due,
+                    estimate=result.estimate,
+                    depends_on=result.depends_on,
+                    body=result.body,
+                    progress=result.progress,
+                    raci=result.raci,
+                    repo=result.repo,
+                )
+            except DotoValidationError as exc:
+                self.notify(str(exc), severity="error")
+                return
             if result.repo.path == current.path:
+                # ``add_task`` writes through a store instance resolved for the
+                # target repo; for the *current* repo that is a distinct
+                # instance from ``ctx.store``, whose in-memory cache would
+                # otherwise stay stale and hide the new task in LOCAL scope
+                # (GLOBAL re-reads each repo from disk). Reload so the task is
+                # present for the refresh - and selectable below. Mirrors the
+                # reload discipline in :func:`actions.toggle_timer` (reused by
+                # :func:`actions.start_work`), which reloads the resolved
+                # store before acting to keep its decision off a stale cache.
+                self.ctx.store.load()
                 self.notify(f"Added {task_id}.")
             else:
                 self.notify(f"Added {task_id} in {result.repo.name}.")
             self.refresh_tasks()
+            # Auto-select the freshly created task so its row is highlighted
+            # and scrolled into view (config-gated, default on). Selecting via
+            # the overridable :meth:`select_task` seam reuses each view's
+            # existing cursor-move / smart-scroll path; the alt-view render is
+            # rebuilt a second time afterwards (``refresh_tasks`` already
+            # rebuilt it once) because ``select_task`` mutates each alt-view's
+            # cursor state *after* that refresh-driven rebuild, so the views
+            # need a fresh rebuild to paint the new highlight (the TABLE path
+            # repaints itself through the DataTable RowHighlighted message).
+            if self.ctx.config.tui_auto_select_new_task and self.select_task(task_id):
+                if self._active_view() is not None:
+                    self._rebuild_alt_views()
+                    self.refresh_details()
+                    self.refresh_task_time()
 
         self.push_screen(
-            self.add_task_screen_class(data.list_repos(self.ctx), current),
+            self.add_task_screen_class(
+                data.list_repos(self.ctx),
+                current,
+                config=self.ctx.config,
+                statuses=list(self.ctx.config.statuses),
+                priorities=list(self.ctx.config.priorities),
+                known_assignees=known_assignee_names(self.ctx),
+                known_tags=known_tag_names(self.ctx),
+            ),
+            _created,
+        )
+
+    def action_add_series(self) -> None:
+        """Open the add-series dialog and create the series on submit.
+
+        Mirrors :meth:`action_add` for recurring series: the dialog collects a
+        recurrence pattern (with dedicated ``at`` / ``for`` start-time /
+        duration fields), from/until dates and the target repository. On
+        submit the validated :class:`AddSeriesResult` is turned into a parsed
+        pattern + task defaults and handed to
+        :func:`doxtr_doto.cli.tui.actions.add_series` -- the SAME reusable
+        builder the CLI ``doto add --repeat`` path uses -- so the TUI never
+        duplicates the occurrence/series-building code. The occurrence limit is
+        enforced here (as in the CLI) before building, and the notification
+        names the repo when it differs from the current one.
+        """
+        from doxtr_doto.cli.commands.add import MAX_OCCURRENCES
+        from doxtr_doto.cli.recurrence import generate_occurrences, parse_recurrence
+
+        current = data.current_repo(self.ctx)
+
+        def _created(result: AddSeriesResult | None) -> None:
+            if result is None:
+                return
+            # Parse once more here (the dialog already validated it, so this
+            # cannot fail) to get the structured pattern for the builder.
+            pattern = parse_recurrence(result.pattern_str)
+
+            # Enforce the occurrence limit before building, mirroring the CLI.
+            config = self.ctx.config
+            max_occurrences = getattr(config, "max_occurrences", MAX_OCCURRENCES)
+            occurrences = list(generate_occurrences(pattern, result.from_date, result.until_date))
+            if not occurrences:
+                self.notify(
+                    "No occurrences for the given pattern and date range.",
+                    title="No series created",
+                    severity="warning",
+                )
+                return
+            if len(occurrences) > max_occurrences:
+                self.notify(
+                    f"Would create {len(occurrences)} tasks (limit: {max_occurrences}).",
+                    title="Series too large",
+                    severity="error",
+                )
+                return
+
+            task_defaults: dict[str, Any] = {
+                "assignee": config.default_assignee or None,
+                "priority": config.default_priority,
+                "status": config.default_status,
+                "tags": [],
+                "depends_on": [],
+                "body": None,
+            }
+            series = actions.add_series(
+                self.ctx,
+                title_template=result.title,
+                pattern=pattern,
+                start_date=result.from_date,
+                end_date=result.until_date,
+                task_defaults=task_defaults,
+                repo=result.repo,
+            )
+            if result.repo.path == current.path:
+                # Reload the current repo's store so the freshly created tasks
+                # are present for the refresh (mirrors ``action_add``).
+                self.ctx.store.load()
+                self.notify(f"Created series {series.series_id} ({series.occurrence_count} tasks).")
+            else:
+                self.notify(
+                    f"Created series {series.series_id} "
+                    f"({series.occurrence_count} tasks) in {result.repo.name}."
+                )
+            self.refresh_tasks()
+
+        self.push_screen(
+            self.add_series_screen_class(
+                data.list_repos(self.ctx),
+                current,
+                width_percent=actions.modal_width_percent(self.modal_width_ratio),
+            ),
             _created,
         )
 
@@ -4609,6 +8000,7 @@ class DotoApp(App[None]):
                 known_tag_names(self.ctx),
                 list(self.ctx.config.priorities),
                 [repo.name for repo in data.list_repos(self.ctx)],
+                int(getattr(self.ctx.config, "tui_recent_done_days", 10)),
             ),
             _apply,
         )
@@ -4628,7 +8020,7 @@ class DotoApp(App[None]):
 
     def action_help(self) -> None:
         """Show the top-level keybinding help router modal."""
-        self.push_screen(self.help_screen_class())
+        self.push_screen(self.help_screen_class(self.keymap))
 
 
 #: The stream-keymap registry: the single source of truth driving the
@@ -4642,6 +8034,25 @@ class DotoApp(App[None]):
 #: dispatcher rather than stored per row. Mirrors the ``ALT_LAYOUTS``
 #: discipline.
 KEYMAP: dict[str, DomainSpec] = {
+    "e": DomainSpec(
+        "Edit",
+        "task",
+        lambda app: [
+            KeyEntry("e", "edit", "Edit entry"),
+            KeyEntry("d", "delete_task", "Delete entry"),
+            KeyEntry("P", "set_parent", "Set parent…"),
+            *(
+                [
+                    KeyEntry("E", "edit_series", "Edit series (from here forward)"),
+                    KeyEntry("D", "delete_series", "Delete series"),
+                    KeyEntry("n", "series_next", "Next in series"),
+                    KeyEntry("p", "series_prev", "Prev in series"),
+                ]
+                if app._selected_is_series_member()
+                else []
+            ),
+        ],
+    ),
     "s": DomainSpec(
         "State",
         "task",
@@ -4666,6 +8077,8 @@ KEYMAP: dict[str, DomainSpec] = {
         "global",
         lambda app: [
             KeyEntry("b", "configure_breaks", "Breaks + week"),
+            KeyEntry("d", "configure_detail_ratio", "Detail size"),
+            KeyEntry("m", "configure_modal_width", "Pop-up width"),
         ],
     ),
     "S": DomainSpec(
@@ -4676,4 +8089,23 @@ KEYMAP: dict[str, DomainSpec] = {
             KeyEntry("t", "task_time_stats", "Per-doto time"),
         ],
     ),
+    "C": DomainSpec(
+        "Calendar Sync",
+        "global",
+        lambda app: [
+            KeyEntry("s", "calsync_sync", "Sync (per direction)"),
+            KeyEntry("p", "calsync_push", "Push -> calendar"),
+            KeyEntry("l", "calsync_pull", "Pull <- calendar"),
+            KeyEntry("t", "calsync_status", "Status / plan"),
+            KeyEntry("r", "calsync_resolve", "Resolve conflict"),
+            KeyEntry("i", "calsync_login", "Login"),
+            KeyEntry("o", "calsync_logout", "Logout"),
+        ],
+    ),
 }
+
+# Bind the module-level registry as the default :attr:`DotoApp.keymap` now that
+# KEYMAP exists (it is declared below the class, so the class body only
+# annotates the attribute). A child theme overrides ``keymap`` on its subclass;
+# the dispatcher / hint bar / help screens all read ``self.keymap``.
+DotoApp.keymap = KEYMAP

@@ -800,6 +800,141 @@ class TestGatherAndRepoFilter:
         assert mis.repo != "repoB"
         assert mis.store.get_task("B-001") is None
 
+    def test_edit_sessions_passes_canonical_ref_for_foreign_task(self, tmp_path, env):
+        # Regression: ``t e`` Edit Sessions must open the session editor with
+        # an unambiguous ref. For a FOREIGN repo's task whose base prefix is
+        # unique in GLOBAL scope, the display id is bare (repoB#B-001 -> B-001),
+        # so forwarding it raw would misresolve to the current repo's store and
+        # show ``(no sessions)``. The action must route through _action_ref and
+        # pass the canonical ``repo#id`` instead.
+        from doxtr_doto.cli.id_resolver import resolve_task_ref
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        ctx = self._two_repo_ctx(tmp_path, env)
+        tasks = data.gather_tasks(ctx, DisplayScope.GLOBAL)
+        foreign = next(t for t in tasks if t["_repo"] == "repoB")
+        assert foreign["id"] == "B-001"  # bare display id (unique base)
+
+        app = DotoApp(ctx)
+        app._tasks = tasks
+        # Simulate the foreign task being the current selection.
+        app._current_selected_id = lambda: foreign["id"]  # type: ignore[assignment]
+
+        captured: list[str] = []
+
+        def _fake_screen_class(_ctx, task_ref):
+            captured.append(task_ref)
+            return object()
+
+        app.task_sessions_screen_class = _fake_screen_class  # type: ignore[assignment]
+        app.push_screen = lambda *_a, **_k: None  # type: ignore[assignment]
+
+        app.action_edit_sessions()
+
+        assert captured == ["repoB#B-001"]
+        resolved = resolve_task_ref(ctx, captured[0])
+        assert resolved is not None
+        assert resolved.repo == "repoB"
+        assert resolved.store.get_task("B-001") is not None
+
+    def _current_repo_ctx(self, tmp_path, env):
+        """Return a ctx whose CURRENT repo IS the owning repo of its task.
+
+        Unlike :meth:`_two_repo_ctx` (where the current repo derives to the
+        real checkout dir and every gathered task is therefore foreign), this
+        pins ``config.source_dir`` to the owning repo so
+        :func:`doxtr_doto.cli.tui.data.current_repo_name` returns ``repoA``.
+        That makes ``_action_ref`` take its current-repo branch and return the
+        BARE local id, which is what we need to exercise here.
+
+        Both repos use the SAME base prefix (``SHARED``) so that in GLOBAL
+        scope :func:`doxtr_doto.cli.display.apply_scope` NAMESPACES the display
+        id of the current repo's task (``repoA#SHARED-001``). This is what makes
+        the current-repo test discriminating: the display id differs from the
+        bare id that ``_action_ref`` returns, so forwarding the raw display id
+        (the reverted-fix behavior) would be observably wrong.
+        """
+        from doxtr_doto.cli.repo_registry import RepoRegistry
+
+        root = tmp_path / "workspace"
+        for name, task_id in (("repoA", "SHARED-001"), ("repoB", "SHARED-002")):
+            store_path = root / name / ".doto" / "tasks.json"
+            store_path.parent.mkdir(parents=True)
+            store_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "updated": "2024-01-01T00:00:00",
+                        "tasks": {
+                            task_id: {
+                                "title": f"{name} task",
+                                "status": "open",
+                                "priority": "medium",
+                                "tags": [],
+                                "worklogs": [],
+                            }
+                        },
+                        "series": {},
+                    }
+                )
+            )
+        config = load_config(json_path=root / "repoA" / ".doto" / "tasks.json")
+        # Pin the current repo to repoA so it is NOT treated as foreign.
+        config.source_dir = root / "repoA"
+        ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        RepoRegistry(ctx.global_store).rescan(root)
+        return ctx
+
+    def test_edit_sessions_passes_bare_ref_for_current_repo_task(self, tmp_path, env):
+        # Same-repo behavior: for a task owned by the CURRENT repo,
+        # _action_ref takes its current-repo branch and returns the BARE local
+        # id, which resolves against ctx.store directly. Because both repos
+        # share the ``SHARED`` base prefix, the GLOBAL display id of the current
+        # repo's task is NAMESPACED (``repoA#SHARED-001``); the action must
+        # still forward the BARE ``SHARED-001`` (what _action_ref returns), not
+        # the raw display id. This is the genuine bare-id arm the foreign-task
+        # test does not reach, and it is discriminating: forwarding the raw
+        # display id would pass ``repoA#SHARED-001`` and fail the bare-id
+        # assertion.
+        from doxtr_doto.cli.id_resolver import resolve_task_ref
+        from doxtr_doto.cli.tui.app import DotoApp
+
+        ctx = self._current_repo_ctx(tmp_path, env)
+        assert data.current_repo_name(ctx) == "repoA"
+        tasks = data.gather_tasks(ctx, DisplayScope.GLOBAL)
+        current = next(t for t in tasks if t["_repo"] == "repoA")
+        # Shared base prefix forces the display id to be namespaced.
+        assert current["id"] == "repoA#SHARED-001"
+        assert current["_local_id"] == "SHARED-001"
+
+        app = DotoApp(ctx)
+        app._tasks = tasks
+        app._current_selected_id = lambda: current["id"]  # type: ignore[assignment]
+
+        captured: list[str] = []
+
+        def _fake_screen_class(_ctx, task_ref):
+            captured.append(task_ref)
+            return object()
+
+        app.task_sessions_screen_class = _fake_screen_class  # type: ignore[assignment]
+        app.push_screen = lambda *_a, **_k: None  # type: ignore[assignment]
+
+        app.action_edit_sessions()
+
+        # The forwarded ref is BARE for a current-repo task (no namespacing),
+        # even though the display id was namespaced.
+        assert captured == ["SHARED-001"]
+        assert "#" not in captured[0]
+        resolved = resolve_task_ref(ctx, captured[0])
+        assert resolved is not None
+        assert resolved.store.get_task("SHARED-001") is not None
+
 
 class TestCrossRepoSuggestions:
     """known_assignee_names / known_tag_names aggregate across all repos.

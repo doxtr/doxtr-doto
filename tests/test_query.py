@@ -512,3 +512,44 @@ class TestFilterTasksIntegration:
         d = DisplayOptions(limit=10)
         result = filter_tasks(tasks, f, d)
         assert result == []
+
+    def test_filter_cache_survives_tasks_id_reuse(self) -> None:
+        """Cached results must not leak across distinct task dicts.
+
+        ``filter_tasks`` keys its per-call cache on ``id(tasks)``. Python
+        recycles ``id()`` values after an object is garbage-collected, so a
+        short-lived task dict whose cache entry outlived it used to let an
+        unrelated, newly allocated dict reuse that id and receive the stale
+        cached result. This reproduced as an empty dict returning a previously
+        cached non-empty list under adverse allocation ordering (observed on
+        CI's Python 3.10 matrix job).
+
+        The fix pins every cached ``tasks`` dict in a keepalive map so its id()
+        cannot be recycled while the entry is live. We assert that: (a) a dict
+        passed to filter_tasks is held strongly (so its id stays reserved),
+        and (b) the pin is released on cache invalidation.
+        """
+        from doxtr_doto.collectors import (
+            DotoTask,
+            _filter_cache_keepalive,
+            filter_tasks,
+            invalidate_filter_cache,
+        )
+
+        invalidate_filter_cache()
+        f = TaskFilter(status=["open"])
+
+        populated = {"TASK-001": DotoTask(id="TASK-001", title="T1", status="Open")}
+        tasks_id = id(populated)
+
+        result = filter_tasks(populated, f)
+        assert [t.id for t in result] == ["TASK-001"]
+
+        # The dict is pinned (by identity) under its id, so the id cannot be
+        # recycled by a different live object while the cache entry exists.
+        assert tasks_id in _filter_cache_keepalive
+        assert _filter_cache_keepalive[tasks_id] is populated
+
+        # Invalidation releases the pin so the id may be recycled again.
+        invalidate_filter_cache()
+        assert tasks_id not in _filter_cache_keepalive

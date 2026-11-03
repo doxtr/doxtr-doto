@@ -7777,12 +7777,19 @@ class DotoApp(App[None]):
         Reachable from the task-centric layouts (table / list / kanban /
         calendar), where :meth:`_current_selected_id` resolves to a task id;
         it is a harmless no-op in the ``time`` layout (whose selection is a
-        day, not a doto) and when nothing is selectable. The selected id (a
-        bare ``id`` or namespaced ``repo#id``) is passed to
-        :attr:`task_sessions_screen_class`, which resolves the owning repo
-        store and edits that single doto's recorded sessions; on close the
+        day, not a doto) and when nothing is selectable. The selected display
+        id is routed through :meth:`_action_ref` (like every other mutating
+        action) to produce an unambiguous ref: a bare ``id`` for current-repo
+        tasks and a canonical ``repo#id`` for foreign-repo tasks. That ref is
+        passed to :attr:`task_sessions_screen_class`, which resolves the owning
+        repo store and edits that single doto's recorded sessions; on close the
         task set and live counters are refreshed so the new per-task totals
         show immediately.
+
+        Do not pass the raw display id here: in GLOBAL scope
+        :func:`doxtr_doto.cli.display.apply_scope` leaves a foreign-repo id
+        bare when its base prefix is unique, which would misresolve against the
+        current repo's store and show an empty session list.
         """
         if self.layout_view is TuiLayout.TIME:
             return
@@ -7795,7 +7802,10 @@ class DotoApp(App[None]):
             self.refresh_task_time()
             self.refresh_counters()
 
-        self.push_screen(self.task_sessions_screen_class(self.ctx, selected), _done)
+        self.push_screen(
+            self.task_sessions_screen_class(self.ctx, self._action_ref(selected)),
+            _done,
+        )
 
     def action_add(self) -> None:
         """Open the add-task modal and create the task on submit.

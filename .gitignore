@@ -78,8 +78,15 @@ test_harness/source/_static/wizard-of-docs*.png
 
 # doto remembered-names cache (derived; safe to delete)
 .doto/known_names.json
+**/.doto/known_names.json
+
+# doto machine-local global state (repo registry, favorites, work clock, TUI
+# prefs); per-machine runtime, never committed
+.doto/config.json
+**/.doto/config.json
 
 # doto calendar-sync local config + secrets (never commit)
 .doto.toml
 .doto/calsync.json
+**/.doto/calsync.json
 client_secret_*.json

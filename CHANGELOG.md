@@ -13,6 +13,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [0.3.1] - 2026-11-03
+
+### Fixed
+
+#### TUI `t e` Edit Sessions resolves the owning repo for cross-repo tasks
+- Fixed a bug where opening the per-task session editor (`t e`) on a task that
+  lives in a different repo than the current working directory, but whose base
+  prefix is unique across the aggregated (GLOBAL) view, showed `(no sessions)`
+  and silently added / edited / deleted sessions against the wrong (empty)
+  store. In GLOBAL scope such a task is displayed with a bare id, and
+  `action_edit_sessions` forwarded that bare id straight to the session screen,
+  which then misresolved it against the current repo's store. The action now
+  routes the selection through `_action_ref` (as every other mutating action
+  already does), producing a canonical `repo#id` for foreign-repo tasks so the
+  editor opens against the owning repo's store. Same-repo behavior is
+  unchanged.
+
+#### `filter_tasks` result cache no longer leaks across task sets on `id()` reuse
+- Fixed a latent correctness bug in the `filter_tasks` result cache. The cache
+  key embedded `id(tasks)` to distinguish different task dictionaries, but
+  Python recycles `id()` values after an object is garbage-collected. Under
+  adverse allocation ordering a short-lived task dict whose cache entry
+  outlived it let an unrelated, newly allocated dict reuse that id and receive
+  the stale cached result (e.g. an empty task set returning a previously cached
+  non-empty list). The cache now pins each keyed dict in a keepalive map for
+  the lifetime of its entry, so no two live dicts can share an id; the pins are
+  released together with the cache in `invalidate_filter_cache`. Surfaced as a
+  flaky `test_filter_tasks_empty_tasks_dict` on the Python 3.10 CI matrix job.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added

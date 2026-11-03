@@ -486,6 +486,16 @@ def merge_doto_data(
 # Module-level cache for filter_tasks results
 # Keyed on (tasks dict id, frozen filter state, frozen display state)
 _filter_cache: dict[tuple[Any, ...], list[DotoTask]] = {}
+# Strong references to every ``tasks`` dict currently keyed in ``_filter_cache``.
+#
+# The cache key embeds ``id(tasks)`` to distinguish different task dictionaries.
+# Python recycles ``id()`` values once an object is garbage-collected, so a
+# short-lived ``tasks`` dict whose cache entry outlives it would let an
+# unrelated, newly allocated dict reuse that id and receive the stale cached
+# result. Pinning each keyed dict here keeps its id live for as long as the
+# entry exists, making id-based keying collision-free. Cleared together with
+# ``_filter_cache`` in :func:`invalidate_filter_cache`.
+_filter_cache_keepalive: dict[int, dict[str, DotoTask]] = {}
 
 
 def _make_filter_cache_key(
@@ -540,6 +550,9 @@ def invalidate_filter_cache() -> None:
     - merge_doto_data() event handler
     """
     _filter_cache.clear()
+    # Drop the pinned task dicts too; their ids may now be recycled freely
+    # because no cache entry references them any longer.
+    _filter_cache_keepalive.clear()
 
 
 def filter_tasks(
@@ -587,15 +600,18 @@ def filter_tasks(
         display = DisplayOptions.from_dict(display)
 
     # Check cache
-    cache_key = _make_filter_cache_key(id(tasks), filters, display)
+    tasks_id = id(tasks)
+    cache_key = _make_filter_cache_key(tasks_id, filters, display)
     if cache_key in _filter_cache:
         return _filter_cache[cache_key]
 
     # Perform actual filtering
     result = _filter_tasks_impl(tasks, filters, display, regex_compiled)
 
-    # Store in cache
+    # Store in cache. Pin the tasks dict so its id() cannot be recycled by a
+    # different object while this entry is live (see _filter_cache_keepalive).
     _filter_cache[cache_key] = result
+    _filter_cache_keepalive[tasks_id] = tasks
     return result
 
 

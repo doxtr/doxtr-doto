@@ -13,6 +13,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [0.4.0] - 2026-11-23
+
+### Added
+
+#### Add sub-task under selected task (`e a` in TUI, `doto add --parent` / `-P` in CLI)
+- Pressing **`e a`** in `doto tui` (from any task view — table, kanban,
+  calendar) opens the add-task modal with the currently selected task locked in
+  as the new task's `parent`, targeting the parent's repository (including
+  foreign repositories in Global scope), automatically expanding a collapsed
+  parent row, and auto-selecting the freshly created sub-task.
+- `AddTaskScreen` now focuses the first editable field on mount (both minimal
+  and multi-field `tui_add_fields` layouts) so users can start typing
+  immediately.
+- Added **`--parent` / `-P`** to `doto add` (supporting bare local IDs and
+  namespaced `repo#id` references with task-ID shell completion), validating
+  that the parent exists in the target repository and rejecting `--parent`
+  combined with `--repeat` or self-parenting. Task detail output now renders
+  the `Parent:` field when present.
+
+#### TUI clock-in (`t i`), stale-session recovery & session audit (`t a`)
+- Added **`t i`** (Time → Clock in) in the TUI as the counterpart to `t o`
+  (Clock out), reusing `doto start`'s `clock_in_work` helper.
+- Added stale open work-clock session recovery and bounds so a forgotten
+  clock-out from prior days does not inflate overtime, surfaced via `t a`
+  (Session audit) in the TUI, a `since HH:MM` / prior-day indicator on the
+  status line, and long-session warnings in `doto report` (text + JSON).
+
+#### Sick days & holidays for time recording (overtime + leave tracking)
+- Added recorded **leave days** (holidays and sick days) to the work-clock
+  layer. A leave day credits its fraction of the day's expected working time
+  so a day off reads as neither overtime nor a shortfall, and holidays draw
+  down a configurable yearly allowance.
+- New configuration for the expected working-**day** and -**week** length and
+  the yearly **holiday allowance**, settable from the CLI
+  (`doto config --set-day-length 8h24m`, `--set-week-length 40h`,
+  `--set-holiday-allowance 27.5`) and the TUI breaks/work configurator (the
+  `c` config stream). Day/week lengths accept both decimal-hours notation
+  (`40h`, `8.4h`, `7.5h`) and an hour+minute form (`8h24m`); a bare number is
+  read as decimal hours. A blank/`none` week length derives the week target
+  from the day length x work-week days. Stored in the global config file
+  alongside the work clock, breaks, and work week.
+- New `doto leave` command group to record and manage leave: `leave add`
+  (a single day or an inclusive `--to` range, `--kind holiday|sick`, `--half`
+  for half days, `--note`, `--include-weekends`), `leave list`
+  (`--year`/`--kind` filters, with allowance drawdown), and `leave remove`.
+  Dates accept the same relative expressions as `doto add`.
+- `doto report` now shows an **"Overtime & leave"** block: expected working
+  time for the period's work-week days, net worked time plus leave credit, the
+  resulting overtime/shortfall (signed), and the holiday-allowance drawdown
+  (allowance / used / remaining) plus sick days. Mirrored in the JSON output
+  (`overtime` and `holidays` keys).
+- The `time` TUI layout's summary panel gained **Overtime (week)** and
+  **Holidays (year)** blocks (overridable `format_overtime` / `format_holidays`
+  seams), computed from the same work-length and leave settings.
+- `doto leave remove` accepts a `--to` end date to delete an inclusive range
+  of recorded leave (mirroring `leave add`), optionally narrowed by `--kind`.
+- **TUI leave entry**: the Config stream `c l` opens a modal to record a new
+  holiday / sick period from the TUI (start date, optional end date, kind,
+  half-day, note), applied through the shared
+  `doxtr_doto.cli.global_state.apply_leave_range` helper so the dedupe /
+  weekend-skip rules match `doto leave add`.
+- **Leave visualization in the time stats views**: the `time` layout's day
+  list shows a green **Holiday** / yellow **Sick day** marker (leave-only
+  days appear even with no clocked time), and the work-statistics pop-up
+  (`S w`) gained an **Overtime & leave** block listing the period's recorded
+  leave alongside the signed overtime. Backed by the new pure helpers
+  `doxtr_doto.cli.global_state.apply_leave_range` / `leave_days_in_range`,
+  `TimeView.format_leave_marker`, and `WorkStatsScreen.format_leave_block`.
+- **Next-leave in the top status bar**: the TUI top bar now shows the next
+  current/upcoming leave period on the left (kind, date or date range, a
+  relative `in N days` / `today` / `ends in N days` hint, and the note), via
+  the new overridable `NextHolidayLine` widget. Refreshed on the live counter
+  timer and immediately after recording leave. Backed by the new pure helpers
+  `doxtr_doto.cli.global_state.group_leave_periods` / `next_leave_period`
+  (with a `LeavePeriod` dataclass) and `NextHolidayLine.format_next_holiday`.
+- New pure helpers back all of the above:
+  `doxtr_doto.date_utils.parse_work_length` / `format_work_length`,
+  `doxtr_doto.work_report.compute_overtime` / `expected_day_seconds` /
+  `holiday_days_used` (with `LeaveSpec` / `OvertimePeriod`), and
+  `doxtr_doto.cli.global_state.LeaveEntry`.
+
+### Changed
+- Removed the redundant legacy TUI `list` layout view (cycling with `v` / `V`
+  now moves across `table → kanban → calendar → time`; persisted `list` values
+  gracefully fall back to `table`).
+
+### Fixed
+
 ## [0.3.1] - 2026-11-03
 
 ### Fixed

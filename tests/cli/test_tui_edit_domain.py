@@ -171,6 +171,7 @@ class TestSeriesMemberMenu:
                 entries = KEYMAP["e"].entries_fn(app)
                 actions_present = {e.action for e in entries}
                 assert "edit" in actions_present
+                assert "add_subtask" in actions_present
                 assert "delete_task" in actions_present
                 assert "edit_series" not in actions_present
                 assert "delete_series" not in actions_present
@@ -504,3 +505,308 @@ class TestConfirmScreen:
 
         _run(body())
         assert results == [ConfirmResult.KEEP_TASKS]
+
+
+# ---------------------------------------------------------------------------
+# e a: add sub-task under selected task (all views + cross-repo + collapsed)
+# ---------------------------------------------------------------------------
+class TestAddSubtask:
+    def test_e_a_creates_subtask_with_parent_in_table_view(self, ctx, store_file):
+        """Pressing 'e a' on T-001 creates a new task with parent='T-001'."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                _select(app, "T-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                assert app.screen.parent_label == "T-001"
+                # First field is immediately focused so typing starts right away.
+                assert app.screen.focused is not None
+                assert app.screen.focused.id == "add-input"
+                for ch in "Child of T-001":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return app._current_selected_id()
+
+        selected_after = _run(body())
+        tasks = _load(store_file)["tasks"]
+        child_id = next(tid for tid, t in tasks.items() if t["title"] == "Child of T-001")
+        assert tasks[child_id]["parent"] == "T-001"
+        assert selected_after == child_id
+
+    def test_e_a_works_in_calendar_view(self, ctx, store_file):
+        """Pressing 'e a' in calendar view creates a sub-task of the highlighted task."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+        from doxtr_doto.enums import TuiLayout
+
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.layout_mode = TuiLayout.CALENDAR
+                app.apply_layout()
+                app.refresh_tasks()
+                await pilot.pause()
+                assert app.select_task("T-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "Calendar child":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+
+        _run(body())
+        tasks = _load(store_file)["tasks"]
+        child = next(t for t in tasks.values() if t["title"] == "Calendar child")
+        assert child["parent"] == "T-001"
+
+    def test_e_a_works_in_kanban_view(self, ctx, store_file):
+        """Pressing 'e a' in kanban view creates a sub-task of the highlighted card."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+        from doxtr_doto.enums import TuiLayout
+
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.layout_mode = TuiLayout.KANBAN
+                app.apply_layout()
+                app.refresh_tasks()
+                await pilot.pause()
+                assert app.select_task("T-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "Kanban child":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+
+        _run(body())
+        tasks = _load(store_file)["tasks"]
+        child = next(t for t in tasks.values() if t["title"] == "Kanban child")
+        assert child["parent"] == "T-001"
+
+    def test_e_a_expands_collapsed_parent_on_create(self, ctx, store_file):
+        """Adding a sub-task to a collapsed parent expands it so the child shows."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                _select(app, "T-001")
+                app._collapsed_ids.add("T-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                for ch in "Expanded child":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return "T-001" in app._collapsed_ids, app._current_selected_id()
+
+        still_collapsed, selected = _run(body())
+        tasks = _load(store_file)["tasks"]
+        child_id = next(tid for tid, t in tasks.items() if t["title"] == "Expanded child")
+        assert not still_collapsed
+        assert tasks[child_id]["parent"] == "T-001"
+        assert selected == child_id
+
+    def test_e_a_escape_cancels_without_creating(self, ctx, store_file):
+        """Pressing Escape in the 'e a' modal cancels without modifying the store."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        before = set(_load(store_file)["tasks"].keys())
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                _select(app, "T-001")
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+
+        _run(body())
+        assert set(_load(store_file)["tasks"].keys()) == before
+
+    def test_e_a_noop_when_no_selection(self, tmp_path, env):
+        """With an empty store, 'e a' is a no-op and opens no modal."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        store_path = tmp_path / "empty" / ".doto" / "tasks.json"
+        store_path.parent.mkdir(parents=True)
+        store_path.write_text(
+            json.dumps({"version": 5, "updated": "2024-01-01T00:00:00", "tasks": {}, "series": {}})
+        )
+        config = load_config(json_path=store_path)
+        empty_ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        app = _app(empty_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert not isinstance(app.screen, AddTaskScreen)
+
+        _run(body())
+
+    def test_e_a_in_global_scope_creates_subtask_in_foreign_repo(self, tmp_path, env, store_file):
+        """In GLOBAL scope, 'e a' on a foreign-repo task creates the child in THAT repo."""
+        from doxtr_doto.cli.display import DisplayScope
+        from doxtr_doto.cli.repo_registry import RepoRegistry
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        other_store = tmp_path / "repoB" / ".doto" / "tasks.json"
+        other_store.parent.mkdir(parents=True)
+        other_store.write_text(
+            json.dumps(
+                {
+                    "version": 5,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {
+                        "B-001": {
+                            "title": "Foreign parent",
+                            "status": "open",
+                            "priority": "medium",
+                            "tags": [],
+                            "worklogs": [],
+                        }
+                    },
+                    "series": {},
+                }
+            )
+        )
+        config = load_config(json_path=store_file)
+        multi_ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        RepoRegistry(multi_ctx.global_store).rescan(tmp_path)
+        app = _app(multi_ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.scope = DisplayScope.GLOBAL
+                app.refresh_tasks()
+                await pilot.pause()
+                assert app.select_task("B-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                # Repo selector is hidden because a child always lives in its parent's repo.
+                assert list(app.screen.query("#add-repo")) == []
+                for ch in "Foreign child":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+
+        _run(body())
+        # Created in repoB with parent="B-001"; repoA is untouched.
+        foreign_tasks = _load(other_store)["tasks"]
+        child_id = next(tid for tid, t in foreign_tasks.items() if t["title"] == "Foreign child")
+        assert foreign_tasks[child_id]["parent"] == "B-001"
+        local_tasks = _load(store_file)["tasks"]
+        assert not any(t["title"] == "Foreign child" for t in local_tasks.values())
+
+    def test_add_task_action_parent_validation(self, tmp_path, env, store_file):
+        """actions.add_task validates parent existence and same-repo invariant."""
+        from doxtr_doto.cli.repo_registry import RepoRegistry
+        from doxtr_doto.cli.tui import actions
+        from doxtr_doto.exceptions import DotoValidationError
+
+        other_store = tmp_path / "repoB" / ".doto" / "tasks.json"
+        other_store.parent.mkdir(parents=True)
+        other_store.write_text(
+            json.dumps(
+                {
+                    "version": 5,
+                    "updated": "2024-01-01T00:00:00",
+                    "tasks": {"B-001": {"title": "Other", "status": "open", "priority": "low"}},
+                    "series": {},
+                }
+            )
+        )
+        config = load_config(json_path=store_file)
+        multi_ctx = DotoContext(
+            config=config,
+            store=JsonTaskStore(config.get_json_path()),
+            formatter=get_formatter(config),
+            global_store=GlobalStateStore(),
+        )
+        RepoRegistry(multi_ctx.global_store).rescan(tmp_path)
+
+        # Valid same-repo parent succeeds.
+        new_id = actions.add_task(multi_ctx, "Good child", parent="T-001")
+        assert _load(store_file)["tasks"][new_id]["parent"] == "T-001"
+
+        # Missing parent fails.
+        with pytest.raises(DotoValidationError, match="not found"):
+            actions.add_task(multi_ctx, "Orphan", parent="NOPE-999")
+
+        # Cross-repo parent (when targeting current repo) fails.
+        with pytest.raises(DotoValidationError, match="Cross-repo parent"):
+            actions.add_task(multi_ctx, "Cross child", parent="repoB#B-001")
+
+    def test_e_a_focuses_first_field_in_multi_field_layout(self, ctx, store_file):
+        """With multi-field tui_add_fields, 'e a' focuses the first field immediately."""
+        from doxtr_doto.cli.tui.app import AddTaskScreen
+
+        ctx.config.tui_add_fields = "default"
+        app = _app(ctx)
+
+        async def body():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                _select(app, "T-001")
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.press("a")
+                await pilot.pause()
+                assert isinstance(app.screen, AddTaskScreen)
+                focused_id = app.screen.focused.id if app.screen.focused is not None else None
+                for ch in "Multi-field child":
+                    await pilot.press(ch if ch != " " else "space")
+                await pilot.press("enter")
+                await pilot.pause()
+                return focused_id
+
+        focused_id = _run(body())
+        assert focused_id == "add-title"
+        tasks = _load(store_file)["tasks"]
+        child = next(t for t in tasks.values() if t["title"] == "Multi-field child")
+        assert child["parent"] == "T-001"

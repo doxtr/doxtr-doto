@@ -108,6 +108,93 @@ class TestDotoAdd:
         data = json.loads(json_file.read_text())
         assert len(data["tasks"]) == 0
 
+    def test_add_with_parent(self, cli_runner, cli_project):
+        """Test adding a sub-task with --parent / -P."""
+        from doxtr_doto.cli.main import cli
+
+        parent_res = cli_runner.invoke(
+            cli, ["--config", str(cli_project), "add", "Parent task", "--id", "DOTO-001"]
+        )
+        assert parent_res.exit_code == 0
+
+        child_res = cli_runner.invoke(
+            cli,
+            ["--config", str(cli_project), "add", "Child task", "--parent", "DOTO-001"],
+        )
+        assert child_res.exit_code == 0
+        assert "Parent:" in child_res.output
+        assert "DOTO-001" in child_res.output
+
+        short_res = cli_runner.invoke(
+            cli,
+            ["--config", str(cli_project), "add", "Second child", "-P", "DOTO-001"],
+        )
+        assert short_res.exit_code == 0
+
+        json_file = cli_project / ".doto" / "tasks.json"
+        tasks = json.loads(json_file.read_text())["tasks"]
+        children = [t for t in tasks.values() if t.get("parent") == "DOTO-001"]
+        assert {c["title"] for c in children} == {"Child task", "Second child"}
+
+    def test_add_with_missing_parent_fails(self, cli_runner, cli_project):
+        """Adding with a non-existent --parent fails and writes nothing."""
+        from doxtr_doto.cli.main import cli
+
+        result = cli_runner.invoke(
+            cli,
+            ["--config", str(cli_project), "add", "Orphan", "--parent", "NOPE-999"],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output
+
+        json_file = cli_project / ".doto" / "tasks.json"
+        assert len(json.loads(json_file.read_text())["tasks"]) == 0
+
+    def test_add_with_parent_and_repeat_rejected(self, cli_runner, cli_project):
+        """--parent cannot be combined with --repeat."""
+        from doxtr_doto.cli.main import cli
+
+        cli_runner.invoke(cli, ["--config", str(cli_project), "add", "Parent", "--id", "DOTO-001"])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(cli_project),
+                "add",
+                "Weekly child",
+                "--parent",
+                "DOTO-001",
+                "--repeat",
+                "every monday",
+                "--until",
+                "+2w",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "--parent cannot be used with --repeat" in result.output
+
+    def test_add_with_parent_dry_run(self, cli_runner, cli_project):
+        """--parent with --dry-run previews the parent without writing."""
+        from doxtr_doto.cli.main import cli
+
+        cli_runner.invoke(cli, ["--config", str(cli_project), "add", "Parent", "--id", "DOTO-001"])
+        result = cli_runner.invoke(
+            cli,
+            [
+                "--config",
+                str(cli_project),
+                "add",
+                "Dry child",
+                "--parent",
+                "DOTO-001",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "DOTO-001" in result.output
+        json_file = cli_project / ".doto" / "tasks.json"
+        assert list(json.loads(json_file.read_text())["tasks"].keys()) == ["DOTO-001"]
+
 
 class TestDotoList:
     """Test the doto list command."""

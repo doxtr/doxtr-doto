@@ -466,6 +466,7 @@ def add_task(
     body: str | None = None,
     progress: int | None = None,
     raci: str | None = None,
+    parent: str | None = None,
     repo: DiscoveredRepo | None = None,
 ) -> str:
     """Create a new task, reusing ``doto add`` logic.
@@ -489,6 +490,12 @@ def add_task(
     the same parsers ``doto add`` uses); ``tags`` / ``depends_on`` / ``raci``
     are comma-separated / directive strings split by ``_build_task_data``.
 
+    When ``parent`` is given (a bare or ``repo#id`` reference), it is validated
+    against the target store: the parent must resolve to an existing task in
+    the SAME repository as the newly created task (mirroring
+    :func:`set_parent`). Otherwise :class:`~doxtr_doto.exceptions.DotoValidationError`
+    is raised and nothing is written.
+
     Args:
         ctx: The CLI context.
         title: The task title (required).
@@ -503,14 +510,21 @@ def add_task(
         progress: Progress percentage (0-100), or None.
         raci: Explicit RACI directive string, or None (uses the current-user
             RACI default from ``_build_task_data``).
+        parent: Parent task ref (bare or ``repo#id``) in the target repository,
+            or None for a top-level task.
         repo: Target repository to create the task in. When None (the
             default), the current directory's store (``ctx.store``) is used,
             preserving the original behavior.
 
     Returns:
         The id of the newly created task.
+
+    Raises:
+        DotoValidationError: If ``depends_on`` references another repo, or if
+            ``parent`` cannot be resolved in the target repository.
     """
     from doxtr_doto.cli.commands.add import _build_task_data
+    from doxtr_doto.exceptions import DotoValidationError
 
     if repo is None:
         store = ctx.store
@@ -521,6 +535,22 @@ def add_task(
         # prefix / sequencing and defaults), falling back to the launch dir's
         # config when the repo has no .doto.toml. See data.config_for_repo.
         config = data.config_for_repo(repo, ctx.config)
+
+    parent_local_id: str | None = None
+    if parent is not None:
+        resolved_parent = resolve_task_ref(ctx, parent)
+        if resolved_parent is None:
+            raise DotoValidationError(f"Parent task '{parent}' not found.")
+        if resolved_parent.store.path.resolve() != store.path.resolve():
+            raise DotoValidationError(
+                f"Cross-repo parent '{parent}' is not supported. "
+                "A parent must live in the same repository as the task."
+            )
+        store.load()
+        if store.get_task(resolved_parent.task_id) is None:
+            raise DotoValidationError(f"Parent task '{parent}' not found.")
+        parent_local_id = resolved_parent.task_id
+
     task_id = store.generate_id(prefix=config.id_prefix, sequential=config.id_sequential)
     task_data = _build_task_data(
         config,
@@ -534,6 +564,7 @@ def add_task(
         body,
         None,  # rst_file
         raci=raci,
+        parent=parent_local_id,
     )
     if estimate is not None:
         task_data["estimate"] = estimate
@@ -936,7 +967,8 @@ def load_tui_layout(ctx: DotoContext) -> TuiLayout:
     Reads ``tui_layout`` from the global state the same way other TUI
     preferences (favorites, ``last_prompt_date``) are read. When the field is
     absent (older state files that predate the feature) or holds an
-    unrecognized value, the default :attr:`doxtr_doto.enums.TuiLayout.TABLE`
+    unrecognized value - including the removed legacy ``"list"`` layout -
+    the default :attr:`doxtr_doto.enums.TuiLayout.TABLE`
     view is returned so the behavior is backward compatible.
 
     Args:

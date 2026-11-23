@@ -93,7 +93,6 @@ class TuiLayout(str, Enum):
 
     Members:
         TABLE: The default 3-pane table (the existing TUI task list).
-        LIST: A single-column list, one task per line; Enter reveals details.
         KANBAN: Columns grouped by status; a task is moved between columns
             (changing its status) with the terminal drag-equivalent ``h``/``l``
             keys.
@@ -105,7 +104,6 @@ class TuiLayout(str, Enum):
     """
 
     TABLE = "table"
-    LIST = "list"
     KANBAN = "kanban"
     CALENDAR = "calendar"
     TIME = "time"

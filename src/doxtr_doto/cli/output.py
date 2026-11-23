@@ -144,6 +144,8 @@ def build_task_detail_lines(task: dict[str, Any]) -> list[str]:
     if task.get("depends_on"):
         deps = ", ".join(_rich_escape(str(d)) for d in task["depends_on"])
         lines.append(f"[bold]Depends on:[/bold] {deps}")
+    if task.get("parent"):
+        lines.append(f"[bold]Parent:[/bold] {_rich_escape(str(task['parent']))}")
     series_info = task.get("_series_info")
     if series_info:
         lines.append(

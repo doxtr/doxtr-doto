@@ -740,3 +740,93 @@ class TestDotoDateTime:
         assert a is not None and b is not None
         assert a == b
         assert not (a < b)
+
+
+class TestParseWorkLength:
+    """Tests for parse_work_length / format_work_length (work day/week length)."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("40h", 2400),
+            ("8.4h", 504),
+            ("8h24m", 504),
+            ("7.5h", 450),
+            ("90m", 90),
+            ("8.4", 504),  # bare number -> decimal hours
+            ("8h", 480),
+            ("  40 h ", 2400),
+        ],
+    )
+    def test_parses_decimal_and_hm(self, value, expected):
+        from doxtr_doto.date_utils import parse_work_length
+
+        assert parse_work_length(value) == expected
+
+    def test_numeric_is_hours(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        assert parse_work_length(8) == 480
+        assert parse_work_length(8.4) == 504
+
+    def test_none_and_empty(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        assert parse_work_length(None) is None
+        assert parse_work_length("") is None
+        assert parse_work_length("   ") is None
+
+    @pytest.mark.parametrize("bad", ["abc", "8.41h", "-5h", "0h", "0"])
+    def test_invalid_raises(self, bad):
+        from doxtr_doto.date_utils import parse_work_length
+
+        with pytest.raises(ValueError):
+            parse_work_length(bad)
+
+    def test_bool_rejected(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        with pytest.raises(TypeError):
+            parse_work_length(True)
+
+    def test_safe_never_raises(self):
+        from doxtr_doto.date_utils import parse_work_length_safe
+
+        assert parse_work_length_safe("nope") is None
+        assert parse_work_length_safe("40h") == 2400
+
+    @pytest.mark.parametrize(
+        "minutes,expected",
+        [
+            (504, "8h24m"),
+            (2400, "40h"),
+            (480, "8h"),
+            (90, "1h30m"),
+            (0, ""),
+            (None, ""),
+        ],
+    )
+    def test_format_roundtrips(self, minutes, expected):
+        from doxtr_doto.date_utils import format_work_length
+
+        assert format_work_length(minutes) == expected
+
+
+class TestParseWorkLengthEdgeCases:
+    def test_non_finite_float_rejected(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        with pytest.raises(ValueError):
+            parse_work_length(float("inf"))
+
+    def test_unsupported_type_rejected(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        with pytest.raises(TypeError):
+            parse_work_length([8])  # type: ignore[arg-type]
+
+    def test_zero_hours_rejected(self):
+        from doxtr_doto.date_utils import parse_work_length
+
+        with pytest.raises(ValueError):
+            parse_work_length(0)

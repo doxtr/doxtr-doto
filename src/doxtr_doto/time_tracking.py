@@ -14,7 +14,8 @@ the local timezone so that elapsed calculations remain consistent.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
 
 from doxtr_doto.sync.json_store import WorkLog
 
@@ -217,6 +218,201 @@ def discard_session(worklogs: list[WorkLog]) -> list[WorkLog]:
             continue
         result.append(dict(log))  # type: ignore[arg-type]
     return result
+
+
+DEFAULT_LONG_SESSION_MULTIPLIER = 1.5
+"""Default threshold multiplier over a working day for overly long sessions.
+
+With an 8-hour working day (480 minutes), ``1.5x`` flags sessions exceeding
+12 hours (or any open session that has crossed into a later calendar day).
+"""
+
+
+@dataclass(frozen=True)
+class LongSessionFinding:
+    """One overly long or forgotten work/task session detected for review.
+
+    Attributes:
+        index: Zero-based index into the source ``worklogs`` list.
+        started_at: ISO 8601 start timestamp of the interval.
+        stopped_at: ISO 8601 stop timestamp, or ``None`` if still open.
+        duration_seconds: Effective elapsed duration in whole seconds (up to
+            ``now`` when open).
+        is_open: Whether the interval is still running.
+        spans_days: Whether the interval crosses midnight into a later day.
+        reasons: Short human-readable flags (e.g. ``"open overnight"``,
+            ``"spans days"``, ``"> 12h"``).
+    """
+
+    index: int
+    started_at: str
+    stopped_at: str | None
+    duration_seconds: int
+    is_open: bool
+    spans_days: bool
+    reasons: tuple[str, ...]
+
+
+def long_session_threshold_seconds(
+    day_length_minutes: int = 8 * 60,
+    multiplier: float = DEFAULT_LONG_SESSION_MULTIPLIER,
+) -> int:
+    """Return the duration threshold (in seconds) above which a session is flagged.
+
+    Derived from the user's configured working-day length so someone with an
+    8h day gets a 12h ceiling and someone with a 10h day gets 15h. Clamped to
+    at least 1 hour so misconfigured tiny values do not flag normal work.
+
+    Args:
+        day_length_minutes: Expected working-day length in minutes.
+        multiplier: Factor applied to the day length (default ``1.5``).
+
+    Returns:
+        Threshold in whole seconds.
+    """
+    base = max(60, int(day_length_minutes))
+    return int(round(base * 60 * max(1.0, float(multiplier))))
+
+
+def find_long_sessions(
+    worklogs: list[WorkLog],
+    *,
+    now: datetime | None = None,
+    day_length_minutes: int = 8 * 60,
+    max_duration_seconds: int | None = None,
+) -> list[LongSessionFinding]:
+    """Identify overly long or forgotten work intervals.
+
+    Flags an interval when any of these hold:
+
+    * it is still open and started on an earlier calendar day (likely
+      forgotten clock-out),
+    * its closed span crosses multiple calendar days (e.g. left running
+      overnight and stopped the next morning), or
+    * its duration exceeds ``max_duration_seconds`` (defaults to
+      :func:`long_session_threshold_seconds` for ``day_length_minutes``).
+
+    Results are ordered with open/stale sessions first, then longest duration
+    descending so the most impactful anomalies appear at the top.
+
+    Args:
+        worklogs: List of worklog intervals to inspect.
+        now: Reference current time for open intervals. Defaults to local now.
+        day_length_minutes: Configured working-day length in minutes (used to
+            compute the default duration threshold).
+        max_duration_seconds: Explicit override for the duration threshold.
+
+    Returns:
+        List of :class:`LongSessionFinding` entries for flagged intervals.
+    """
+    reference = _ensure_aware(now) if now is not None else datetime.now(timezone.utc).astimezone()
+    threshold = (
+        max(1, int(max_duration_seconds))
+        if max_duration_seconds is not None
+        else long_session_threshold_seconds(day_length_minutes)
+    )
+    findings: list[LongSessionFinding] = []
+    for index, log in enumerate(worklogs):
+        started_raw = log.get("started_at")
+        if not started_raw:
+            continue
+        try:
+            started = parse_timestamp(str(started_raw))
+        except (ValueError, TypeError):
+            continue
+        stopped_raw = log.get("stopped_at")
+        is_open = stopped_raw is None
+        if is_open:
+            stopped = reference.astimezone(started.tzinfo)
+        else:
+            try:
+                stopped = parse_timestamp(str(stopped_raw)).astimezone(started.tzinfo)
+            except (ValueError, TypeError):
+                continue
+        duration = max(0, int((stopped - started).total_seconds()))
+        spans_days = stopped.date() > started.date()
+        reasons: list[str] = []
+        if is_open and spans_days:
+            days = (stopped.date() - started.date()).days
+            reasons.append(f"open {days}d+")
+        elif spans_days:
+            reasons.append("spans days")
+        if duration > threshold:
+            hours = threshold / 3600
+            label = f"{int(hours)}h" if hours == int(hours) else f"{hours:.1f}h"
+            reasons.append(f">{label}")
+        if reasons:
+            findings.append(
+                LongSessionFinding(
+                    index=index,
+                    started_at=str(started_raw),
+                    stopped_at=str(stopped_raw) if stopped_raw is not None else None,
+                    duration_seconds=duration,
+                    is_open=is_open,
+                    spans_days=spans_days,
+                    reasons=tuple(reasons),
+                )
+            )
+    findings.sort(key=lambda f: (not f.is_open, -f.duration_seconds, f.index))
+    return findings
+
+
+def open_session_stop_bound(log: WorkLog, now: datetime) -> datetime:
+    """Return the safe effective stop for an open worklog.
+
+    A normal overnight interval (started yesterday) is allowed to continue
+    through today. An interval started before yesterday is treated as stale:
+    continuing to count it through every intervening day would turn a
+    forgotten clock-out into multiple 24-hour shifts. Its effective stop is
+    therefore midnight following its original start day. Explicitly split
+    sessions (created by :func:`split_at_midnight`) are separate intervals
+    and remain countable on their own start dates.
+
+    Args:
+        log: An open worklog whose effective end should be bounded.
+        now: Reference current time (timezone-aware or local-naive).
+
+    Returns:
+        The earlier of ``now`` and midnight after the interval's start date,
+        in the interval's timezone.
+    """
+    reference = _ensure_aware(now)
+    started = parse_timestamp(str(log["started_at"]))
+    local_reference = reference.astimezone(started.tzinfo)
+    if started.date() >= local_reference.date() - timedelta(days=1):
+        return local_reference
+    day_after = started.date() + timedelta(days=1)
+    return datetime.combine(day_after, time.min, tzinfo=started.tzinfo)
+
+
+def recover_stale_open_session(
+    worklogs: list[WorkLog],
+    now: datetime | None = None,
+) -> list[WorkLog]:
+    """Close a stale open session at its start day's boundary.
+
+    This is used before clocking in on a new day. A normal interval from
+    yesterday remains valid; one older than that is kept for its original day
+    (up to midnight), so later days are not filled with phantom work. The
+    input remains unmodified.
+
+    Args:
+        worklogs: Work-clock intervals.
+        now: Reference current time. Defaults to local now.
+
+    Returns:
+        A copied worklog list; only a still-open session started on a prior
+        day is closed. Same-day open sessions are unchanged.
+    """
+    reference = _ensure_aware(now) if now is not None else datetime.now(timezone.utc).astimezone()
+    open_log = open_session(worklogs)
+    if open_log is None:
+        return [dict(log) for log in worklogs]  # type: ignore[misc]
+    started = parse_timestamp(str(open_log["started_at"]))
+    local_reference = reference.astimezone(started.tzinfo)
+    if started.date() >= local_reference.date() - timedelta(days=1):
+        return [dict(log) for log in worklogs]  # type: ignore[misc]
+    return close_session(worklogs, now=open_session_stop_bound(open_log, reference))
 
 
 def split_at_midnight(worklogs: list[WorkLog], now: datetime | None = None) -> list[WorkLog]:

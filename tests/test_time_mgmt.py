@@ -485,3 +485,220 @@ def test_interval_editor_duration_running_when_stop_blank():
             assert "running" in duration
 
     _run(scenario())
+
+
+# --- Work-length / holiday-allowance field helpers ------------------------
+
+from doxtr_doto.cli.tui.time_mgmt import (  # noqa: E402
+    BreaksConfigResult,
+    format_holiday_allowance_field,
+    parse_holiday_allowance_field,
+    parse_work_length_field,
+)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("40h", 2400), ("8.4h", 504), ("8h24m", 504), ("", None), ("   ", None)],
+)
+def test_parse_work_length_field(text, expected):
+    assert parse_work_length_field(text, "Working day length") == expected
+
+
+def test_parse_work_length_field_error_mentions_label():
+    with pytest.raises(ValueError, match="Working week length"):
+        parse_work_length_field("nope", "Working week length")
+
+
+@pytest.mark.parametrize("text,expected", [("25", 25.0), ("27.5", 27.5), (" 30 ", 30.0)])
+def test_parse_holiday_allowance_field(text, expected):
+    assert parse_holiday_allowance_field(text) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-5"])
+def test_parse_holiday_allowance_field_invalid(bad):
+    with pytest.raises(ValueError):
+        parse_holiday_allowance_field(bad)
+
+
+@pytest.mark.parametrize("days,expected", [(25.0, "25"), (27.5, "27.5"), (30, "30")])
+def test_format_holiday_allowance_field(days, expected):
+    assert format_holiday_allowance_field(days) == expected
+
+
+def test_breaks_config_result_defaults():
+    result = BreaksConfigResult()
+    assert result.breaks == []
+    assert result.workweek_days == [0, 1, 2, 3, 4]
+    assert result.day_length_minutes == 8 * 60
+    assert result.week_length_minutes is None
+    assert result.holiday_allowance_days == 25.0
+
+
+# --- Leave configurator field helpers -------------------------------------
+
+from doxtr_doto.cli.tui.time_mgmt import (  # noqa: E402
+    LeaveConfigResult,
+    LeaveConfigScreen,
+    _parse_yes_no,
+    parse_leave_date_field,
+)
+
+
+def test_parse_leave_date_field_iso():
+    assert parse_leave_date_field("2026-07-06", "Start date") == date(2026, 7, 6)
+
+
+def test_parse_leave_date_field_strips_time():
+    # A relative value with a time suffix keeps only the date part.
+    assert parse_leave_date_field("2026-07-06T09:00", "Start date") == date(2026, 7, 6)
+
+
+def test_parse_leave_date_field_empty_raises():
+    with pytest.raises(ValueError, match="Start date is required"):
+        parse_leave_date_field("  ", "Start date")
+
+
+def test_parse_leave_date_field_invalid_raises():
+    with pytest.raises(ValueError, match="End date"):
+        parse_leave_date_field("not-a-date", "End date")
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("yes", True), ("y", True), ("1", True), ("no", False), ("", False), ("n", False)],
+)
+def test_parse_yes_no(text, expected):
+    assert _parse_yes_no(text, "Half day") is expected
+
+
+def test_parse_yes_no_invalid():
+    with pytest.raises(ValueError, match="Half day"):
+        _parse_yes_no("maybe", "Half day")
+
+
+@pytest.mark.parametrize(
+    "token,expected",
+    [("holiday", "holiday"), ("vacation", "holiday"), ("sick", "sick"), ("illness", "sick")],
+)
+def test_leave_screen_parse_kind(token, expected):
+    assert LeaveConfigScreen._parse_kind(token) == expected
+
+
+def test_leave_screen_parse_kind_invalid():
+    with pytest.raises(ValueError, match="holiday"):
+        LeaveConfigScreen._parse_kind("bogus")
+
+
+def test_leave_config_result_defaults():
+    result = LeaveConfigResult(start=date(2026, 7, 6), end=date(2026, 7, 6))
+    assert result.kind == "holiday"
+    assert result.half is False
+    assert result.note == ""
+    assert result.include_weekends is False
+
+
+# --- StatusLine work-clock start time & long-session badge ----------------
+
+
+def test_status_line_shows_same_day_start_time():
+    from doxtr_doto.cli.tui.widgets import StatusLine
+
+    now = datetime(2026, 11, 23, 14, 0, tzinfo=TZ)
+    started = datetime(2026, 11, 23, 9, 15, tzinfo=TZ).isoformat()
+    rendered = StatusLine.format_counters(
+        3600,
+        True,
+        0,
+        work_started_at=started,
+        long_session_count=0,
+        now=now,
+    )
+    assert "since 09:15" in rendered
+    assert "2026-11-23" not in rendered
+    assert "long session" not in rendered
+
+
+def test_status_line_flags_prior_day_start_and_long_sessions():
+    from doxtr_doto.cli.tui.widgets import StatusLine
+
+    now = datetime(2026, 11, 23, 14, 0, tzinfo=TZ)
+    started = datetime(2026, 11, 14, 12, 31, tzinfo=TZ).isoformat()
+    rendered = StatusLine.format_counters(
+        0,
+        True,
+        0,
+        work_started_at=started,
+        long_session_count=2,
+        now=now,
+    )
+    assert "since 2026-11-14 12:31" in rendered
+    assert "2 long sessions" in rendered
+    assert "t a" in rendered
+
+
+# --- SessionAuditScreen (long-session discovery & remediation) ------------
+
+
+def test_session_audit_lists_work_and_task_long_sessions_and_caps(tmp_path):
+    from doxtr_doto.cli.config import DotoConfig
+    from doxtr_doto.cli.global_state import GlobalStateStore
+    from doxtr_doto.cli.json_store import JsonTaskStore
+    from doxtr_doto.cli.main import DotoContext
+    from doxtr_doto.cli.output import OutputFormatter
+    from doxtr_doto.cli.tui.time_mgmt import SessionAuditScreen, collect_long_session_audit
+
+    store_dir = tmp_path / ".doto"
+    store_dir.mkdir()
+    store = JsonTaskStore(store_dir / "tasks.json")
+    store.add_task(
+        "T-001",
+        {
+            "title": "Long focus",
+            "worklogs": [
+                {
+                    "started_at": datetime(2026, 11, 19, 8, 0, tzinfo=TZ).isoformat(),
+                    "stopped_at": datetime(2026, 11, 20, 11, 0, tzinfo=TZ).isoformat(),
+                }
+            ],
+        },
+    )
+    store.save()
+    global_store = GlobalStateStore(tmp_path / "global.json")
+    state = global_store.load()
+    state.work_clock.worklogs = [
+        {"started_at": datetime(2026, 11, 14, 12, 31, tzinfo=TZ).isoformat(), "stopped_at": None}
+    ]
+    global_store.save(state)
+    ctx = DotoContext(
+        config=DotoConfig(source_dir=tmp_path),
+        store=store,
+        formatter=OutputFormatter(),
+        global_store=global_store,
+    )
+
+    rows = collect_long_session_audit(ctx, now=datetime(2026, 11, 23, 21, 0, tzinfo=TZ))
+    assert len(rows) == 2
+    assert rows[0].source == "work"
+    assert rows[0].finding.is_open is True
+    assert rows[1].source == "task"
+    assert rows[1].finding.spans_days is True
+
+    from textual.app import App
+
+    class _AuditHarness(App):
+        def on_mount(self) -> None:
+            self.push_screen(SessionAuditScreen(ctx))
+
+    async def scenario() -> None:
+        app = _AuditHarness()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, SessionAuditScreen)
+            # Press 'c' to cap the open work-clock session to the 8h day length.
+            await pilot.press("c")
+            await pilot.pause()
+            updated = global_store.load().work_clock.worklogs
+            assert updated[0]["stopped_at"] == datetime(2026, 11, 14, 20, 31, tzinfo=TZ).isoformat()
+
+    _run(scenario())

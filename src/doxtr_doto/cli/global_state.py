@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,54 @@ DEFAULT_WORKWEEK_DAYS = [0, 1, 2, 3, 4]
 Weekdays use Python's :meth:`datetime.date.weekday` convention where Monday is
 ``0`` and Sunday is ``6``.
 """
+
+DEFAULT_DAY_LENGTH_MINUTES = 8 * 60
+"""Default expected length of a working day, in minutes (8h).
+
+Used as the per-day target when computing overtime and when crediting a
+holiday / sick day against the work clock. A configured week length (see
+:attr:`GlobalState.week_length_minutes`) takes precedence when set, divided
+across the configured work-week days.
+"""
+
+DEFAULT_HOLIDAY_ALLOWANCE_DAYS = 25.0
+"""Default yearly holiday allowance, in whole/half days.
+
+The number of holiday (vacation) days a person may take in a calendar year.
+Stored as a float so half-days are expressible.
+"""
+
+#: Recognized leave kinds. ``holiday`` draws down the yearly allowance; ``sick``
+#: is tracked separately and does not consume the holiday allowance.
+LEAVE_KINDS = ("holiday", "sick")
+
+
+def sanitize_leave_kind(value: object) -> str:
+    """Normalize a stored leave-kind value to a recognized kind.
+
+    Accepts the canonical kinds plus common aliases (``vacation`` -> holiday,
+    ``illness`` -> sick), case-insensitively. An unrecognized value falls back
+    to ``"holiday"`` so a malformed entry still counts as *some* leave rather
+    than being silently dropped.
+
+    Args:
+        value: The raw stored kind (any type).
+
+    Returns:
+        One of :data:`LEAVE_KINDS`.
+    """
+    key = str(value or "").strip().lower()
+    aliases = {
+        "holiday": "holiday",
+        "holidays": "holiday",
+        "vacation": "holiday",
+        "annual": "holiday",
+        "pto": "holiday",
+        "sick": "sick",
+        "illness": "sick",
+        "ill": "sick",
+    }
+    return aliases.get(key, "holiday")
 
 
 def sanitize_workweek_days(value: object) -> list[int]:
@@ -110,6 +159,47 @@ def sanitize_workweek_days(value: object) -> list[int]:
     if not days:
         return list(DEFAULT_WORKWEEK_DAYS)
     return sorted(days)
+
+
+def _sanitize_positive_int(value: object, default: int) -> int:
+    """Return a strictly-positive int from ``value``, else ``default``.
+
+    Rejects bools (an int subclass), non-numeric, and non-positive values.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        return ivalue if ivalue > 0 else default
+    return default
+
+
+def _sanitize_optional_positive_int(value: object) -> int | None:
+    """Return a strictly-positive int from ``value``, else ``None``.
+
+    Used for the optional weekly target: a missing/invalid/non-positive value
+    means "derive the week target from the day length".
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        return ivalue if ivalue > 0 else None
+    return None
+
+
+def _sanitize_non_negative_float(value: object, default: float) -> float:
+    """Return a non-negative float from ``value``, else ``default``.
+
+    Rejects bools and non-numeric values; a negative value falls back to the
+    default.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        fvalue = float(value)
+        return fvalue if fvalue >= 0 else default
+    return default
 
 
 def xdg_config_path() -> Path:
@@ -376,6 +466,261 @@ class BreakConfig:
 
 
 @dataclass
+class LeaveEntry:
+    """A single day of recorded leave (a holiday or a sick day).
+
+    Leave days are the counterpart to the work clock: on a leave day the user
+    does not clock in, but the day is still credited toward the expected
+    working time (so a full week of 4 worked days + 1 holiday does not read as
+    a day of overtime shortfall). A ``holiday`` draws down the yearly holiday
+    allowance; a ``sick`` day is tracked separately and never consumes the
+    allowance.
+
+    Attributes:
+        date: ISO date (``YYYY-MM-DD``) of the leave day.
+        kind: One of :data:`LEAVE_KINDS` (``"holiday"`` or ``"sick"``).
+        fraction: Portion of a working day the leave covers (``1.0`` = a full
+            day, ``0.5`` = a half day). Defaults to ``1.0``.
+        note: Optional free-text note (e.g. the holiday's name).
+        _extra: Unrecognized per-entry keys preserved verbatim across a
+            load/save round-trip (forward compatibility at the entry level).
+    """
+
+    date: str
+    kind: str = "holiday"
+    fraction: float = 1.0
+    note: str = ""
+    _extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON storage."""
+        data: dict[str, Any] = dict(self._extra)
+        data.update(
+            {
+                "date": self.date,
+                "kind": self.kind,
+                "fraction": float(self.fraction),
+                "note": self.note,
+            }
+        )
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LeaveEntry:
+        """Build a LeaveEntry from stored data.
+
+        The ``kind`` is normalized via :func:`sanitize_leave_kind`; the
+        ``fraction`` is clamped to ``(0, 1]`` (defaulting to a full day on a
+        missing/invalid value). Unrecognized keys are captured in
+        :attr:`_extra` for forward compatibility.
+
+        Args:
+            data: Stored dict with at least a ``date`` key.
+
+        Returns:
+            A LeaveEntry instance.
+        """
+        known = {"date", "kind", "fraction", "note"}
+        extra = {k: v for k, v in data.items() if k not in known}
+        try:
+            fraction = float(data.get("fraction", 1.0))
+        except (TypeError, ValueError):
+            fraction = 1.0
+        if not (0.0 < fraction <= 1.0):
+            fraction = 1.0
+        return cls(
+            date=str(data.get("date", "")),
+            kind=sanitize_leave_kind(data.get("kind")),
+            fraction=fraction,
+            note=str(data.get("note", "")),
+            _extra=extra,
+        )
+
+
+def apply_leave_range(
+    leave_days: list[LeaveEntry],
+    start: date,
+    end: date,
+    kind: str,
+    *,
+    fraction: float = 1.0,
+    note: str = "",
+    workweek_days: list[int] | None = None,
+    include_weekends: bool = False,
+) -> tuple[list[str], int]:
+    """Append leave entries for an inclusive date range, in place.
+
+    The single source of truth for recording a holiday / sick period, shared
+    by the ``doto leave add`` CLI command and the TUI leave configurator so
+    both dedupe and skip weekends identically. Existing ``(date, kind)``
+    entries are left untouched (no duplicates); the list is re-sorted by
+    ``(date, kind)`` at the end.
+
+    Args:
+        leave_days: The current leave list (mutated in place).
+        start: First date (inclusive).
+        end: Last date (inclusive). Swapped with ``start`` if it precedes it.
+        kind: Normalized leave kind (``"holiday"`` / ``"sick"``).
+        fraction: Portion of a working day each entry covers (``1.0`` full,
+            ``0.5`` half).
+        note: Optional free-text note stored on every added entry.
+        workweek_days: Weekday numbers (Monday=0 .. Sunday=6) that count as
+            the work week; days outside it are skipped unless
+            ``include_weekends`` is True. ``None``/empty skips nothing.
+        include_weekends: When True, record every day in the range regardless
+            of the work week.
+
+    Returns:
+        A ``(added_dates, skipped_weekend_count)`` tuple: the ISO dates newly
+        added (in order) and how many in-range days were skipped as outside
+        the work week.
+    """
+    if end < start:
+        start, end = end, start
+    workdays = {d for d in (workweek_days or []) if 0 <= d <= 6}
+    existing = {(e.date, e.kind) for e in leave_days}
+    added: list[str] = []
+    skipped_weekend = 0
+    day = start
+    while day <= end:
+        if not include_weekends and workdays and day.weekday() not in workdays:
+            skipped_weekend += 1
+            day += timedelta(days=1)
+            continue
+        iso = day.isoformat()
+        if (iso, kind) not in existing:
+            leave_days.append(LeaveEntry(date=iso, kind=kind, fraction=fraction, note=note))
+            existing.add((iso, kind))
+            added.append(iso)
+        day += timedelta(days=1)
+    leave_days.sort(key=lambda e: (e.date, e.kind))
+    return added, skipped_weekend
+
+
+def leave_days_in_range(
+    leave_days: list[LeaveEntry],
+    start: date,
+    end: date,
+) -> list[LeaveEntry]:
+    """Return the leave entries whose date falls within an inclusive range.
+
+    Entries with an unparseable date are skipped. The result is sorted by
+    ``(date, kind)``. Pure (no I/O), shared by the stats/visualization views.
+
+    Args:
+        leave_days: The leave list.
+        start: First date (inclusive).
+        end: Last date (inclusive).
+
+    Returns:
+        The matching leave entries, sorted.
+    """
+    start_iso, end_iso = start.isoformat(), end.isoformat()
+    out = [e for e in leave_days if start_iso <= e.date <= end_iso]
+    # Drop entries whose stored date is not a valid ISO date so a bad entry
+    # cannot crash a view.
+    valid: list[LeaveEntry] = []
+    for entry in out:
+        try:
+            date.fromisoformat(entry.date)
+        except ValueError:
+            continue
+        valid.append(entry)
+    valid.sort(key=lambda e: (e.date, e.kind))
+    return valid
+
+
+@dataclass
+class LeavePeriod:
+    """A contiguous run of leave days of the same kind.
+
+    Produced by :func:`group_leave_periods` / :func:`next_leave_period` so a
+    multi-day holiday block reads as one period rather than a list of single
+    days.
+
+    Attributes:
+        start: First day of the run (inclusive).
+        end: Last day of the run (inclusive); equal to ``start`` for one day.
+        kind: ``"holiday"`` or ``"sick"``.
+        note: The note of the run's first entry (if any).
+        days: The number of calendar days the run spans (``>= 1``).
+    """
+
+    start: date
+    end: date
+    kind: str
+    note: str = ""
+    days: int = 1
+
+
+def group_leave_periods(leave_days: list[LeaveEntry]) -> list[LeavePeriod]:
+    """Group leave entries into contiguous same-kind periods.
+
+    Consecutive calendar days of the same ``kind`` are merged into one
+    :class:`LeavePeriod` (a weekend gap breaks a run, matching how leave is
+    recorded). Entries with an unparseable date are skipped. The result is
+    sorted by start date. Pure (no I/O).
+
+    Args:
+        leave_days: The leave list.
+
+    Returns:
+        The grouped leave periods, earliest first.
+    """
+    from datetime import timedelta as _timedelta
+
+    parsed: list[tuple[date, str, str]] = []
+    for entry in leave_days:
+        try:
+            day = date.fromisoformat(entry.date)
+        except ValueError:
+            continue
+        parsed.append((day, sanitize_leave_kind(entry.kind), str(entry.note or "")))
+    # Sort by (date, kind); de-duplicate exact (date, kind) pairs so a day
+    # recorded twice does not split a run.
+    parsed.sort(key=lambda t: (t[0], t[1]))
+    periods: list[LeavePeriod] = []
+    current: LeavePeriod | None = None
+    seen: set[tuple[date, str]] = set()
+    for day, kind, note in parsed:
+        if (day, kind) in seen:
+            continue
+        seen.add((day, kind))
+        if current is not None and current.kind == kind and day == current.end + _timedelta(days=1):
+            current.end = day
+            current.days += 1
+            continue
+        current = LeavePeriod(start=day, end=day, kind=kind, note=note, days=1)
+        periods.append(current)
+    periods.sort(key=lambda p: p.start)
+    return periods
+
+
+def next_leave_period(
+    leave_days: list[LeaveEntry],
+    today: date,
+) -> LeavePeriod | None:
+    """Return the next leave period that is current or upcoming, or ``None``.
+
+    "Next" is the earliest period whose ``end`` is on or after ``today`` (so a
+    period in progress today is still returned). Past periods are ignored.
+    Pure (no I/O).
+
+    Args:
+        leave_days: The leave list.
+        today: The reference date.
+
+    Returns:
+        The next/current :class:`LeavePeriod`, or ``None`` when every recorded
+        leave period is already in the past (or none are recorded).
+    """
+    for period in group_leave_periods(leave_days):
+        if period.end >= today:
+            return period
+    return None
+
+
+@dataclass
 class GlobalState:
     """Typed accessor for the global doto config file.
 
@@ -399,7 +744,8 @@ class GlobalState:
         last_prompt_date: ISO date (YYYY-MM-DD) of the last kickstart nudge.
         tui_layout: The user's preferred ``doto tui`` task-list layout view
             (a :class:`doxtr_doto.enums.TuiLayout` value, e.g. ``"table"`` /
-            ``"list"`` / ``"kanban"`` / ``"calendar"``). None means no
+            ``"kanban"`` / ``"calendar"`` / ``"time"``). Legacy ``"list"``
+            values are treated as the default table layout. None means no
             preference has been saved yet, in which case the TUI falls back to
             the default table view (backward compatible with older state
             files that predate this field).
@@ -461,6 +807,26 @@ class GlobalState:
     work_clock: WorkClock = field(default_factory=WorkClock)
     breaks: list[BreakConfig] = field(default_factory=list)
     workweek_days: list[int] = field(default_factory=lambda: list(DEFAULT_WORKWEEK_DAYS))
+    #: Expected length of a single working day, in minutes. Backs overtime
+    #: computation and the per-day credit given to a holiday / sick day. When
+    #: :attr:`week_length_minutes` is set it takes precedence (the per-day
+    #: target is the week length divided across the work-week days). Defaults
+    #: to :data:`DEFAULT_DAY_LENGTH_MINUTES` (8h).
+    day_length_minutes: int = DEFAULT_DAY_LENGTH_MINUTES
+    #: Expected length of a full working week, in minutes, or ``None`` to
+    #: derive the week target from ``day_length_minutes`` x work-week days.
+    #: When set, it is the authoritative weekly target and the per-day target
+    #: is ``week_length_minutes / len(workweek_days)``.
+    week_length_minutes: int | None = None
+    #: Yearly holiday (vacation) allowance in days (float allows half-days).
+    #: A recorded ``holiday`` leave day draws this down; the report shows days
+    #: taken vs. remaining. Defaults to :data:`DEFAULT_HOLIDAY_ALLOWANCE_DAYS`.
+    holiday_allowance_days: float = DEFAULT_HOLIDAY_ALLOWANCE_DAYS
+    #: Recorded leave days (holidays and sick days). Each entry credits its
+    #: fraction of the day's expected working time so a leave day is not read
+    #: as an overtime shortfall, and holidays are counted against the yearly
+    #: allowance.
+    leave_days: list[LeaveEntry] = field(default_factory=list)
     last_prompt_date: str | None = None
     tui_layout: str | None = None
     tui_hide_completed: bool = False
@@ -498,6 +864,12 @@ class GlobalState:
                 "work_clock": self.work_clock.to_dict(),
                 "breaks": [b.to_dict() for b in self.breaks],
                 "workweek_days": list(self.workweek_days),
+                "day_length_minutes": int(self.day_length_minutes),
+                "week_length_minutes": (
+                    int(self.week_length_minutes) if self.week_length_minutes is not None else None
+                ),
+                "holiday_allowance_days": float(self.holiday_allowance_days),
+                "leave_days": [entry.to_dict() for entry in self.leave_days],
                 "last_prompt_date": self.last_prompt_date,
                 "tui_layout": self.tui_layout,
                 "tui_hide_completed": self.tui_hide_completed,
@@ -538,6 +910,10 @@ class GlobalState:
             "work_clock",
             "breaks",
             "workweek_days",
+            "day_length_minutes",
+            "week_length_minutes",
+            "holiday_allowance_days",
+            "leave_days",
             "last_prompt_date",
             "tui_layout",
             "tui_hide_completed",
@@ -564,6 +940,18 @@ class GlobalState:
                 BreakConfig.from_dict(b) for b in data.get("breaks", []) if isinstance(b, dict)
             ],
             workweek_days=sanitize_workweek_days(data.get("workweek_days")),
+            day_length_minutes=_sanitize_positive_int(
+                data.get("day_length_minutes"), DEFAULT_DAY_LENGTH_MINUTES
+            ),
+            week_length_minutes=_sanitize_optional_positive_int(data.get("week_length_minutes")),
+            holiday_allowance_days=_sanitize_non_negative_float(
+                data.get("holiday_allowance_days"), DEFAULT_HOLIDAY_ALLOWANCE_DAYS
+            ),
+            leave_days=[
+                LeaveEntry.from_dict(entry)
+                for entry in data.get("leave_days", [])
+                if isinstance(entry, dict) and str(entry.get("date", "")).strip()
+            ],
             last_prompt_date=data.get("last_prompt_date"),
             tui_layout=data.get("tui_layout"),
             tui_hide_completed=bool(data.get("tui_hide_completed", False)),

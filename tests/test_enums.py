@@ -209,7 +209,6 @@ class TestTuiLayout:
     def test_values_are_strings(self) -> None:
         """Verify all TuiLayout values are string instances."""
         assert isinstance(TuiLayout.TABLE, str)
-        assert isinstance(TuiLayout.LIST, str)
         assert isinstance(TuiLayout.KANBAN, str)
         assert isinstance(TuiLayout.CALENDAR, str)
         assert isinstance(TuiLayout.TIME, str)
@@ -217,7 +216,6 @@ class TestTuiLayout:
     def test_string_comparison(self) -> None:
         """Verify enums can be compared with string literals."""
         assert TuiLayout.TABLE == "table"
-        assert TuiLayout.LIST == "list"
         assert TuiLayout.KANBAN == "kanban"
         assert TuiLayout.CALENDAR == "calendar"
         assert TuiLayout.TIME == "time"
@@ -225,7 +223,7 @@ class TestTuiLayout:
     def test_all_values(self) -> None:
         """Verify all expected values exist."""
         values = {e.value for e in TuiLayout}
-        assert values == {"table", "list", "kanban", "calendar", "time"}
+        assert values == {"table", "kanban", "calendar", "time"}
 
     def test_distinct_from_list_format(self) -> None:
         """Verify TuiLayout is a separate enum from the directive ListFormat."""

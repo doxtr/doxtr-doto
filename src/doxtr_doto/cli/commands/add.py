@@ -368,6 +368,7 @@ def _build_task_data(
     body: str | None,
     rst_file: str | None,
     raci: str | None = None,
+    parent: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the task data dict from parsed inputs.
 
@@ -392,6 +393,7 @@ def _build_task_data(
         body: Task body/description or None.
         rst_file: Target RST file for Sphinx mode or None.
         raci: Explicit RACI string (``"responsible alice, ..."``) or None.
+        parent: Local ID of the parent task in the same store, or None.
 
     Returns:
         Task data dict ready for storage.
@@ -422,6 +424,7 @@ def _build_task_data(
         "depends_on": dep_list,
         "body": body,
         "raci": raci_data,
+        "parent": parent,
     }
 
     if rst_file:
@@ -466,6 +469,12 @@ def _build_task_data(
     shell_complete=complete_task_id,
     help="Comma-separated dependency task IDs.",
 )
+@click.option(
+    "--parent",
+    "-P",
+    shell_complete=complete_task_id,
+    help="Parent task ID (bare or repo#id) to create this task under.",
+)
 @click.option("--file", "-f", "rst_file", help="Target RST file (Sphinx mode only).")
 @click.option("--body", "-b", help="Task description/body.")
 @click.option("--edit", "-e", is_flag=True, help="Open $EDITOR for body.")
@@ -505,6 +514,7 @@ def add(
     due: str | None,
     tags: str | None,
     depends_on: str | None,
+    parent: str | None,
     rst_file: str | None,
     body: str | None,
     edit: bool,
@@ -564,6 +574,8 @@ def add(
             raise click.UsageError("Title is required. Use --interactive or provide TITLE.")
 
     if repeat_pattern:
+        if parent:
+            raise click.UsageError("--parent cannot be used with --repeat.")
         _add_recurring_tasks(
             ctx=ctx,
             title_template=title_str,
@@ -586,13 +598,37 @@ def add(
     if from_date:
         raise click.UsageError("--from requires --repeat for recurring tasks.")
 
+    from doxtr_doto.cli.id_resolver import cross_repo_deps, resolve_task_ref
+
+    target_store = ctx.store
+    target_config = ctx.config
+    parent_local_id: str | None = None
+    if parent:
+        resolved_parent = resolve_task_ref(ctx, parent)
+        if resolved_parent is None:
+            raise click.ClickException(f"Parent task '{parent}' not found.")
+        resolved_parent.store.load()
+        if resolved_parent.store.get_task(resolved_parent.task_id) is None:
+            raise click.ClickException(f"Parent task '{parent}' not found.")
+        parent_local_id = resolved_parent.task_id
+        target_store = resolved_parent.store
+        if target_store.path.resolve() != ctx.store.path.resolve():
+            from doxtr_doto.cli.config import load_config
+
+            repo_toml = target_store.path.resolve().parent.parent / ".doto.toml"
+            if repo_toml.is_file():
+                target_config = load_config(config_path=repo_toml)
+
     if not task_id:
-        task_id = ctx.store.generate_id(
-            prefix=ctx.config.id_prefix, sequential=ctx.config.id_sequential
+        task_id = target_store.generate_id(
+            prefix=target_config.id_prefix, sequential=target_config.id_sequential
         )
 
-    if ctx.store.get_task(task_id):
+    if target_store.get_task(task_id):
         raise click.ClickException(f"Task with ID '{task_id}' already exists.")
+
+    if parent_local_id is not None and task_id == parent_local_id:
+        raise click.ClickException(f"Task '{task_id}' cannot be its own parent.")
 
     if due:
         due = parse_relative_date(due)
@@ -601,7 +637,7 @@ def add(
         body = open_editor()
 
     task_data = _build_task_data(
-        ctx.config,
+        target_config,
         title_str,
         assignee,
         priority,
@@ -612,11 +648,10 @@ def add(
         body,
         rst_file,
         raci=raci,
+        parent=parent_local_id,
     )
 
-    from doxtr_doto.cli.id_resolver import cross_repo_deps
-
-    offending = cross_repo_deps(ctx, ctx.store, list(task_data.get("depends_on", [])))
+    offending = cross_repo_deps(ctx, target_store, list(task_data.get("depends_on", [])))
     if offending:
         raise click.ClickException(
             "Cross-repo dependencies are not supported: "
@@ -629,14 +664,19 @@ def add(
         formatter.format_task_detail({"id": task_id, **task_data})
         return
 
-    ctx.store.add_task(task_id, task_data)
-    ctx.store.save()
+    target_store.add_task(task_id, task_data)
+    target_store.save()
     from doxtr_doto.cli import known_names
     from doxtr_doto.raci import raci_names
 
-    known_names.remember_task_names(task_data.get("assignee"), task_data.get("tags", []))
+    known_names_path = (
+        target_store.path.parent / "known_names.json" if target_store is not ctx.store else None
+    )
+    known_names.remember_task_names(
+        task_data.get("assignee"), task_data.get("tags", []), path=known_names_path
+    )
     for rn in raci_names(task_data.get("raci")):
-        known_names.remember_task_names(rn, [])
+        known_names.remember_task_names(rn, [], path=known_names_path)
     formatter.print_success(f"Added task {task_id}")
     if not formatter.quiet:
         formatter.format_task_detail({"id": task_id, **task_data})

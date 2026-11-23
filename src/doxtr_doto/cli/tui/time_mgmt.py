@@ -29,6 +29,7 @@ parsing/mutation/aggregation can be unit-tested without rendering Textual.
 from __future__ import annotations
 
 import calendar
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -40,15 +41,21 @@ from textual.widgets import Button, Input, Label, ListItem, ListView, Static, Te
 
 from doxtr_doto.cli.global_state import (
     DEFAULT_BREAK_LEEWAY_MINUTES,
+    DEFAULT_DAY_LENGTH_MINUTES,
+    DEFAULT_HOLIDAY_ALLOWANCE_DAYS,
     DEFAULT_WORKWEEK_DAYS,
     BreakConfig,
 )
 from doxtr_doto.cli.session import format_duration
 from doxtr_doto.constants import WEEKDAY_ABBR
+from doxtr_doto.date_utils import format_work_length
 from doxtr_doto.sync.json_store import WorkLog
 from doxtr_doto.time_tracking import (
+    LongSessionFinding,
     add_interval,
     elapsed_seconds,
+    find_long_sessions,
+    long_session_threshold_seconds,
     parse_timestamp,
     remove_interval,
     set_interval,
@@ -314,6 +321,124 @@ def parse_workweek_text(text: str) -> list[int]:
     if not days:
         raise ValueError("Work week must list at least one day.")
     return sorted(days)
+
+
+def parse_work_length_field(text: str, label: str) -> int | None:
+    """Parse a work day/week length field value into whole minutes, or None.
+
+    A blank value returns ``None`` (meaning "leave unset" / "derive from the
+    day length" for the week field). Delegates to
+    :func:`doxtr_doto.date_utils.parse_work_length` so the field accepts the
+    same ``40h`` / ``8.4h`` / ``8h24m`` syntax as the CLI.
+
+    Args:
+        text: The raw field value.
+        label: A human label for the field (used in the error message).
+
+    Returns:
+        The length in whole minutes, or ``None`` when the field is blank.
+
+    Raises:
+        ValueError: On an unparseable/non-positive value, so the modal can
+            surface an inline error without closing.
+    """
+    from doxtr_doto.date_utils import parse_work_length
+
+    raw = text.strip()
+    if not raw:
+        return None
+    try:
+        minutes = parse_work_length(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+    if not minutes:
+        raise ValueError(f"{label} must be a positive duration.")
+    return minutes
+
+
+def parse_holiday_allowance_field(text: str) -> float:
+    """Parse the holiday-allowance field into a non-negative number of days.
+
+    Accepts whole or half days (``"25"``, ``"27.5"``). A blank value is an
+    error (the allowance always has a value).
+
+    Args:
+        text: The raw field value.
+
+    Returns:
+        The allowance in days (float).
+
+    Raises:
+        ValueError: On a blank, non-numeric, or negative value.
+    """
+    raw = text.strip()
+    if not raw:
+        raise ValueError("Holiday allowance must be a number of days.")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Holiday allowance {raw!r} is not a number.") from exc
+    if value < 0:
+        raise ValueError("Holiday allowance must not be negative.")
+    return value
+
+
+def format_holiday_allowance_field(days: float) -> str:
+    """Render a holiday-allowance day count for the editor input.
+
+    Drops a trailing ``.0`` on whole numbers (``25.0`` -> ``"25"``) so the
+    field reads cleanly.
+
+    Args:
+        days: The allowance in days.
+
+    Returns:
+        The field string.
+    """
+    if days == int(days):
+        return str(int(days))
+    return f"{days:g}"
+
+
+#: Leave kinds accepted by the TUI leave configurator, in cycle order. Kept in
+#: sync with :data:`doxtr_doto.cli.global_state.LEAVE_KINDS` but imported
+#: lazily inside the screen to avoid a module-load dependency.
+_LEAVE_KIND_CYCLE = ("holiday", "sick")
+
+
+def parse_leave_date_field(text: str, label: str) -> date:
+    """Parse a leave date-field value into a concrete :class:`date`.
+
+    Reuses :func:`doxtr_doto.cli.commands.add.parse_relative_date` so the TUI
+    leave fields accept the same relative expressions as ``doto add`` /
+    ``doto leave`` (``today``, ``tomorrow``, ``friday``, ``+7d``, ISO). Any
+    time suffix is dropped (leave is a whole-day concept).
+
+    Args:
+        text: The raw field value.
+        label: A human label for the field (used in the error message).
+
+    Returns:
+        The resolved calendar date.
+
+    Raises:
+        ValueError: On an empty or unparseable value, so the modal can surface
+            an inline error without closing.
+    """
+    from doxtr_doto.cli.commands.add import parse_relative_date
+
+    raw = text.strip()
+    if not raw:
+        raise ValueError(f"{label} is required.")
+    try:
+        resolved = parse_relative_date(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+    iso = resolved.split("T", 1)[0]
+    try:
+        return date.fromisoformat(iso)
+    except ValueError as exc:
+        raise ValueError(f"{label}: {raw!r} is not a valid date.") from exc
 
 
 def apply_interval_edit(
@@ -625,17 +750,48 @@ def task_interval_display_rows(
 # --- Textual screens ------------------------------------------------------
 
 
-class BreaksConfigScreen(ModalScreen["tuple[list[BreakConfig], list[int]] | None"]):
-    """Modal to configure recurring breaks and the "work week" day set.
+@dataclass
+class BreaksConfigResult:
+    """The saved payload of :class:`BreaksConfigScreen`.
 
-    Dismisses with a ``(breaks, workweek_days)`` tuple on save, or ``None`` on
-    cancel. The breaks block is parsed by :func:`parse_breaks_text` and the
-    work-week field by :func:`parse_workweek_text`; either parse error surfaces
-    an inline error without closing the modal.
+    Groups the breaks + work-week set with the work-length settings so the
+    caller (:meth:`doxtr_doto.cli.tui.app.DotoApp.action_configure_breaks`)
+    gets one typed object instead of a long positional tuple.
+
+    Attributes:
+        breaks: The parsed break configs.
+        workweek_days: The parsed work-week weekday set (Monday=0 .. Sunday=6).
+        day_length_minutes: Expected working-day length in minutes.
+        week_length_minutes: Weekly target in minutes, or None to derive it
+            from the day length.
+        holiday_allowance_days: Yearly holiday allowance in days.
+    """
+
+    breaks: list[BreakConfig] = field(default_factory=list)
+    workweek_days: list[int] = field(default_factory=lambda: list(DEFAULT_WORKWEEK_DAYS))
+    day_length_minutes: int = DEFAULT_DAY_LENGTH_MINUTES
+    week_length_minutes: int | None = None
+    holiday_allowance_days: float = DEFAULT_HOLIDAY_ALLOWANCE_DAYS
+
+
+class BreaksConfigScreen(ModalScreen["BreaksConfigResult | None"]):
+    """Modal to configure breaks, the "work week", and work-length settings.
+
+    Dismisses with a :class:`BreaksConfigResult` on save, or ``None`` on
+    cancel. The breaks block is parsed by :func:`parse_breaks_text`, the
+    work-week field by :func:`parse_workweek_text`, and the three work-length
+    fields by :func:`parse_work_length_field` /
+    :func:`parse_holiday_allowance_field`; any parse error surfaces an inline
+    error without closing the modal.
 
     ``workweek_days`` uses Python's Monday=0 .. Sunday=6 convention and backs
     the ``time`` layout summary panel's work-week net total (default
     Monday-Friday). The field accepts ``"Mon-Fri"`` or ``"0,1,2,3,4"``.
+
+    The work-length fields drive overtime and leave tracking: the expected
+    working-day length (``8h`` / ``8.4h`` / ``8h24m``), the optional weekly
+    target (``40h``; blank = derive from the day length), and the yearly
+    holiday allowance in days.
     """
 
     BINDINGS = [
@@ -648,41 +804,52 @@ class BreaksConfigScreen(ModalScreen["tuple[list[BreakConfig], list[int]] | None
         f"minutes; leeway defaults to {DEFAULT_BREAK_LEEWAY_MINUTES}. "
         "'auto' (yes/no, default no) auto-deducts the duration if you work "
         "straight through.  '#' lines are comments.  Work week: [b]Mon-Fri[/b] "
-        "or [b]0,1,2,3,4[/b] (Mon=0..Sun=6).  [b]Ctrl+S[/b] save, [b]Esc[/b] cancel."
+        "or [b]0,1,2,3,4[/b] (Mon=0..Sun=6).  Day/week length accept "
+        "[b]8h[/b], [b]8.4h[/b], [b]8h24m[/b], [b]40h[/b].  [b]Ctrl+S[/b] save, "
+        "[b]Esc[/b] cancel."
     )
 
     def __init__(
         self,
         breaks: list[BreakConfig],
         workweek_days: list[int] | None = None,
+        day_length_minutes: int = DEFAULT_DAY_LENGTH_MINUTES,
+        week_length_minutes: int | None = None,
+        holiday_allowance_days: float = DEFAULT_HOLIDAY_ALLOWANCE_DAYS,
     ) -> None:
-        """Initialize with the current breaks and work-week day set.
+        """Initialize with the current breaks, work week, and work lengths.
 
         Args:
             breaks: The breaks to pre-populate the editor with.
             workweek_days: The current work-week weekday set (Monday=0 ..
                 Sunday=6). Defaults to
-                :data:`doxtr_doto.cli.global_state.DEFAULT_WORKWEEK_DAYS`
-                (Monday-Friday) when omitted.
+                :data:`doxtr_doto.cli.global_state.DEFAULT_WORKWEEK_DAYS`.
+            day_length_minutes: Current expected working-day length (minutes).
+            week_length_minutes: Current weekly target (minutes), or None to
+                derive it from the day length.
+            holiday_allowance_days: Current yearly holiday allowance (days).
         """
         super().__init__()
         self._breaks = breaks
         self._workweek_days = (
             list(workweek_days) if workweek_days is not None else list(DEFAULT_WORKWEEK_DAYS)
         )
+        self._day_length_minutes = day_length_minutes
+        self._week_length_minutes = week_length_minutes
+        self._holiday_allowance_days = holiday_allowance_days
 
     def compose(self) -> ComposeResult:
-        """Build the breaks editor modal.
+        """Build the breaks + work-week + work-length editor modal.
 
-        The editor is a multi-line :class:`~textual.widgets.TextArea`
-        pre-seeded with a commented example header (:data:`BREAKS_EXAMPLE_HEADER`)
-        above the real break rows. Comment (``#``) and blank lines are skipped
-        on save by :func:`parse_breaks_text`, so the example stays as guidance.
-        A single-line work-week :class:`~textual.widgets.Input` configures the
-        weekday set backing the summary panel's work-week net total.
+        The breaks editor is a multi-line :class:`~textual.widgets.TextArea`
+        pre-seeded with a commented example header
+        (:data:`BREAKS_EXAMPLE_HEADER`) above the real break rows. Below it,
+        single-line :class:`~textual.widgets.Input` fields configure the work
+        week, the expected working-day and -week length, and the yearly
+        holiday allowance.
         """
         with Vertical(id="breaks-modal"):
-            yield Label("Configure breaks + work week", id="breaks-title")
+            yield Label("Configure breaks, work week & work length", id="breaks-title")
             yield Static(self.HELP, id="breaks-help")
             yield TextArea(
                 format_breaks_text(self._breaks, include_header=True),
@@ -692,6 +859,28 @@ class BreaksConfigScreen(ModalScreen["tuple[list[BreakConfig], list[int]] | None
             yield Input(
                 value=format_workweek_text(self._workweek_days),
                 id="breaks-workweek",
+            )
+            yield Label("Working day length (e.g. 8h, 8.4h, 8h24m):", id="breaks-day-label")
+            yield Input(
+                value=format_work_length(self._day_length_minutes),
+                id="breaks-day-length",
+            )
+            yield Label(
+                "Working week length (e.g. 40h; blank = day length x days):",
+                id="breaks-week-label",
+            )
+            yield Input(
+                value=(
+                    format_work_length(self._week_length_minutes)
+                    if self._week_length_minutes is not None
+                    else ""
+                ),
+                id="breaks-week-length",
+            )
+            yield Label("Yearly holiday allowance (days):", id="breaks-holiday-label")
+            yield Input(
+                value=format_holiday_allowance_field(self._holiday_allowance_days),
+                id="breaks-holiday",
             )
             yield Label("", id="breaks-error")
             with Horizontal(id="breaks-bottom"):
@@ -710,20 +899,221 @@ class BreaksConfigScreen(ModalScreen["tuple[list[BreakConfig], list[int]] | None
         self._save()
 
     def _save(self) -> None:
-        """Parse breaks + work week and dismiss, or show an inline error."""
+        """Parse every field and dismiss, or show an inline error."""
         text = self.query_one("#breaks-input", TextArea).text
         workweek_raw = self.query_one("#breaks-workweek", Input).value
+        day_raw = self.query_one("#breaks-day-length", Input).value
+        week_raw = self.query_one("#breaks-week-length", Input).value
+        holiday_raw = self.query_one("#breaks-holiday", Input).value
         try:
             breaks = parse_breaks_text(text)
             workweek_days = parse_workweek_text(workweek_raw)
+            day_length = parse_work_length_field(day_raw, "Working day length")
+            if day_length is None:
+                raise ValueError("Working day length is required.")
+            week_length = parse_work_length_field(week_raw, "Working week length")
+            holiday_allowance = parse_holiday_allowance_field(holiday_raw)
         except ValueError as exc:
             self.query_one("#breaks-error", Label).update(f"[red]{exc}[/red]")
             return
-        self.dismiss((breaks, workweek_days))
+        self.dismiss(
+            BreaksConfigResult(
+                breaks=breaks,
+                workweek_days=workweek_days,
+                day_length_minutes=day_length,
+                week_length_minutes=week_length,
+                holiday_allowance_days=holiday_allowance,
+            )
+        )
 
     def action_cancel(self) -> None:
         """Cancel without saving."""
         self.dismiss(None)
+
+
+@dataclass
+class LeaveConfigResult:
+    """The saved payload of :class:`LeaveConfigScreen`.
+
+    Attributes:
+        start: First day of the leave period (inclusive).
+        end: Last day of the leave period (inclusive).
+        kind: Normalized leave kind (``"holiday"`` / ``"sick"``).
+        half: Whether each day is a half day (fraction 0.5).
+        note: Optional free-text note.
+        include_weekends: Whether to record days outside the work week too.
+    """
+
+    start: date
+    end: date
+    kind: str = "holiday"
+    half: bool = False
+    note: str = ""
+    include_weekends: bool = False
+
+
+class LeaveConfigScreen(ModalScreen["LeaveConfigResult | None"]):
+    """Modal to record a new sick / holiday period from the TUI.
+
+    Dismisses with a :class:`LeaveConfigResult` on save (the caller applies it
+    via :func:`doxtr_doto.cli.global_state.apply_leave_range`), or ``None`` on
+    cancel. The date fields accept the same relative expressions as
+    ``doto add`` (``today``, ``friday``, ``+7d``, ISO), parsed by
+    :func:`parse_leave_date_field`; the kind field accepts ``holiday`` /
+    ``sick`` (parsed by :func:`doxtr_doto.cli.global_state.sanitize_leave_kind`);
+    the half-day and include-weekends fields accept yes/no. Any parse error
+    surfaces an inline message without closing.
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+s", "save", "Save"),
+    ]
+
+    HELP = (
+        "Record a holiday or sick period. Dates accept [b]today[/b], "
+        "[b]friday[/b], [b]+7d[/b] or [b]YYYY-MM-DD[/b]. Leave [b]End[/b] blank "
+        "for a single day. [b]Kind[/b]: holiday or sick. [b]Half day[/b] / "
+        "[b]Weekends[/b]: yes/no.  [b]Ctrl+S[/b] save, [b]Esc[/b] cancel."
+    )
+
+    def __init__(
+        self,
+        default_start: date | None = None,
+        kind: str = "holiday",
+    ) -> None:
+        """Initialize the leave configurator.
+
+        Args:
+            default_start: Pre-fill the start date (defaults to local today).
+            kind: Pre-selected leave kind (``"holiday"`` / ``"sick"``).
+        """
+        super().__init__()
+        self._default_start = default_start or datetime.now().astimezone().date()
+        self._kind = kind if kind in _LEAVE_KIND_CYCLE else "holiday"
+
+    def compose(self) -> ComposeResult:
+        """Build the leave-entry modal with labelled single-line inputs."""
+        with Vertical(id="leave-modal"):
+            yield Label("Record holiday / sick period", id="leave-title")
+            yield Static(self.HELP, id="leave-help")
+            yield Label("Start date (e.g. today, friday, 2026-07-06):", id="leave-start-label")
+            yield Input(value=self._default_start.isoformat(), id="leave-start")
+            yield Label("End date (blank = single day):", id="leave-end-label")
+            yield Input(value="", id="leave-end")
+            yield Label("Kind (holiday / sick):", id="leave-kind-label")
+            yield Input(value=self._kind, id="leave-kind")
+            yield Label("Half day? (yes/no):", id="leave-half-label")
+            yield Input(value="no", id="leave-half")
+            yield Label("Include weekends? (yes/no):", id="leave-weekends-label")
+            yield Input(value="no", id="leave-weekends")
+            yield Label("Note (optional):", id="leave-note-label")
+            yield Input(value="", id="leave-note")
+            yield Label("", id="leave-error")
+            with Horizontal(id="leave-bottom"):
+                yield Button("Save", variant="primary", id="leave-save")
+                yield Button("Cancel", id="leave-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle Save/Cancel."""
+        if event.button.id == "leave-cancel":
+            self.dismiss(None)
+            return
+        self._save()
+
+    def action_save(self) -> None:
+        """Save via the Ctrl+S keybinding."""
+        self._save()
+
+    def _save(self) -> None:
+        """Parse every field and dismiss, or show an inline error."""
+        from doxtr_doto.cli.global_state import sanitize_leave_kind
+
+        start_raw = self.query_one("#leave-start", Input).value
+        end_raw = self.query_one("#leave-end", Input).value
+        kind_raw = self.query_one("#leave-kind", Input).value
+        half_raw = self.query_one("#leave-half", Input).value
+        weekends_raw = self.query_one("#leave-weekends", Input).value
+        note = self.query_one("#leave-note", Input).value.strip()
+        try:
+            start = parse_leave_date_field(start_raw, "Start date")
+            end = parse_leave_date_field(end_raw, "End date") if end_raw.strip() else start
+            kind = self._parse_kind(kind_raw)
+            half = _parse_yes_no(half_raw, "Half day")
+            include_weekends = _parse_yes_no(weekends_raw, "Include weekends")
+        except ValueError as exc:
+            self.query_one("#leave-error", Label).update(f"[red]{exc}[/red]")
+            return
+        if end < start:
+            start, end = end, start
+        # Normalize the kind through the shared sanitizer so an alias
+        # (``vacation``/``illness``) folds to the canonical kind.
+        kind = sanitize_leave_kind(kind)
+        self.dismiss(
+            LeaveConfigResult(
+                start=start,
+                end=end,
+                kind=kind,
+                half=half,
+                note=note,
+                include_weekends=include_weekends,
+            )
+        )
+
+    @staticmethod
+    def _parse_kind(token: str) -> str:
+        """Validate the kind field, returning the canonical kind.
+
+        Args:
+            token: The raw kind field value.
+
+        Returns:
+            ``"holiday"`` or ``"sick"``.
+
+        Raises:
+            ValueError: On an unrecognized kind.
+        """
+        value = token.strip().lower()
+        aliases = {
+            "holiday": "holiday",
+            "holidays": "holiday",
+            "vacation": "holiday",
+            "h": "holiday",
+            "sick": "sick",
+            "illness": "sick",
+            "s": "sick",
+        }
+        if value not in aliases:
+            raise ValueError(f"Kind {token!r} must be 'holiday' or 'sick'.")
+        return aliases[value]
+
+    def action_cancel(self) -> None:
+        """Cancel without saving."""
+        self.dismiss(None)
+
+
+def _parse_yes_no(token: str, label: str) -> bool:
+    """Parse a yes/no field into a boolean.
+
+    Accepts ``yes``/``y``/``true``/``1`` (True) and
+    ``no``/``n``/``false``/``0``/blank (False), case-insensitively.
+
+    Args:
+        token: The raw field value.
+        label: A human label for the field (used in the error message).
+
+    Returns:
+        The parsed boolean.
+
+    Raises:
+        ValueError: On an unrecognized token.
+    """
+    value = token.strip().lower()
+    if value in {"", "no", "n", "false", "f", "0"}:
+        return False
+    if value in {"yes", "y", "true", "t", "1"}:
+        return True
+    raise ValueError(f"{label} {token!r} must be yes or no.")
 
 
 class WorkIntervalEditScreen(ModalScreen["tuple[int | None, str, str | None] | None"]):
@@ -1057,6 +1447,296 @@ class WorkTimeScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+@dataclass(frozen=True)
+class AuditSessionRow:
+    """One flagged overly long / forgotten session across work clock or tasks.
+
+    Attributes:
+        source: ``"work"`` for the global work clock, or ``"task"`` for a task
+            focus session.
+        label: Human label (``"Work clock"`` or ``"repo#TASK-ID title"``).
+        task_ref: Canonical task ref (``repo#id``) for task sessions, or
+            ``None`` for work-clock sessions.
+        finding: Underlying :class:`LongSessionFinding` (index, timestamps,
+            duration, reasons).
+    """
+
+    source: str
+    label: str
+    task_ref: str | None
+    finding: LongSessionFinding
+
+
+def collect_long_session_audit(
+    ctx: DotoContext,
+    *,
+    now: datetime | None = None,
+    day_length_minutes: int | None = None,
+) -> list[AuditSessionRow]:
+    """Scan the global work clock and all repo tasks for overly long sessions.
+
+    Pure-ish aggregator (reads stores, no Textual) shared by
+    :class:`SessionAuditScreen` and unit tests. Open/stale sessions appear
+    first, followed by longest closed spans descending.
+
+    Args:
+        ctx: The CLI context.
+        now: Reference current time (defaults to local now).
+        day_length_minutes: Optional override for the expected day length;
+            defaults to ``state.day_length_minutes``.
+
+    Returns:
+        Sorted list of :class:`AuditSessionRow` findings.
+    """
+    from doxtr_doto.cli.session import namespaced_id
+    from doxtr_doto.cli.task_collector import collect_repo_tasks
+
+    moment = now if now is not None else datetime.now().astimezone()
+    state = ctx.global_store.load()
+    day_len = (
+        day_length_minutes if day_length_minutes is not None else int(state.day_length_minutes)
+    )
+    rows: list[AuditSessionRow] = []
+
+    for finding in find_long_sessions(
+        state.work_clock.worklogs,
+        now=moment,
+        day_length_minutes=day_len,
+    ):
+        rows.append(
+            AuditSessionRow(
+                source="work",
+                label="Work clock",
+                task_ref=None,
+                finding=finding,
+            )
+        )
+
+    for repo, task_id, title, worklogs in collect_repo_tasks(ctx):
+        ref = namespaced_id(repo, task_id) if repo else task_id
+        short_title = (title[:32] + "…") if len(title) > 33 else title
+        label = f"{ref} {short_title}".strip()
+        for finding in find_long_sessions(
+            worklogs,
+            now=moment,
+            day_length_minutes=day_len,
+        ):
+            rows.append(
+                AuditSessionRow(
+                    source="task",
+                    label=label,
+                    task_ref=ref,
+                    finding=finding,
+                )
+            )
+
+    rows.sort(
+        key=lambda r: (
+            not r.finding.is_open,
+            0 if r.source == "work" else 1,
+            -r.finding.duration_seconds,
+            r.finding.started_at,
+        )
+    )
+    return rows
+
+
+def format_audit_row(row: AuditSessionRow) -> str:
+    """Format one :class:`AuditSessionRow` for the audit list."""
+    f = row.finding
+    reasons = ", ".join(f.reasons)
+    stop_display = f.stopped_at if f.stopped_at else "(running)"
+    dur = format_duration(f.duration_seconds)
+    tag = "[bold yellow]WORK[/bold yellow]" if row.source == "work" else "[cyan]TASK[/cyan]"
+    return f"{tag}  [b]{dur}[/b]  [{reasons}]  {row.label}\n    {f.started_at}  →  {stop_display}"
+
+
+class SessionAuditScreen(ModalScreen[None]):
+    """Modal that surfaces overly long / forgotten work & task sessions.
+
+    Opened via ``t a`` (Time -> Audit long sessions). Lists every global
+    work-clock interval and task focus interval that is open past its start
+    day, spans multiple days, or exceeds ``1.5x`` the configured working-day
+    length, and lets the user edit (``e``/Enter), cap to the configured day
+    length (``c``), or delete (``x``) the highlighted interval in place.
+    """
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("e", "edit", "Edit"),
+        ("enter", "edit", "Edit"),
+        ("c", "cap_to_day", "Cap to day"),
+        ("x", "delete", "Delete"),
+        ("up", "nav_up", "Prev"),
+        ("down", "nav_down", "Next"),
+        ("k", "nav_up", "Prev"),
+        ("j", "nav_down", "Next"),
+    ]
+
+    def __init__(self, ctx: DotoContext) -> None:
+        """Initialize the session audit modal."""
+        super().__init__()
+        self.ctx = ctx
+        self._rows: list[AuditSessionRow] = []
+
+    def compose(self) -> ComposeResult:
+        """Build the long-session audit modal."""
+        with Vertical(id="audit-modal"):
+            yield Label("", id="audit-title")
+            yield Static("", id="audit-summary")
+            with VerticalScroll(id="audit-body"):
+                yield ListView(id="audit-list")
+            yield Static(
+                "[b]e/Enter[/b] edit  [b]c[/b] cap to day length  [b]x[/b] delete  "
+                "[b]↑/↓[/b] (or [b]j/k[/b]) select  [b]Esc[/b] close",
+                id="audit-hint",
+            )
+
+    def on_mount(self) -> None:
+        """Populate the audit list on first display."""
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Re-scan work clock and task worklogs and rebuild the list."""
+        state = self.ctx.global_store.load()
+        threshold_sec = long_session_threshold_seconds(state.day_length_minutes)
+        self.query_one("#audit-title", Label).update(
+            "[b]Session audit — overly long / forgotten intervals[/b]"
+        )
+        self._rows = collect_long_session_audit(self.ctx)
+        self.query_one("#audit-summary", Static).update(
+            f"Threshold: >{format_duration(threshold_sec)} "
+            f"(1.5× {format_work_length(state.day_length_minutes)} day) or multi-day   •   "
+            f"{len(self._rows)} flagged"
+        )
+        list_view = self.query_one("#audit-list", ListView)
+        previous_index = list_view.index
+        list_view.clear()
+        if not self._rows:
+            list_view.append(ListItem(Label("[green]No overly long sessions found.[/green]")))
+            return
+        for pos, row in enumerate(self._rows):
+            item = ListItem(Label(format_audit_row(row)))
+            item.audit_pos = pos  # type: ignore[attr-defined]
+            list_view.append(item)
+        if previous_index is None:
+            list_view.index = 0
+        else:
+            list_view.index = max(0, min(previous_index, len(self._rows) - 1))
+        list_view.focus()
+
+    def _selected_row(self) -> AuditSessionRow | None:
+        """Return the highlighted :class:`AuditSessionRow`, or None."""
+        list_view = self.query_one("#audit-list", ListView)
+        item = list_view.highlighted_child
+        if item is None:
+            return None
+        pos = getattr(item, "audit_pos", None)
+        if not isinstance(pos, int) or pos < 0 or pos >= len(self._rows):
+            return None
+        return self._rows[pos]
+
+    def action_nav_up(self) -> None:
+        """Highlight the previous flagged session."""
+        self.query_one("#audit-list", ListView).action_cursor_up()
+
+    def action_nav_down(self) -> None:
+        """Highlight the next flagged session."""
+        self.query_one("#audit-list", ListView).action_cursor_down()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Open the interval editor when a row is activated with Enter."""
+        event.stop()
+        self.action_edit()
+
+    def _mutate_row(
+        self,
+        row: AuditSessionRow,
+        mutator: Any,
+    ) -> bool:
+        """Apply ``mutator(worklogs, index) -> new_worklogs`` and persist."""
+        idx = row.finding.index
+        if row.source == "work":
+            state = self.ctx.global_store.load()
+            try:
+                state.work_clock.worklogs = mutator(state.work_clock.worklogs, idx)
+            except (ValueError, IndexError) as exc:
+                self.app.notify(f"Could not update interval: {exc}", severity="error")
+                return False
+            self.ctx.global_store.save(state)
+            return True
+
+        from doxtr_doto.cli.tui import actions
+
+        if not row.task_ref:
+            return False
+        task = actions.find_task(self.ctx, row.task_ref)
+        if task is None:
+            return False
+        worklogs = list(task.get("worklogs", []))
+        try:
+            updated = mutator(worklogs, idx)
+        except (ValueError, IndexError) as exc:
+            self.app.notify(f"Could not update interval: {exc}", severity="error")
+            return False
+        return actions.update_task(self.ctx, row.task_ref, {"worklogs": updated})
+
+    def action_edit(self) -> None:
+        """Open the interval editor for the highlighted flagged session."""
+        row = self._selected_row()
+        if row is None:
+            return
+
+        def _apply(result: tuple[int | None, str, str | None] | None) -> None:
+            if result is None:
+                return
+            _index, start, stop = result
+            if self._mutate_row(
+                row,
+                lambda logs, idx: apply_interval_edit(logs, idx, start, stop),
+            ):
+                self._refresh()
+
+        self.app.push_screen(
+            WorkIntervalEditScreen(
+                row.finding.index,
+                row.finding.started_at,
+                row.finding.stopped_at,
+            ),
+            _apply,
+        )
+
+    def action_cap_to_day(self) -> None:
+        """Trim the highlighted interval to the configured working-day length."""
+        row = self._selected_row()
+        if row is None:
+            return
+        state = self.ctx.global_store.load()
+        started = parse_timestamp(row.finding.started_at)
+        capped_stop = (started + timedelta(minutes=state.day_length_minutes)).isoformat()
+        if self._mutate_row(
+            row,
+            lambda logs, idx: apply_interval_edit(logs, idx, row.finding.started_at, capped_stop),
+        ):
+            self.app.notify(
+                f"Capped {row.label} to {format_work_length(state.day_length_minutes)}."
+            )
+            self._refresh()
+
+    def action_delete(self) -> None:
+        """Delete the highlighted flagged interval."""
+        row = self._selected_row()
+        if row is None:
+            return
+        if self._mutate_row(row, remove_interval):
+            self.app.notify(f"Deleted flagged interval from {row.label}.")
+            self._refresh()
+
+    def action_close(self) -> None:
+        """Close the audit modal."""
+        self.dismiss(None)
+
+
 class _GranularityStatsScreen(ModalScreen[None]):
     """Shared base for the day/week/month/year statistics pop-ups.
 
@@ -1270,7 +1950,8 @@ class WorkStatsScreen(_GranularityStatsScreen):
 
     def _refresh(self) -> None:
         """Recompute and re-render the statistics for the current state."""
-        from doxtr_doto.work_report import compute_period
+        from doxtr_doto.cli.global_state import leave_days_in_range
+        from doxtr_doto.work_report import LeaveSpec, compute_overtime, compute_period
 
         state = self.ctx.global_store.load()
         worklogs = state.work_clock.worklogs
@@ -1279,6 +1960,28 @@ class WorkStatsScreen(_GranularityStatsScreen):
         start, end = anchor_range_for(self.granularity, self.anchor)
         period = compute_period(worklogs, start, end, specs, now)
         chart_rows = self._chart_rows(worklogs, specs, now, start, end)
+
+        # Overtime + leave for the same period, reusing the shared math so the
+        # figures agree with ``doto report`` and the summary panel.
+        leave_entries = leave_days_in_range(state.leave_days, start, end)
+        leave_specs: list[Any] = []
+        for entry in state.leave_days:
+            spec = LeaveSpec.from_entry(entry)
+            if spec is not None:
+                leave_specs.append(spec)
+        overtime = compute_overtime(
+            period,
+            start,
+            end,
+            day_length_minutes=state.day_length_minutes,
+            week_length_minutes=state.week_length_minutes,
+            workweek_days=list(state.workweek_days),
+            leave=leave_specs,
+        )
+        leave_rows = [
+            (entry.date, entry.kind, entry.fraction, entry.note) for entry in leave_entries
+        ]
+
         self.query_one("#workstats-title", Label).update(
             self.format_title(self.granularity, start, end)
         )
@@ -1289,6 +1992,11 @@ class WorkStatsScreen(_GranularityStatsScreen):
                 period.recorded_break_seconds,
                 period.net_seconds,
                 chart_rows,
+                overtime_seconds=overtime.overtime_seconds,
+                expected_seconds=overtime.expected_seconds,
+                holiday_days=overtime.holiday_days_taken,
+                sick_days=overtime.sick_days_taken,
+                leave_rows=leave_rows,
             )
         )
 
@@ -1342,8 +2050,14 @@ class WorkStatsScreen(_GranularityStatsScreen):
         recorded_break_seconds: int,
         net_seconds: int,
         chart_rows: list[tuple[str, int]],
+        *,
+        overtime_seconds: int | None = None,
+        expected_seconds: int | None = None,
+        holiday_days: float = 0.0,
+        sick_days: float = 0.0,
+        leave_rows: list[tuple[str, str, float, str]] | None = None,
     ) -> str:
-        """Return the statistics body markup (numbers + text bar chart).
+        """Return the statistics body markup (numbers + text bar chart + leave).
 
         Args:
             granularity: The active granularity (drives the chart heading).
@@ -1354,9 +2068,19 @@ class WorkStatsScreen(_GranularityStatsScreen):
                 are *not* subtracted to reach ``net_seconds``.
             net_seconds: Period net work seconds.
             chart_rows: The ``(label, net_seconds)`` bar rows.
+            overtime_seconds: Signed overtime for the period (worked + leave
+                credit - expected), or None to omit the overtime line.
+            expected_seconds: Expected working seconds for the period, shown
+                alongside overtime when provided.
+            holiday_days: Holiday days taken in the period.
+            sick_days: Sick days taken in the period.
+            leave_rows: Per-day leave entries in the period as
+                ``(date, kind, fraction, note)`` tuples, listed under a
+                "Leave" heading. Defaults to none.
 
         Returns:
-            Textual markup for the body (numbers block + ASCII bar chart).
+            Textual markup for the body (numbers block + ASCII bar chart +
+            optional overtime/leave block).
 
         Raises:
             ValueError: On an unknown granularity, so a future
@@ -1380,7 +2104,84 @@ class WorkStatsScreen(_GranularityStatsScreen):
             raise ValueError(f"Unknown granularity {granularity!r}.")
         bars = render_bar_chart(chart_rows, value_formatter=format_duration)
         chart = "\n".join(bars) if bars else "[dim](no data)[/dim]"
-        return numbers + "\n\n" + f"[b]{heading}[/b]\n" + chart
+        body = numbers + "\n\n" + f"[b]{heading}[/b]\n" + chart
+        leave_block = cls.format_leave_block(
+            overtime_seconds=overtime_seconds,
+            expected_seconds=expected_seconds,
+            holiday_days=holiday_days,
+            sick_days=sick_days,
+            leave_rows=leave_rows or [],
+        )
+        if leave_block:
+            body += "\n\n" + leave_block
+        return body
+
+    @staticmethod
+    def _format_signed_duration(seconds: int) -> str:
+        """Format a signed duration with an explicit ``+``/``-`` sign."""
+        if seconds == 0:
+            return format_duration(0)
+        sign = "+" if seconds > 0 else "-"
+        return sign + format_duration(abs(seconds))
+
+    @staticmethod
+    def _format_days(days: float) -> str:
+        """Format a day count, dropping a trailing ``.0`` on whole numbers."""
+        if days == int(days):
+            return str(int(days))
+        return f"{days:.1f}"
+
+    @classmethod
+    def format_leave_block(
+        cls,
+        *,
+        overtime_seconds: int | None,
+        expected_seconds: int | None,
+        holiday_days: float,
+        sick_days: float,
+        leave_rows: list[tuple[str, str, float, str]],
+    ) -> str:
+        """Return the overtime + leave block markup for the stats pop-up.
+
+        Shows the period's overtime/shortfall (signed, against the expected
+        working time) and lists the recorded holidays / sick days in the
+        period. Returns an empty string when there is nothing to show (no
+        expectation accrued and no leave), so the block is omitted. Its own
+        overridable seam, separate from the numbers/chart rendering.
+
+        Args:
+            overtime_seconds: Signed overtime, or None to omit the line.
+            expected_seconds: Expected working seconds (shown with overtime).
+            holiday_days: Holiday days taken in the period.
+            sick_days: Sick days taken in the period.
+            leave_rows: Per-day leave entries ``(date, kind, fraction, note)``.
+
+        Returns:
+            Textual markup, or an empty string when there is nothing to show.
+        """
+        has_overtime = overtime_seconds is not None and expected_seconds
+        has_leave = bool(leave_rows) or holiday_days or sick_days
+        if not has_overtime and not has_leave:
+            return ""
+        lines: list[str] = ["[b]Overtime & leave[/b]"]
+        if has_overtime:
+            assert overtime_seconds is not None and expected_seconds is not None
+            ot_style = "green" if overtime_seconds >= 0 else "yellow"
+            lines.append(
+                f"  Expected {format_duration(expected_seconds)}   "
+                f"[{ot_style}]Overtime {cls._format_signed_duration(overtime_seconds)}[/{ot_style}]"
+            )
+        if holiday_days or sick_days:
+            lines.append(
+                f"  Holidays {cls._format_days(holiday_days)}   Sick {cls._format_days(sick_days)}"
+            )
+        for date_iso, kind, fraction, note in leave_rows:
+            marker = "Sick" if kind == "sick" else "Holiday"
+            style = "yellow" if kind == "sick" else "green"
+            half = " (half)" if fraction and fraction != 1.0 else ""
+            note_part = f" — {note}" if note else ""
+            lines.append(f"  [{style}]{date_iso}  {marker}{half}{note_part}[/{style}]")
+        return "\n".join(lines)
 
 
 class TaskTimeStatsScreen(_GranularityStatsScreen):

@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from doxtr_doto.sync.json_store import WorkLog
-from doxtr_doto.time_tracking import parse_timestamp
+from doxtr_doto.time_tracking import open_session_stop_bound, parse_timestamp
 
 
 @dataclass
@@ -248,7 +248,14 @@ def _day_intervals(
             continue
         started = parse_timestamp(str(started_raw))
         stopped_raw = log.get("stopped_at")
-        stopped = parse_timestamp(str(stopped_raw)) if stopped_raw else now
+        # Keep a normal overnight interval, but bound an open session that is
+        # older than yesterday. Carrying a forgotten clock-out through many
+        # report days turns it into repeated 24-hour shifts and false
+        # overtime. Explicitly split sessions get a fresh open interval on
+        # the new day and remain countable.
+        stopped = (
+            parse_timestamp(str(stopped_raw)) if stopped_raw else open_session_stop_bound(log, now)
+        )
         if stopped <= started:
             continue
         clipped = _clip_interval(started, stopped, day)
@@ -467,6 +474,201 @@ def compute_period(
         period.break_seconds += day_work.total_break_seconds
         period.recorded_break_seconds += day_work.recorded_break_seconds
     return period
+
+
+# --- Expected working time, overtime, and leave (holidays / sick days) ----
+#
+# Overtime is the difference between what was actually *worked* (the work
+# clock's net seconds plus any credited leave time) and what was *expected*
+# for the period's working days. A working day's expected length comes from
+# the configured day length (or the weekly target divided across the
+# work-week days); a leave day (holiday / sick) credits its fraction of that
+# day's expected length so a day off reads as neither overtime nor shortfall.
+
+
+@dataclass
+class LeaveSpec:
+    """Normalized leave-day specification used by the report math.
+
+    Mirrors :class:`doxtr_doto.cli.global_state.LeaveEntry` but decoupled so
+    this module keeps no dependency on CLI/global-state types.
+
+    Attributes:
+        day: The calendar date of the leave.
+        kind: ``"holiday"`` or ``"sick"``.
+        fraction: Portion of the day covered (``1.0`` full, ``0.5`` half).
+    """
+
+    day: date
+    kind: str
+    fraction: float = 1.0
+
+    @classmethod
+    def from_entry(cls, entry: object) -> LeaveSpec | None:
+        """Build a LeaveSpec from a LeaveEntry-like object, or None.
+
+        Args:
+            entry: An object with ``date`` (``"YYYY-MM-DD"``), ``kind`` and
+                ``fraction`` attributes.
+
+        Returns:
+            A LeaveSpec, or ``None`` when the date is missing/unparseable.
+        """
+        raw = str(getattr(entry, "date", "")).strip()
+        if not raw:
+            return None
+        try:
+            day = date.fromisoformat(raw)
+        except ValueError:
+            return None
+        kind = str(getattr(entry, "kind", "holiday")).strip().lower() or "holiday"
+        try:
+            fraction = float(getattr(entry, "fraction", 1.0))
+        except (TypeError, ValueError):
+            fraction = 1.0
+        if not (0.0 < fraction <= 1.0):
+            fraction = 1.0
+        return cls(day=day, kind=kind, fraction=fraction)
+
+
+def expected_day_seconds(
+    day_length_minutes: int,
+    week_length_minutes: int | None,
+    workweek_days: list[int],
+) -> int:
+    """Return the expected length of one working day in seconds.
+
+    When a weekly target is configured it is authoritative: the per-day
+    expectation is the week length divided across the number of work-week
+    days. Otherwise the configured day length is used directly.
+
+    Args:
+        day_length_minutes: Configured expected working-day length (minutes).
+        week_length_minutes: Optional configured weekly target (minutes); when
+            set it overrides the day length.
+        workweek_days: Weekday numbers (Monday=0 .. Sunday=6) that count as
+            the work week (used only to divide a weekly target).
+
+    Returns:
+        Expected seconds for a single working day.
+    """
+    if week_length_minutes is not None and week_length_minutes > 0:
+        n_days = len({d for d in workweek_days if 0 <= d <= 6}) or 1
+        return int(round(week_length_minutes * 60 / n_days))
+    return max(0, int(day_length_minutes)) * 60
+
+
+@dataclass
+class OvertimePeriod:
+    """Overtime / leave summary over an inclusive date range.
+
+    Attributes:
+        worked_seconds: Net work-clock seconds actually worked in the period.
+        leave_credit_seconds: Seconds credited by leave days (each leave day
+            credits ``fraction x expected_day_seconds``) so a day off is not
+            read as a shortfall.
+        expected_seconds: Total expected working seconds across the period's
+            working days (work-week weekdays within the range).
+        overtime_seconds: ``worked + leave_credit - expected`` (may be
+            negative, i.e. a shortfall / undertime).
+        holiday_days_taken: Sum of ``fraction`` over ``holiday`` leave days in
+            the period.
+        sick_days_taken: Sum of ``fraction`` over ``sick`` leave days in the
+            period.
+        working_days: Count of calendar days in the range whose weekday is in
+            the work week (the days an expectation is accrued for).
+    """
+
+    worked_seconds: int = 0
+    leave_credit_seconds: int = 0
+    expected_seconds: int = 0
+    overtime_seconds: int = 0
+    holiday_days_taken: float = 0.0
+    sick_days_taken: float = 0.0
+    working_days: int = 0
+
+
+def compute_overtime(
+    period: WorkPeriod,
+    start: date,
+    end: date,
+    *,
+    day_length_minutes: int,
+    week_length_minutes: int | None,
+    workweek_days: list[int],
+    leave: list[LeaveSpec],
+) -> OvertimePeriod:
+    """Compute overtime and leave totals for an inclusive date range.
+
+    The expectation is accrued only on *working days* - calendar days in
+    ``[start, end]`` whose weekday is in ``workweek_days``. Each such day
+    contributes :func:`expected_day_seconds`. Leave days credit their fraction
+    of that expectation (so a full holiday on a working day cancels its
+    expectation exactly) and are also counted per kind.
+
+    Overtime is ``worked + leave_credit - expected``: positive means time
+    beyond the target, negative a shortfall.
+
+    Args:
+        period: The already-computed :class:`WorkPeriod` for the same range
+            (supplies the net worked seconds).
+        start: First date (inclusive).
+        end: Last date (inclusive).
+        day_length_minutes: Configured expected working-day length (minutes).
+        week_length_minutes: Optional weekly target (minutes); overrides the
+            day length when set.
+        workweek_days: Weekday numbers (Monday=0 .. Sunday=6) counting as the
+            work week.
+        leave: Normalized leave specs (holidays / sick days).
+
+    Returns:
+        An :class:`OvertimePeriod` summary.
+    """
+    per_day = expected_day_seconds(day_length_minutes, week_length_minutes, workweek_days)
+    allowed = {d for d in workweek_days if 0 <= d <= 6}
+    working_days = sum(1 for day in days_in_range(start, end) if day.weekday() in allowed)
+    expected = working_days * per_day
+
+    worked = period.net_seconds
+    leave_credit = 0
+    holiday_taken = 0.0
+    sick_taken = 0.0
+    for spec in leave:
+        if spec.day < start or spec.day > end:
+            continue
+        # Only credit leave against expectation on a working day (a holiday
+        # recorded on a weekend accrues no expectation to offset).
+        if spec.day.weekday() in allowed:
+            leave_credit += int(round(per_day * spec.fraction))
+        if spec.kind == "sick":
+            sick_taken += spec.fraction
+        else:
+            holiday_taken += spec.fraction
+
+    return OvertimePeriod(
+        worked_seconds=worked,
+        leave_credit_seconds=leave_credit,
+        expected_seconds=expected,
+        overtime_seconds=worked + leave_credit - expected,
+        holiday_days_taken=holiday_taken,
+        sick_days_taken=sick_taken,
+        working_days=working_days,
+    )
+
+
+def holiday_days_used(leave: list[LeaveSpec], year: int) -> float:
+    """Return holiday days taken (sum of fractions) in a calendar year.
+
+    Sick days are excluded (they do not consume the holiday allowance).
+
+    Args:
+        leave: Normalized leave specs.
+        year: The calendar year to total.
+
+    Returns:
+        The holiday days taken in ``year`` (a float, half-days allowed).
+    """
+    return sum(spec.fraction for spec in leave if spec.kind == "holiday" and spec.day.year == year)
 
 
 # --- Task-session aggregation (reported separately from the work clock) ---

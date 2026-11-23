@@ -13,7 +13,7 @@
 - **Bidirectional sync** - Keep RST files and JSON storage in sync with 3-way merge
 - **Auto-archiving** - Automatically archive completed tasks (on by default). Archived tasks are removed from their RST file, preserved in JSON, and shown on a dedicated archive page; reopening restores a task to the same place in its original file.
 - **CLI tool** - Manage tasks from the command line
-- **Interactive TUI** - Optional 3-pane terminal UI (`doto tui`) with configurable task-list layout views (table / list / kanban / calendar / time, cycled with `v` / `V` and persisted as your default). The kanban board draws framed, fixed-size **square cards** (long bodies clipped with an ellipsis), marks the selected card with a highlighted **frame**, and (like the list and calendar layouts) opens a **card viewer popup** on `Enter` (full task detail with a scrollable body) from which `e` opens the edit dialog; the table layout instead reveals details in its details pane. The calendar view's `Tab` cycles through the month grid, the day's `Due` task list, and the `No due date` list so you can edit / close those tasks in place, with `A` assigning the selected day as a highlighted undated task's due date. Also: live work/focus timers, a top-right elapsed-time display (the whole day's accumulated work time with the current session in parentheses, plus the highlighted task's total), editable due dates, a repo-aware **add-task modal** (choose which repository a new task is created in), a **filter & sort pop-up** (`F`: hide completed, due today/this week, by tag or priority; sort by due/priority/tag/`next`, remembered across sessions), the **active (time-recorded) task pinned to the top** of every view, Vim and arrow-key navigation, a **two-key "stream" keymap** that groups related actions under memorable prefixes (`e` edit/delete entry or series, `s` state, `t` time, `c` config, `S` stats) with a **context-sensitive hint bar** pinned to the bottom (pressing a prefix repaints the bar with that domain's sub-keys, so the scheme is self-documenting), a flat `w` to start/stop working (sets a doto in-progress and starts its focus timer in one press), and a once-per-day kickstart nudge
+- **Interactive TUI** - Optional 3-pane terminal UI (`doto tui`) with configurable task-list layout views (table / kanban / calendar / time, cycled with `v` / `V` and persisted as your default). The kanban board draws framed, fixed-size **square cards** (long bodies clipped with an ellipsis), marks the selected card with a highlighted **frame**, and (like the calendar layout) opens a **card viewer popup** on `Enter` (full task detail with a scrollable body) from which `e` opens the edit dialog; the table layout instead reveals details in its details pane. The calendar view's `Tab` cycles through the month grid, the day's `Due` task list, and the `No due date` list so you can edit / close those tasks in place, with `A` assigning the selected day as a highlighted undated task's due date. Also: live work/focus timers, a top-right elapsed-time display (the whole day's accumulated work time with the current session in parentheses, plus the highlighted task's total), editable due dates, a repo-aware **add-task modal** (choose which repository a new task is created in), a **filter & sort pop-up** (`F`: hide completed, due today/this week, by tag or priority; sort by due/priority/tag/`next`, remembered across sessions), the **active (time-recorded) task pinned to the top** of every view, Vim and arrow-key navigation, a **two-key "stream" keymap** that groups related actions under memorable prefixes (`e` edit/delete entry or series, `s` state, `t` time, `c` config, `S` stats) with a **context-sensitive hint bar** pinned to the bottom (pressing a prefix repaints the bar with that domain's sub-keys, so the scheme is self-documenting), a flat `w` to start/stop working (sets a doto in-progress and starts its focus timer in one press), and a once-per-day kickstart nudge
 - **Theming** - Customizable HTML and LaTeX output
 - **Charts** - Task summaries with built-in SVG charts, or richer [plotly](https://plotly.com/python/) charts (pie, bar, stacked-bar, progress, burndown)
 - **Doxtr integration** - Optional integration with doxtr-pdf-theme-core: semantic-palette-derived task colors and automatic landscape rotation for wide task tables
@@ -666,6 +666,40 @@ doto log TASK-001 --fix split             # split an overnight session at midnig
 doto log TASK-001 --fix discard           # drop an unclosed session (don't count it)
 doto log TASK-001 --edit 2026-01-15T18:00:00+00:00  # set the open session's stop time
 
+# Holidays & sick days: record leave against the work clock so a day off is
+# credited toward your expected working time (not read as an overtime
+# shortfall), with holidays counted against your yearly allowance.
+doto leave add 2026-07-06 --to 2026-07-10        # a week of holiday (skips weekends)
+doto leave add today --kind sick                 # a sick day
+doto leave add friday --half --note "afternoon"  # a half day
+doto leave add 2026-12-24 --include-weekends     # also record weekend days
+doto leave list --year 2026                      # recorded leave + allowance drawdown
+doto leave remove 2026-07-06                     # delete leave on a date
+doto leave remove 2026-07-06 --to 2026-07-10     # delete a whole range
+
+# Configure the expected working-day / -week length and holiday allowance.
+# Lengths accept decimal hours (40h, 8.4h, 7.5h) or an h+m form (8h24m).
+doto config                                       # shows working day/week + allowance
+doto config --set-day-length 8h24m               # expected working day
+doto config --set-week-length 40h                 # expected working week (overrides day)
+doto config --set-week-length none                # derive the week from the day length
+doto config --set-holiday-allowance 27.5          # yearly holiday days (half-days allowed)
+#
+# `doto report` now also shows an "Overtime & leave" block: the expected
+# working time for the period's work-week days, your net worked time plus any
+# leave credit, the resulting overtime (or shortfall, shown signed), and the
+# holiday allowance drawdown (allowance / used / remaining) plus sick days.
+# The `time` TUI layout's summary panel mirrors this (overtime + holidays).
+#
+# In the TUI you can also record a new holiday / sick period without leaving
+# the app: the Config stream `c l` opens a modal (start date, optional end
+# date, kind holiday/sick, half-day, note). Recorded leave is visualized in
+# the `time` layout's day list (a green "Holiday" / yellow "Sick day" marker,
+# with leave-only days shown even when no time was clocked) and in the work
+# statistics pop-up (`S w`), which lists the period's leave and its overtime.
+# The top status bar shows the next current/upcoming leave period on the left
+# (e.g. "⚑ Next Holiday: 2026-07-06–2026-07-10 (in 6 days) — Summer").
+
 # Archive tasks (hide from listings, can reopen later)
 doto archive TASK-001
 doto archive TASK-001 TASK-002 TASK-003
@@ -953,6 +987,7 @@ subclass/replace it.
 | `clock-out` | Stop the focus timer and the work clock (alias of `stop work`) |
 | `status` | Show the active focus task and today's work clock |
 | `log` | List a task's session intervals; recover unclosed/overnight sessions |
+| `leave` | Record and manage holidays / sick days (`add`/`list`/`remove`) |
 | `repos` | List cached repositories; `rescan`/`add`/`forget` manage the registry |
 | `next` | Show the next task to work on |
 | `tree` | Display tasks as a dependency tree |
@@ -965,7 +1000,7 @@ subclass/replace it.
 | `export` | Export tasks to various formats (JSON, CSV, Markdown) |
 | `search` | Search tasks by text pattern or regex |
 | `stats` | Show task statistics |
-| `report` | Report break-aware work hours + a separate per-task/per-repo breakdown |
+| `report` | Report break-aware work hours, overtime & leave + a separate per-task/per-repo breakdown |
 | `timesheet` | Export a day's worked intervals (work clock + task sessions) to CSV |
 | `tui` | Launch the interactive 3-pane terminal UI (requires the `tui` extra) |
 | `calsync` | Sync tasks to a calendar (Google, Microsoft, Apple, CalDAV; requires the `calendar` extra) |
@@ -1003,6 +1038,13 @@ Layout:
   task** (summed across all of that task's worklogs). It refreshes on the
   same live timer as the status line and updates immediately as you move the
   task-list cursor.
+- **Top-left next-leave display** - on the same top bar, left-aligned, the
+  next current or upcoming **leave period** (holiday / sick): its kind, date
+  (or date range for a multi-day block), a relative `in N days` / `today` /
+  `ends in N days` hint, and the note when present (e.g.
+  `⚑ Next Holiday: 2026-07-06–2026-07-10 (in 6 days) — Summer`). Shows a dim
+  placeholder when no upcoming leave is recorded; refreshes on the same live
+  timer and immediately after you record leave (`c l`).
 - **Status line** - two always-visible live counters, updated on a timer:
   the daily work clock (Layer 1) and the active focus session (Layer 2).
 
@@ -1042,10 +1084,10 @@ Flat (single-press) keys:
 | `w` | **Start / stop working** on the selected task(s): sets the doto **in-progress** and starts its focus timer in one press (a second press stops the timer and leaves the status unchanged). If the configured `statuses` have no `in-progress`, it gracefully degrades to timer-only. Honors the multi-selection |
 | `d` | Mark the selected task(s) done (flat alias of `s d`) |
 | `D` | Cycle the status of the selected task(s) (flat alias of `s n`) |
-| `v` | Cycle the task-list layout (table → list → kanban → calendar → time) |
-| `V` | Cycle the task-list layout in **reverse** (table ← list ← kanban ← calendar ← time), the exact mirror of `v` |
+| `v` | Cycle the task-list layout (table → kanban → calendar → time) |
+| `V` | Cycle the task-list layout in **reverse** (table ← kanban ← calendar ← time), the exact mirror of `v` |
 | `Enter` | **List / kanban / calendar:** open the card viewer popup (full task detail with a scrollable body; `Enter`/`Esc` close it, `e` opens the edit dialog). In the calendar's `Due` / `No due date` regions this is the highlighted task. **Table:** reveal the selected task's details (focus the details pane) |
-| `h` / `l` (or `←` / `→`) | Kanban: **navigate the selection** to the previous / next swim lane (select a card in another status column, without changing any task). Calendar: select the previous / next day. Harmless no-op in the table / list layouts |
+| `h` / `l` (or `←` / `→`) | Kanban: **navigate the selection** to the previous / next swim lane (select a card in another status column, without changing any task). Calendar: select the previous / next day. Harmless no-op in the table layout |
 | `/` | Filter / search tasks (title, id, or tag) |
 | `F` | Open the **filter & sort pop-up** (Feature below): hide completed tasks, hide `done` tasks completed more than N days ago (default 10), show only tasks due today / due this week, filter by a chosen tag or priority, filter by one or more **repositories**, and sort by due date / priority / tag / `next` (the recommended-next ordering) ascending or descending. The last choice is **remembered** across sessions |
 | `R` | Rescan repositories |
@@ -1058,6 +1100,7 @@ Stream (two-key) keys — press the prefix, then a sub-key:
 | Stream | Action |
 |--------|--------|
 | `e e` | **Edit:** edit the selected entry (modal over the single-task update logic). `e` is now a prefix — a bare `e` no longer edits; press `e e` |
+| `e a` | **Edit:** add a sub-task under the currently selected task. Opens the add-task modal with the selected task locked in as `parent` (and targets the parent's repository in Global scope). Works from any view that selects a task; matches `doto add --parent` / `-P` |
 | `e d` | **Edit:** delete the selected entry (lowercase = single entry). Opens a yes/no confirm dialog; on confirm the task is deleted and, when it belonged to a series, pruned from that series' occurrence list |
 | `e E` | **Edit:** edit the selected occurrence's **whole series from here forward** (uppercase = whole series). Shown **only when the selected task is part of a series**. The forward-only anchor is the selected occurrence's date: occurrences on / after it are re-stamped (time / duration / title), earlier ones are left unchanged. Routed through the same reusable `update_series` as `doto series update` |
 | `e D` | **Edit:** delete the selected occurrence's **whole series** (uppercase = whole series). Shown **only when the selected task is part of a series**. Opens a confirm dialog offering **Delete series + tasks** / **Keep tasks, remove series** / **Cancel** (parity with `doto series delete` / `--keep-tasks`) |
@@ -1073,10 +1116,11 @@ Stream (two-key) keys — press the prefix, then a sub-key:
 | `t w` | **Time:** manage work time (edit the work-clock intervals) |
 | `t e` | **Time:** edit the **highlighted doto's recorded sessions** (add / edit / delete its focus-session intervals, persisted to that doto's owning repo store). A no-op in the `time` layout |
 | `t ?` | **Time:** open the time-domain help |
-| `c b` | **Config:** configure breaks + the work week (auto-deducted hours) |
+| `c b` | **Config:** configure breaks + the work week (auto-deducted hours), plus the expected working-day / -week length and yearly holiday allowance |
+| `c l` | **Config:** record a new holiday / sick period (modal: start date, optional end date, kind holiday/sick, half-day, note). Appended to `leave_days`; shown in the `time` layout and work-stats pop-up |
 | `c d` | **Config:** set the table-layout detail-pane size (how much of the height the detail pane takes, an `n/d` ratio of the total; applied live and persisted) |
 | `c ?` | **Config:** open the config-domain help |
-| `S w` | **Stats:** open the work-statistics pop-up (per-period net/gross/break numbers + text bar charts; `d`/`w`/`m`/`y`, `g`, `←`/`→`). Available from any layout; anchors on the time view's selected day when the time layout is active, otherwise on today |
+| `S w` | **Stats:** open the work-statistics pop-up (per-period net/gross/break numbers + text bar charts, plus an overtime & leave block listing the period's recorded holidays / sick days; `d`/`w`/`m`/`y`, `g`, `←`/`→`). Available from any layout; anchors on the time view's selected day when the time layout is active, otherwise on today |
 | `S t` | **Stats:** open the per-doto time-reporting pop-up (worked time per doto / per repo as text bar charts; `d`/`w`/`m`/`y`, `g`, `←`/`→`). Available from any layout; anchors on the time view's selected day when the time layout is active, otherwise on today |
 | `S ?` | **Stats:** open the stats-domain help |
 | `C s` | **Calendar Sync:** sync **every displayed repository that has calendar sync enabled** (in Local scope: the current repo; in Global scope: all shown repos, narrowed by the active repo filter), each with its own `direction` / `conflict_policy` / calendar. Then refresh the task list. Mirrors `doto calsync sync` per repo. Runs in a background thread worker so the UI never freezes |
@@ -1121,12 +1165,13 @@ blocked → done`), wrapping around at the end.
 
 ##### Task-list layout views (`v` / `V`)
 
-Press `v` to cycle the task list between five layout views (analogous to the
+Press `v` to cycle the task list between four layout views (analogous to the
 `doto-list` directive's `:format:` views, but for the live terminal app), or
 `V` (Shift+V) to cycle in **reverse** (the exact mirror of `v`). The
 chosen layout is **persisted** to `~/.config/doto/config.json` (`tui_layout`),
 so it becomes your default on the next launch. Older config files that predate
-this field fall back to the default table view (backward compatible).
+this field, unknown values, and the removed legacy `list` value fall back to
+the default table view (backward compatible).
 
 - **`table`** (default) - the 3-pane table described above: the repo tree on
   the left, and the task list stacked **above** the task-details pane on the
@@ -1140,13 +1185,6 @@ this field fall back to the default table view (backward compatible).
   (`tui_detail_ratio`), so it is restored on the next launch; older config
   files that predate this field fall back to the `3/4` default (backward
   compatible).
-- **`list`** - a single compact column, one task per line. The highlighted
-  row's details appear in the shared details pane as you move with `j` / `k`
-  (or `↓` / `↑`); pressing `Enter` activates the highlighted row to reveal
-  that task's details and move focus to the details pane, mirroring the table
-  layout's Tab-to-details flow (routed through the app, like every other
-  action). The list scrolls to keep the highlighted row in view as you move
-  past the visible height.
 - **`kanban`** - tasks grouped into columns by status (from the configured
   `statuses`), laid out **left-to-right** like a real board - every
   configured status is its own **side-by-side lane** (e.g. open │ in-progress
@@ -1291,7 +1329,7 @@ this field fall back to the default table view (backward compatible).
   the shared cross-repo task collector that `doto report` uses, so the figures
   agree with the CLI; it is an overridable `TaskTimeStatsScreen`
   (`DotoApp.task_time_stats_screen_class`). Separately, pressing **`E`** on the
-  **highlighted doto** (in the table / list / kanban / calendar layouts) opens
+  **highlighted doto** (in the table / kanban / calendar layouts) opens
   a **per-doto session editor** that lists that single doto's recorded focus
   sessions (start → stop with per-interval and total duration) and lets you
   **add** (`a`), **edit** (`e` / `Enter`), or **delete** (`x`) a session,
@@ -1310,10 +1348,9 @@ this field fall back to the default table view (backward compatible).
   stop shows `(running)` and an unparseable or non-positive duration shows a
   dim `—` placeholder; the actual save is still validated separately.
 
-Across every layout, `Enter` acts on the currently selected task
-(a harmless no-op when nothing is selectable). In the **list**, **kanban**,
-and **calendar** layouts
-`Enter` opens a **card viewer popup** - a modal listing the task's *full*
+Across every task layout, `Enter` acts on the currently selected task
+(a harmless no-op when nothing is selectable). In the **kanban** and
+**calendar** layouts, `Enter` opens a **card viewer popup** - a modal listing the task's *full*
 content (the same fields as `doto list -f cards`: id, title, assignee,
 priority, status, due, tags, depends_on, series, created, updated, and body).
 The style-markup field lines **wrap** so long titles/values are fully readable,
@@ -1344,9 +1381,8 @@ fields (they appear only in this viewer, never in the CLI card):
   Overridable via `doxtr_doto.cli.session.register_time_spent_renderer(fn)`
   with a `(worklogs, now=None) -> str | None` callable.
 
-The
-`list` and `kanban` views scroll so the highlighted row stays visible as the
-cursor moves (the `calendar` grid stays pinned, as noted above). Scrolling is
+The `kanban` view scrolls so the highlighted card stays visible as the cursor
+moves (the `calendar` grid stays pinned, as noted above). Scrolling is
 **smart**: during continuous `j` / `k` navigation the view only starts
 scrolling once the
 cursor comes within a small margin of the top or bottom of the visible frame,
@@ -1372,7 +1408,7 @@ so a child theme can retune the discontinuous-jump behavior alongside
 Each view is its own overridable widget class with pure `format_*`
 classmethods, sharing an `AltLayoutView` base (the alt-view contract the app
 drives through a single data-driven registry) and registered on `DotoApp` via
-`list_view_class`, `kanban_view_class`, and `calendar_view_class`. A child
+`kanban_view_class`, `calendar_view_class`, and `time_view_class`. A child
 theme can replace any view's rendering by subclassing `DotoApp` and swapping
 the attribute, mirroring the existing pane/screen seams.
 
@@ -1380,7 +1416,7 @@ the attribute, mirroring the existing pane/screen seams.
 
 The currently **active** task - the one with an open worklog session (started
 with `s`) - is always pinned to the **top** of its list in *every* layout:
-the top row of the table and list, the top card of its status column in the
+the top row of the table, the top card of its status column in the
 kanban board, and the top of its day's list (and the undated bucket) in the
 calendar. The pin is **stable** (non-running tasks keep their relative order,
 and if several tasks are running they keep theirs) and is applied **after**

@@ -9,10 +9,14 @@ from doxtr_doto.time_tracking import (
     detect_overnight,
     discard_session,
     elapsed_seconds,
+    find_long_sessions,
     has_open_session,
+    long_session_threshold_seconds,
     now_iso,
     open_session,
+    open_session_stop_bound,
     parse_timestamp,
+    recover_stale_open_session,
     split_at_midnight,
     start_session,
 )
@@ -234,6 +238,80 @@ class TestDiscardSession:
         result = discard_session(logs)
         assert len(result) == 1
         assert result[0]["started_at"] == _dt(2024, 1, 1, 11).isoformat()
+
+
+class TestFindLongSessions:
+    """Tests for intelligent overly-long / forgotten session detection."""
+
+    def test_normal_day_sessions_not_flagged(self):
+        logs = [
+            {
+                "started_at": _dt(2026, 11, 23, 9, 0).isoformat(),
+                "stopped_at": _dt(2026, 11, 23, 12, 0).isoformat(),
+            },
+            {
+                "started_at": _dt(2026, 11, 23, 13, 0).isoformat(),
+                "stopped_at": _dt(2026, 11, 23, 18, 0).isoformat(),
+            },
+        ]
+        assert find_long_sessions(logs, now=_dt(2026, 11, 23, 19, 0), day_length_minutes=480) == []
+
+    def test_flags_open_stale_and_multiday_and_over_threshold(self):
+        logs = [
+            # Closed > 12h (16h)
+            {
+                "started_at": _dt(2026, 11, 13, 7, 0).isoformat(),
+                "stopped_at": _dt(2026, 11, 13, 23, 0).isoformat(),
+            },
+            # Closed spanning multiple days (49h+)
+            {
+                "started_at": _dt(2026, 10, 16, 21, 30).isoformat(),
+                "stopped_at": _dt(2026, 10, 18, 23, 15).isoformat(),
+            },
+            # Still open from 9 days ago
+            {
+                "started_at": _dt(2026, 11, 14, 12, 30).isoformat(),
+                "stopped_at": None,
+            },
+        ]
+        findings = find_long_sessions(
+            logs,
+            now=_dt(2026, 11, 23, 21, 0),
+            day_length_minutes=480,
+        )
+        assert len(findings) == 3
+        # Open/stale finding comes first.
+        assert findings[0].index == 2
+        assert findings[0].is_open is True
+        assert any(r.startswith("open 9d") for r in findings[0].reasons)
+        # Longest closed span next.
+        assert findings[1].index == 1
+        assert "spans days" in findings[1].reasons
+        # Single-day 16h session (> 12h) last.
+        assert findings[2].index == 0
+        assert ">12h" in findings[2].reasons
+
+    def test_threshold_scales_with_day_length(self):
+        assert long_session_threshold_seconds(480) == 12 * 3600
+        assert long_session_threshold_seconds(600) == 15 * 3600
+
+
+class TestStaleOpenSession:
+    """Tests for safe handling of forgotten prior-day work clocks."""
+
+    def test_open_session_is_bounded_to_start_day(self):
+        log = {"started_at": _dt(2024, 1, 1, 23).isoformat(), "stopped_at": None}
+        assert open_session_stop_bound(log, _dt(2024, 1, 3, 8)) == _dt(2024, 1, 2, 0)
+
+    def test_recover_closes_stale_interval_without_filling_intervening_days(self):
+        logs = [{"started_at": _dt(2024, 1, 1, 9).isoformat(), "stopped_at": None}]
+        result = recover_stale_open_session(logs, now=_dt(2024, 1, 3, 8))
+        assert result[0]["stopped_at"] == _dt(2024, 1, 2, 0).isoformat()
+        assert logs[0]["stopped_at"] is None
+
+    def test_recover_keeps_same_day_open_session_running(self):
+        logs = [{"started_at": _dt(2024, 1, 3, 8).isoformat(), "stopped_at": None}]
+        assert recover_stale_open_session(logs, now=_dt(2024, 1, 3, 10)) == logs
 
 
 class TestSplitAtMidnight:

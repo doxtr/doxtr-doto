@@ -236,6 +236,29 @@ def test_open_session_closed_at_now() -> None:
     assert result.gross_seconds == 11 * 3600  # 09:00 -> 20:00 (now)
 
 
+def test_open_overnight_session_counts_on_both_days() -> None:
+    worklogs = [
+        _wl(
+            datetime(2026, 6, 1, 22, 0, tzinfo=TZ).isoformat(),
+            None,
+        )
+    ]
+    now = datetime(2026, 6, 2, 8, 0, tzinfo=TZ)
+    assert compute_day(worklogs, date(2026, 6, 1), [], now).gross_seconds == 2 * 3600
+    assert compute_day(worklogs, date(2026, 6, 2), [], now).gross_seconds == 8 * 3600
+
+
+def test_stale_open_session_does_not_fill_later_days() -> None:
+    # A forgotten open worklog from Monday must not count as 24 hours on
+    # Tuesday (and every day thereafter). Its effective stop is midnight after
+    # the start day unless it was explicitly split into a fresh session.
+    worklogs = [_wl(_ts(9, 0, day=1), None)]
+    monday = compute_day(worklogs, date(2026, 6, 1), [], NOW)
+    tuesday = compute_day(worklogs, date(2026, 6, 2), [], datetime(2026, 6, 3, 12, tzinfo=TZ))
+    assert monday.gross_seconds == 11 * 3600  # same-day open interval -> now
+    assert tuesday.gross_seconds == 0
+
+
 def test_overnight_clipped_per_day() -> None:
     # Session spanning midnight is attributed to each day it covers.
     worklogs = [
@@ -564,3 +587,175 @@ def test_timesheet_csv_matches_target_example() -> None:
 def test_timesheet_csv_empty_day_header_only() -> None:
     csv_text = timesheet_csv([], 0, DAY, ["date", "start_time", "end_time"])
     assert csv_text.splitlines() == ["date,start_time,end_time"]
+
+
+# --- Overtime / leave (holidays, sick days) -------------------------------
+
+from doxtr_doto.work_report import (  # noqa: E402
+    LeaveSpec,
+    compute_overtime,
+    expected_day_seconds,
+    holiday_days_used,
+)
+
+_OT_TZ = timezone.utc
+
+
+def _mkweek_logs(days, hours=8):
+    """Build 8h work logs for the given day-of-month ints in Jan 2026."""
+    logs = []
+    for d in days:
+        logs.append(
+            {
+                "started_at": f"2026-01-{d:02d}T09:00:00+00:00",
+                "stopped_at": f"2026-01-{d:02d}T{9 + hours:02d}:00:00+00:00",
+            }
+        )
+    return logs
+
+
+def test_expected_day_seconds_from_day_length():
+    assert expected_day_seconds(480, None, [0, 1, 2, 3, 4]) == 8 * 3600
+
+
+def test_expected_day_seconds_week_overrides():
+    # 40h / 5 days = 8h
+    assert expected_day_seconds(480, 2400, [0, 1, 2, 3, 4]) == 8 * 3600
+    # 37.5h / 5 days = 7.5h
+    assert expected_day_seconds(480, 2250, [0, 1, 2, 3, 4]) == int(7.5 * 3600)
+
+
+def test_overtime_holiday_cancels_shortfall():
+    now = datetime(2026, 1, 9, 18, 0, tzinfo=_OT_TZ)
+    worklogs = _mkweek_logs([5, 6, 7, 8])  # Mon-Thu, 8h each
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period(worklogs, start, end, [], now)
+    leave = [LeaveSpec(day=date(2026, 1, 9), kind="holiday")]  # Fri
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=leave,
+    )
+    assert ot.expected_seconds == 5 * 8 * 3600
+    assert ot.worked_seconds == 4 * 8 * 3600
+    assert ot.leave_credit_seconds == 8 * 3600
+    assert ot.overtime_seconds == 0
+    assert ot.holiday_days_taken == 1.0
+    assert ot.working_days == 5
+
+
+def test_overtime_positive_when_working_extra():
+    now = datetime(2026, 1, 9, 18, 0, tzinfo=_OT_TZ)
+    worklogs = _mkweek_logs([5, 6, 7, 8, 9], hours=9)  # 9h each
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period(worklogs, start, end, [], now)
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=[],
+    )
+    assert ot.overtime_seconds == 5 * 3600  # +1h/day
+
+
+def test_overtime_negative_shortfall():
+    now = datetime(2026, 1, 9, 18, 0, tzinfo=_OT_TZ)
+    worklogs = _mkweek_logs([5, 6, 7], hours=8)  # only 3 days
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period(worklogs, start, end, [], now)
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=[],
+    )
+    assert ot.overtime_seconds == -2 * 8 * 3600  # two missing days
+
+
+def test_sick_day_credited_not_counted_as_holiday():
+    now = datetime(2026, 1, 9, 18, 0, tzinfo=_OT_TZ)
+    worklogs = _mkweek_logs([5, 6, 7, 8])
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period(worklogs, start, end, [], now)
+    leave = [LeaveSpec(day=date(2026, 1, 9), kind="sick")]
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=leave,
+    )
+    assert ot.sick_days_taken == 1.0
+    assert ot.holiday_days_taken == 0.0
+    assert ot.overtime_seconds == 0  # sick day credits the expectation too
+
+
+def test_half_day_leave_half_credit():
+    now = datetime(2026, 1, 9, 18, 0, tzinfo=_OT_TZ)
+    worklogs = _mkweek_logs([5, 6, 7, 8])
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period(worklogs, start, end, [], now)
+    leave = [LeaveSpec(day=date(2026, 1, 9), kind="holiday", fraction=0.5)]
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=leave,
+    )
+    assert ot.leave_credit_seconds == 4 * 3600
+    assert ot.overtime_seconds == -4 * 3600  # still half a day short
+    assert ot.holiday_days_taken == 0.5
+
+
+def test_weekend_holiday_no_expectation_offset():
+    # A holiday recorded on a Saturday accrues no expectation to offset.
+    now = datetime(2026, 1, 10, 18, 0, tzinfo=_OT_TZ)
+    start, end = week_range(date(2026, 1, 7))
+    period = compute_period([], start, end, [], now)
+    leave = [LeaveSpec(day=date(2026, 1, 10), kind="holiday")]  # Saturday
+    ot = compute_overtime(
+        period,
+        start,
+        end,
+        day_length_minutes=480,
+        week_length_minutes=None,
+        workweek_days=[0, 1, 2, 3, 4],
+        leave=leave,
+    )
+    assert ot.leave_credit_seconds == 0
+    assert ot.holiday_days_taken == 1.0  # still counts toward allowance
+
+
+def test_holiday_days_used_by_year():
+    leave = [
+        LeaveSpec(day=date(2026, 3, 1), kind="holiday"),
+        LeaveSpec(day=date(2026, 3, 2), kind="holiday", fraction=0.5),
+        LeaveSpec(day=date(2026, 3, 3), kind="sick"),
+        LeaveSpec(day=date(2025, 12, 31), kind="holiday"),
+    ]
+    assert holiday_days_used(leave, 2026) == 1.5
+    assert holiday_days_used(leave, 2025) == 1.0
+
+
+def test_leave_spec_from_entry_bad_date():
+    class _E:
+        date = "not-a-date"
+        kind = "holiday"
+        fraction = 1.0
+
+    assert LeaveSpec.from_entry(_E()) is None

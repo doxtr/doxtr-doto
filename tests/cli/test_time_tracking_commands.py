@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,33 @@ class TestStart:
         result = _invoke(runner, store_file, "start", "work")
         assert "already running" in result.output
         assert len(_global_state(env)["work_clock"]["worklogs"]) == 1
+
+    def test_start_work_recovers_prior_day_open_session(self, runner, store_file, env):
+        stale_start = datetime.now().astimezone() - timedelta(days=3)
+        stale_start = stale_start.replace(hour=9, minute=0, second=0, microsecond=0)
+        cfg_path = env / "doto" / "config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "work_clock": {
+                        "worklogs": [{"started_at": stale_start.isoformat(), "stopped_at": None}]
+                    },
+                }
+            )
+        )
+
+        result = _invoke(runner, store_file, "start", "work")
+        assert result.exit_code == 0
+        logs = _global_state(env)["work_clock"]["worklogs"]
+        assert len(logs) == 2
+        expected_boundary = datetime.combine(
+            stale_start.date() + timedelta(days=1), datetime.min.time(), tzinfo=stale_start.tzinfo
+        )
+        assert logs[0]["stopped_at"] == expected_boundary.isoformat()
+        assert logs[1]["stopped_at"] is None
+        assert datetime.fromisoformat(logs[1]["started_at"]).date() == datetime.now().date()
 
     def test_start_task_auto_clocks_in_and_starts_focus(self, runner, store_file, env):
         result = _invoke(runner, store_file, "start", "T-001")

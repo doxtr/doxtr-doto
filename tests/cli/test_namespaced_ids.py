@@ -380,6 +380,33 @@ class TestNamespacedCommands:
         assert "Cross-repo dependencies are not supported" in result.output
         assert set(json.loads(web_store.read_text())["tasks"].keys()) == before
 
+    def test_add_with_namespaced_parent_creates_child_in_parent_repo(self, two_repos, runner):
+        # Passing --parent repo#id creates the new task in THAT repository with
+        # parent set to the bare local id, leaving the local store untouched.
+        web_store, api, _web = two_repos
+        api_store_path = api / ".doto" / "tasks.json"
+        web_before = set(json.loads(web_store.read_text())["tasks"].keys())
+
+        result = runner.invoke(
+            cli,
+            ["--json", str(web_store), "add", "API subtask", "--parent", "api#A-1"],
+        )
+        assert result.exit_code == 0
+
+        api_tasks = json.loads(api_store_path.read_text())["tasks"]
+        child_id = next(tid for tid, t in api_tasks.items() if t["title"] == "API subtask")
+        assert api_tasks[child_id]["parent"] == "A-1"
+        assert set(json.loads(web_store.read_text())["tasks"].keys()) == web_before
+
+    def test_add_with_unknown_namespaced_parent_fails(self, two_repos, runner):
+        web_store, _api, _web = two_repos
+        result = runner.invoke(
+            cli,
+            ["--json", str(web_store), "add", "Orphan", "--parent", "ghost#X-1"],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output
+
 
 class TestListAggregation:
     """Tests for 'doto list -r' aggregated multi-repo views."""

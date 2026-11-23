@@ -30,9 +30,9 @@ lane, mirroring :meth:`DotoApp._jump_cursor` through the overridable
 ``h``/``l`` and the ``left``/``right`` arrows drive the per-layout left/right
 move: in the kanban layout they *navigate the selection* across the swim lanes
 (status columns) without changing any task, in the calendar layout they select
-the previous/next day, and they are a harmless no-op in the table/list layouts.
+the previous/next day, and they are a harmless no-op in the table layout.
 ``Enter`` reveals the
-currently selected task's details: in the list, kanban and calendar layouts it
+currently selected task's details: in the kanban and calendar layouts it
 opens a *card viewer* popup (:class:`CardViewerScreen`) listing the task's full
 detail - the style-markup field lines wrap and the task body renders as
 Markdown in a full-height, scrollable body region - and in the table layout it
@@ -40,7 +40,7 @@ reveals the details
 in the shared details pane (routed through
 :meth:`DotoApp.action_activate`, plus :meth:`DotoApp.on_data_table_row_selected`
 for the table layout, whose :class:`~textual.widgets.DataTable` consumes
-``Enter`` itself). The alternative (list/kanban/calendar) layouts are
+``Enter`` itself). The alternative (kanban/calendar) layouts are
 scrollable - each is a :class:`doxtr_doto.cli.tui.widgets.AltLayoutView`
 (a scroll container) that scrolls to keep the highlighted row visible as the
 cursor moves, using the shared smart-scroll algorithm (a configurable margin
@@ -117,6 +117,8 @@ from doxtr_doto.cli.tui import TERMINAL_TITLE, actions, calsync_tui, data, filte
 from doxtr_doto.cli.tui.theme import escape_markup, escape_title
 from doxtr_doto.cli.tui.time_mgmt import (
     BreaksConfigScreen,
+    LeaveConfigScreen,
+    SessionAuditScreen,
     TaskSessionsScreen,
     TaskTimeStatsScreen,
     WorkStatsScreen,
@@ -127,7 +129,7 @@ from doxtr_doto.cli.tui.widgets import (
     CalendarView,
     KanbanView,
     KeyHintBar,
-    ListView,
+    NextHolidayLine,
     RepoTree,
     StatusLine,
     TaskDetails,
@@ -1781,6 +1783,7 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
         priorities: list[str] | None = None,
         known_assignees: list[str] | None = None,
         known_tags: list[str] | None = None,
+        parent_label: str | None = None,
     ) -> None:
         """Initialize the add-task modal.
 
@@ -1801,6 +1804,11 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
             known_assignees: Candidate assignee names for auto-complete
                 suggestions.
             known_tags: Candidate tag names for auto-complete suggestions.
+            parent_label: Optional display label (e.g. ``"DOTO-001"``) when
+                adding a sub-task under a fixed parent task. When given, the
+                modal heading/label identifies the parent and the repo
+                selector is omitted (the child always lives in the parent's
+                repository).
         """
         super().__init__()
         self.repos = repos
@@ -1810,6 +1818,7 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
         self.priorities = priorities or []
         self.known_assignees = known_assignees or []
         self.known_tags = known_tags or []
+        self.parent_label = parent_label
 
     def resolve_fields(self) -> tuple[str, ...]:
         """Return the ordered task-field names this modal should render.
@@ -1987,6 +1996,25 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
             return
         yield from self._compose_full()
 
+    def on_mount(self) -> None:
+        """Focus the first editable field so the user can type immediately.
+
+        In the minimal layout that is ``#add-input``; in a multi-field layout
+        it is the first rendered input/select/textarea widget inside
+        ``#add-body-scroll`` (preventing the scrollable container or Save
+        button from stealing initial focus).
+        """
+        if self._is_minimal():
+            try:
+                self.query_one("#add-input", Input).focus()
+            except NoMatches:
+                pass
+            return
+        for widget in self.query("#add-body-scroll *"):
+            if isinstance(widget, (Input, Select, TextArea)):
+                widget.focus()
+                return
+
     def _compose_minimal(self) -> ComposeResult:
         """Render the original title-only layout (backward compatible).
 
@@ -1995,7 +2023,8 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
         with Enter, so single-field setups behave exactly as before.
         """
         options = self.repo_options()
-        yield Label("New task title:", id="add-label")
+        label = f"New sub-task for {self.parent_label}:" if self.parent_label else "New task title:"
+        yield Label(label, id="add-label")
         yield Input(placeholder="Task title", id="add-input")
         yield from self._build_repo_selector(options)
 
@@ -2006,8 +2035,9 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
         position (:meth:`_compose_full`) and the implicit after-title fallback
         (presets / :meth:`_compose_minimal`) - build the selector identically,
         and a child theme can restyle the picker by overriding this one method.
-        Renders nothing when there is at most one repo (no empty selector), the
-        same rule used before. Keeps the widget id ``#add-repo`` and label id
+        Renders nothing when there is at most one repo (no empty selector), or
+        when :attr:`parent_label` is set (a sub-task always lives in its
+        parent's repository). Keeps the widget id ``#add-repo`` and label id
         ``#add-repo-label`` unchanged so :meth:`_selected_repo` still finds it.
 
         Args:
@@ -2016,9 +2046,9 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
 
         Returns:
             The selector widgets to yield, or an empty list when there is at
-            most one repo.
+            most one repo or a fixed parent is set.
         """
-        if len(options) <= 1:
+        if self.parent_label or len(options) <= 1:
             return []
         return [
             Label("Repository:", id="add-repo-label"),
@@ -2047,9 +2077,10 @@ class AddTaskScreen(_TaskFieldWidgetsMixin, ModalScreen["AddTaskResult | None"])
         names = self.resolve_fields()
         options = self.repo_options()
         repo_is_positioned = add_fields.REPO_FIELD in names
+        heading = f"New sub-task for {self.parent_label}" if self.parent_label else "New task"
         with Vertical(id="add-modal"):
             with VerticalScroll(id="add-body-scroll"):
-                yield Label("New task", id="add-heading")
+                yield Label(heading, id="add-heading")
                 for name in names:
                     if name == add_fields.REPO_FIELD:
                         # Render the repo selector at its configured position.
@@ -4077,7 +4108,7 @@ class HelpScreen(ModalScreen[None]):
         lines.append("")
         lines.append("  Arrow keys mirror the vim keys in every layout.")
         lines.append("")
-        lines.append("  In the card viewer popup (Enter on a list/kanban/calendar card):")
+        lines.append("  In the card viewer popup (Enter on a kanban/calendar card):")
         lines.append("  Enter / Esc    close the viewer")
         lines.append("  e              close the viewer and edit the task")
         lines.append("")
@@ -4237,9 +4268,9 @@ class AltLayoutSpec(NamedTuple):
 
     Attributes:
         class_attr: Name of the overridable ``DotoApp`` class attribute
-            holding the view's widget class (e.g. ``"list_view_class"``), so a
+            holding the view's widget class (e.g. ``"kanban_view_class"``), so a
             child theme's swapped-in subclass is honored.
-        dom_id: The widget's DOM id in ``compose`` (e.g. ``"list-view"``).
+        dom_id: The widget's DOM id in ``compose`` (e.g. ``"kanban-view"``).
         rebuild: Adapter that rebuilds the view from the app's current task
             set, absorbing per-view ``rebuild`` signature differences (kanban
             also needs the configured statuses). It queries its own widget
@@ -4247,9 +4278,8 @@ class AltLayoutSpec(NamedTuple):
             needs to carry view-specific arguments.
         cycles_details: Whether ``Tab`` cycles focus between this view and the
             shared :class:`doxtr_doto.cli.tui.widgets.TaskDetails` pane
-            (view <-> details). False for every current layout: the plain list
-            layout is a single focusable view (so Tab stays on it), and the
-            kanban and calendar layouts rebind ``Tab`` to their own
+            (view <-> details). False for every current layout: the kanban and
+            calendar layouts rebind ``Tab`` to their own
             ``tab_action`` (kanban moves a card between lanes; calendar cycles
             its grid / Due / No-due regions and the details pane). Kept as a
             data-driven flag - rather than a hard-coded per-layout branch - so
@@ -4347,7 +4377,9 @@ class DotoApp(App[None]):
     elapsed time of the single currently-open work-clock interval, distinct
     from the status line's daily work counter) and the total time spent on the
     currently highlighted task, refreshed on the same timer and whenever the
-    task-list cursor moves.
+    task-list cursor moves. On the left of that same top bar a
+    :class:`NextHolidayLine` shows the next current/upcoming leave period
+    (holiday / sick), refreshed on the same timer and after any leave change.
     """
 
     CSS = """
@@ -4389,9 +4421,21 @@ class DotoApp(App[None]):
         background: $panel-darken-1;
         padding: 0 1;
     }
-    TaskTimeLine {
+    #top-bar {
         height: 1;
         dock: top;
+        background: $panel;
+    }
+    #next-holiday-line {
+        height: 1;
+        width: 1fr;
+        content-align: left middle;
+        background: $panel;
+        padding: 0 1;
+    }
+    TaskTimeLine {
+        height: 1;
+        width: 1fr;
         content-align: right middle;
         background: $panel;
         padding: 0 1;
@@ -4713,7 +4757,10 @@ class DotoApp(App[None]):
         border: round $primary;
         background: $surface;
     }
-    BreaksConfigScreen, WorkTimeScreen, WorkIntervalEditScreen {
+    BreaksConfigScreen, WorkTimeScreen, WorkIntervalEditScreen, SessionAuditScreen {
+        align: center middle;
+    }
+    LeaveConfigScreen {
         align: center middle;
     }
     #breaks-modal, #interval-modal {
@@ -4722,6 +4769,31 @@ class DotoApp(App[None]):
         padding: 1 2;
         border: round $primary;
         background: $surface;
+    }
+    #leave-modal {
+        width: 70;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #leave-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #leave-help {
+        margin-bottom: 1;
+        color: $text-muted;
+    }
+    #leave-start-label, #leave-end-label, #leave-kind-label,
+    #leave-half-label, #leave-weekends-label, #leave-note-label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #leave-bottom {
+        height: auto;
+        align: center middle;
+        padding-top: 1;
     }
     #breaks-input {
         height: 14;
@@ -4732,6 +4804,16 @@ class DotoApp(App[None]):
         color: $text-muted;
     }
     #breaks-workweek {
+        margin-bottom: 1;
+    }
+    #breaks-day-label, #breaks-week-label, #breaks-holiday-label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #breaks-day-length, #breaks-week-length {
+        margin-bottom: 1;
+    }
+    #breaks-holiday {
         margin-bottom: 1;
     }
     #breaks-title, #interval-title, #worktime-title {
@@ -4767,6 +4849,30 @@ class DotoApp(App[None]):
         padding-top: 1;
     }
     #worktime-hint {
+        dock: bottom;
+        height: auto;
+        content-align: center middle;
+        padding-top: 1;
+    }
+    #audit-modal {
+        width: 88;
+        height: 80%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #audit-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #audit-summary {
+        margin-bottom: 1;
+        color: $text-muted;
+    }
+    #audit-body {
+        height: 1fr;
+    }
+    #audit-hint {
         dock: bottom;
         height: auto;
         content-align: center middle;
@@ -4900,7 +5006,7 @@ class DotoApp(App[None]):
         # Flat "start/stop working" (NEW): sets the doto in-progress and starts
         # the focus timer in one press (actions.start_work); a second press
         # stops the timer. The former single-key timer/work-clock keys now
-        # live under the ``t`` stream (``t t``/``t o``/``t w``/``t e``), the
+        # live under the ``t`` stream (``t t``/``t i``/``t o``/``t w``/``t e``), the
         # breaks configurator under ``c b``, and the stats pop-ups under
         # ``S w``/``S t`` - all intercepted by :meth:`DotoApp.on_key` before
         # these flat BINDINGS, so those keys are not bound here.
@@ -4934,10 +5040,12 @@ class DotoApp(App[None]):
     #: can swap it to restyle the key hints without rewriting the app.
     key_hint_bar_class: type[KeyHintBar] = KeyHintBar
     task_time_line_class: type[TaskTimeLine] = TaskTimeLine
+    #: Overridable top-bar (left side) next-leave display. Shows the next
+    #: upcoming holiday / sick period; a child theme can swap it to restyle.
+    next_holiday_line_class: type[NextHolidayLine] = NextHolidayLine
     #: Overridable alternative-layout view classes (cycled with ``v``). Each
     #: is a pure-``format_*`` widget a child theme can swap to replace a
     #: layout's rendering without rewriting the app.
-    list_view_class: type[ListView] = ListView
     kanban_view_class: type[KanbanView] = KanbanView
     calendar_view_class: type[CalendarView] = CalendarView
     time_view_class: type[TimeView] = TimeView
@@ -5009,7 +5117,14 @@ class DotoApp(App[None]):
     #: interval manager. A child theme can swap either without rewriting the
     #: app, mirroring :attr:`edit_task_screen_class`.
     breaks_config_screen_class: type[BreaksConfigScreen] = BreaksConfigScreen
+    #: Overridable leave configurator (``c l``). Records a new holiday / sick
+    #: period into the global config's ``leave_days``.
+    leave_config_screen_class: type[LeaveConfigScreen] = LeaveConfigScreen
     work_time_screen_class: type[WorkTimeScreen] = WorkTimeScreen
+    #: Overridable long-session audit modal (``t a``). Lists overly long or
+    #: forgotten work-clock and task focus intervals so the user can edit,
+    #: cap, or delete them in place.
+    session_audit_screen_class: type[SessionAuditScreen] = SessionAuditScreen
     #: Overridable statistics pop-up (Feature: work statistics). Opened from
     #: the ``time`` layout with ``S w``; shows per-period numbers and text/ASCII
     #: bar charts. A child theme can swap it without rewriting the app.
@@ -5064,12 +5179,6 @@ class DotoApp(App[None]):
     #: :class:`doxtr_doto.cli.tui.widgets.AltLayoutView` CSS). ``TABLE`` is
     #: deliberately absent: it is the structural ``#panes`` row.
     ALT_LAYOUTS: dict[TuiLayout, AltLayoutSpec] = {
-        TuiLayout.LIST: AltLayoutSpec(
-            "list_view_class",
-            "list-view",
-            lambda app: app.query_one(app.list_view_class).rebuild(app._tasks, app._collapsed_ids),
-            cycles_details=False,
-        ),
         TuiLayout.KANBAN: AltLayoutSpec(
             "kanban_view_class",
             "kanban-view",
@@ -5153,14 +5262,18 @@ class DotoApp(App[None]):
         """Build the app layout.
 
         The default 3-pane table lives in ``#panes``; the alternative layout
-        views (list/kanban/calendar) share the ``#alt-view`` container and are
+        views (kanban/calendar) share the ``#alt-view`` container and are
         shown one at a time by :meth:`apply_layout`. The ``time`` layout is a
         two-pane split inside ``#alt-view``: the :attr:`time_view_class` day
         list on the left and the :attr:`work_time_summary_class`
         week/month/year summary on the right (``#time-pane``).
         """
         yield Header()
-        yield self.task_time_line_class(id="task-time-line")
+        # Top bar: the next-leave period on the left, the day's work + current
+        # task elapsed times on the right, sharing one row.
+        with Horizontal(id="top-bar"):
+            yield self.next_holiday_line_class(id="next-holiday-line")
+            yield self.task_time_line_class(id="task-time-line")
         with Horizontal(id="panes"):
             yield self.repo_tree_class("Scope", id="repo-tree")
             # The task list sits on top of the details pane in a vertical
@@ -5359,13 +5472,13 @@ class DotoApp(App[None]):
         self.refresh_tasks()
 
     # ------------------------------------------------------------------
-    # Layout views (table / list / kanban / calendar)
+    # Layout views (table / kanban / calendar / time)
     # ------------------------------------------------------------------
     def _active_view(self) -> AltLayoutView | None:
         """Return the active *alternative*-layout view, or None for the table.
 
         Returns:
-            The list/kanban/calendar :class:`AltLayoutView` widget backing the
+            The kanban/calendar/time :class:`AltLayoutView` widget backing the
             current layout's selection, resolved from the single
             :attr:`ALT_LAYOUTS` registry. Returns None for
             :attr:`TuiLayout.TABLE`, which is the structural 3-pane layout
@@ -5783,13 +5896,12 @@ class DotoApp(App[None]):
         """Show the active layout's widgets and hide the others.
 
         The default table layout shows the 3-pane ``#panes`` row (and hides
-        the ``#alt-view`` container); the list/kanban/calendar layouts hide
-        the panes and show their single view widget inside ``#alt-view``.
-        Visibility of each alt-view is driven by the :attr:`ALT_LAYOUTS`
-        registry so a new view is handled without a new branch here. The
-        ``time`` layout additionally shows the ``#time-pane`` split (day list +
-        summary panel) and hides it in every other layout, so the summary
-        panel never bleeds into the list/kanban/calendar views.
+        the ``#alt-view`` container); the kanban/calendar/time layouts hide
+        the panes and show their view widget inside ``#alt-view``. Visibility
+        of each alt-view is driven by the :attr:`ALT_LAYOUTS` registry so a new
+        view is handled without a new branch here. The ``time`` layout
+        additionally shows the ``#time-pane`` split (day list + summary panel)
+        and hides it in every other layout.
         """
         is_table = self.layout_view is TuiLayout.TABLE
         is_time = self.layout_view is TuiLayout.TIME
@@ -5824,7 +5936,7 @@ class DotoApp(App[None]):
 
         Shared implementation behind :meth:`action_cycle_layout` (``step=+1``)
         and :meth:`action_cycle_layout_prev` (``step=-1``). Moves ``step``
-        places through table -> list -> kanban -> calendar -> time (wrapping in
+        places through table -> kanban -> calendar -> time (wrapping in
         either direction), applies the new layout, refreshes the details for
         the newly active view's selection, and persists the choice via
         :func:`doxtr_doto.cli.tui.actions.save_tui_layout` so it is restored on
@@ -5884,7 +5996,7 @@ class DotoApp(App[None]):
 
         Routing depends on the active layout:
 
-        * **Alternative layouts** (list / kanban / calendar) - open the card
+        * **Task-card layouts** (kanban / calendar) - open the card
           viewer popup (Feature 3): a modal listing the selected card's full
           detail (same fields as ``doto list -f cards``) with a scrollable
           body. Pressing ``Enter`` again or ``Escape`` closes it; pressing
@@ -5960,7 +6072,7 @@ class DotoApp(App[None]):
     def _open_card_viewer(self, selected: str) -> None:
         """Open the card viewer popup for ``selected`` (Feature 3).
 
-        Used by the list / kanban / calendar layouts' ``Enter`` action.
+        Used by the kanban / calendar layouts' ``Enter`` action.
 
         Resolves the full task (via :func:`doxtr_doto.cli.tui.actions.find_task`
         against the gathered task set so the display ``id`` is carried) and
@@ -6290,8 +6402,8 @@ class DotoApp(App[None]):
     def _rebuild_alt_views(self) -> None:
         """Rebuild the alternative layout views from the current task set.
 
-        The list/kanban/calendar widgets are always kept in sync (cheap,
-        pure-markup rebuilds) so switching layouts with ``v`` shows current
+        The alternative widgets are always kept in sync (cheap, pure-markup
+        rebuilds) so switching layouts with ``v`` shows current
         data immediately. Only the active one is visible (see
         :meth:`apply_layout`). Each view is rebuilt through its
         :attr:`ALT_LAYOUTS` adapter, which absorbs per-view ``rebuild``
@@ -6313,9 +6425,21 @@ class DotoApp(App[None]):
         state = self.ctx.global_store.load()
         worklogs = state.work_clock.worklogs
         breaks = list(state.breaks)
-        self.query_one(self.time_view_class).rebuild(worklogs, breaks)
+        leave = list(state.leave_days)
+        self.query_one(self.time_view_class).rebuild(
+            worklogs,
+            breaks,
+            leave=leave,
+            day_length_minutes=state.day_length_minutes,
+        )
         self.query_one(self.work_time_summary_class).rebuild(
-            worklogs, breaks, workweek_days=list(state.workweek_days)
+            worklogs,
+            breaks,
+            workweek_days=list(state.workweek_days),
+            day_length_minutes=state.day_length_minutes,
+            week_length_minutes=state.week_length_minutes,
+            holiday_allowance_days=state.holiday_allowance_days,
+            leave=leave,
         )
 
     def refresh_details(self) -> None:
@@ -6366,13 +6490,21 @@ class DotoApp(App[None]):
         # visually and keeps the configured label stable.
         self._set_terminal_title()
         work_today, work_running, session_seconds, focus_seconds = data.live_counters(self.ctx)
+        work_started_at, long_session_count = data.work_clock_status(self.ctx)
         try:
             status_line = self.query_one(self.status_line_class)
         except NoMatches:
             pass
         else:
-            status_line.update_counters(work_today, work_running, focus_seconds)
+            status_line.update_counters(
+                work_today,
+                work_running,
+                focus_seconds,
+                work_started_at=work_started_at,
+                long_session_count=long_session_count,
+            )
         self.refresh_task_time(work_today, session_seconds, work_running)
+        self.refresh_next_holiday()
 
     def refresh_task_time(
         self,
@@ -6418,6 +6550,28 @@ class DotoApp(App[None]):
             data.task_total_seconds(task),
         )
 
+    def refresh_next_holiday(self) -> None:
+        """Refresh the top-bar (left) next-leave display.
+
+        Resolves the next current/upcoming leave period from the global
+        config via :func:`doxtr_doto.cli.global_state.next_leave_period` and
+        updates the :attr:`next_holiday_line_class` widget. A benign no-op
+        when the widget is not mounted (mirroring :meth:`refresh_task_time`),
+        so it is safe to call from the recurring counter timer and after any
+        leave change.
+        """
+        from datetime import datetime as _dt
+
+        from doxtr_doto.cli.global_state import next_leave_period
+
+        try:
+            line = self.query_one(self.next_holiday_line_class)
+        except NoMatches:
+            return
+        today = _dt.now().astimezone().date()
+        state = self.ctx.global_store.load()
+        line.update_next_holiday(next_leave_period(state.leave_days, today), today)
+
     # ------------------------------------------------------------------
     # Navigation
     # ------------------------------------------------------------------
@@ -6428,7 +6582,7 @@ class DotoApp(App[None]):
         :class:`DataTable.RowHighlighted` message, which
         :meth:`on_data_table_row_highlighted` handles by refreshing the
         details pane and task-time display, so we do not refresh explicitly
-        there. The list/kanban/calendar views have no such message, so they
+        there. The alternative views have no such message, so they
         move their own cursor and refresh here.
         """
         self._move_cursor(1)
@@ -6543,9 +6697,7 @@ class DotoApp(App[None]):
         ``tab_action`` (:meth:`_cycle_calendar_region`), not a hard-coded
         branch.
 
-        The plain list layout keeps focus on its single view (there is no
-        second pane worth cycling into for a one-line-per-task list), so Tab
-        is a no-op there beyond re-focusing the view.
+        Other alternative layouts keep focus on their active view.
 
         This is the forward direction; :meth:`action_cycle_pane_reverse`
         (``Shift+Tab``) walks the exact same cycle in reverse (and moves a
@@ -6569,8 +6721,6 @@ class DotoApp(App[None]):
           wrap/crash).
         * **Calendar** - the region/details cycle walked in reverse
           (grid <- Due <- No-due <- details), via :meth:`_cycle_calendar_region`.
-        * **List** - a no-op beyond re-focusing the single view, like forward.
-
         Delegates to :meth:`_cycle_pane` with ``direction=-1`` so the reverse
         path reuses the forward logic rather than duplicating it.
         """
@@ -6608,8 +6758,8 @@ class DotoApp(App[None]):
         if spec is not None and spec.cycles_details:
             self._cycle_alt_view_details(direction)
             return
-        # Layouts whose spec does not opt into the details cycle (the plain
-        # list layout) have a single focusable view; keep focus on it.
+        # A layout whose spec opts into neither custom handling keeps focus on
+        # its single active view.
         self._focus_active_view()
 
     def _focus_next_in_cycle(self, order: list[type[Any]], direction: int = 1) -> None:
@@ -6753,7 +6903,7 @@ class DotoApp(App[None]):
         :class:`~textual.widgets.DataTable.RowSelected`) before the app's
         ``enter`` binding fires, so the Enter-to-detail reveal for the table
         layout is wired here rather than through :meth:`action_activate`
-        (which handles the list/kanban/calendar layouts). It refreshes the
+        (which handles the kanban/calendar layouts). It refreshes the
         shared details pane for the current row and focuses it, mirroring
         :meth:`action_activate`.
         """
@@ -6824,8 +6974,8 @@ class DotoApp(App[None]):
         are shown (flipping the row's membership in :attr:`_collapsed_ids` and
         refreshing); when it is a leaf Space keeps its multi-select behaviour
         so parenting and the ``d``/``D`` bulk actions still work. Multi-select
-        is a table-layout affordance; in the single-selection list/kanban/
-        calendar layouts Space is a no-op.
+        is a table-layout affordance; in the single-selection kanban/calendar
+        layouts Space is a no-op.
         """
         if self.layout_view is not TuiLayout.TABLE:
             return
@@ -6851,7 +7001,7 @@ class DotoApp(App[None]):
         :meth:`action_set_parent`: in the table layout the multi-selection
         (when non-empty, else the single cursor row) via
         :meth:`~doxtr_doto.cli.tui.widgets.TaskList.target_ids`; in the
-        single-selection layouts (list/kanban/calendar/time) just the single
+        single-selection layouts (kanban/calendar/time) just the single
         selected id. Empty when nothing is selectable.
 
         Returns:
@@ -7459,6 +7609,20 @@ class DotoApp(App[None]):
         )
         self.refresh_counters()
 
+    def action_clock_in(self) -> None:
+        """Start the global work clock (counterpart to ``t o``).
+
+        Equivalent to ``doto start work``: opens the Layer-1 work clock if it
+        is not already running, without a focus task.
+        """
+        started = actions.clock_in_work(self.ctx)
+        if started:
+            self.notify("Clocked in to general work.")
+        else:
+            self.notify("Work clock was already running.")
+        self.refresh_tasks()
+        self.refresh_counters()
+
     def action_clock_out(self) -> None:
         """Stop the focus timer and the global work clock."""
         stopped = actions.clock_out(self.ctx)
@@ -7470,30 +7634,86 @@ class DotoApp(App[None]):
         self.refresh_counters()
 
     def action_configure_breaks(self) -> None:
-        """Open the breaks + work-week configurator and persist the result."""
+        """Open the breaks + work-week + work-length configurator and persist it."""
         state = self.ctx.global_store.load()
 
-        def _apply(result: tuple[list[Any], list[int]] | None) -> None:
+        def _apply(result: Any | None) -> None:
             if result is None:
                 return
-            breaks, workweek_days = result
             new_state = self.ctx.global_store.load()
-            new_state.breaks = breaks
-            new_state.workweek_days = workweek_days
+            new_state.breaks = result.breaks
+            new_state.workweek_days = result.workweek_days
+            new_state.day_length_minutes = result.day_length_minutes
+            new_state.week_length_minutes = result.week_length_minutes
+            new_state.holiday_allowance_days = result.holiday_allowance_days
             self.ctx.global_store.save(new_state)
             self.notify(
-                f"Saved {len(breaks)} break(s); work week {weekday_range_label(workweek_days)}."
+                f"Saved {len(result.breaks)} break(s); "
+                f"work week {weekday_range_label(result.workweek_days)}."
             )
             self.refresh_counters()
-            # The work-week day set feeds the time-layout summary panel, so
-            # rebuild it when that layout is active to reflect the new set.
+            # The work-week day set and work-length settings feed the
+            # time-layout summary panel, so rebuild it when that layout is
+            # active to reflect the new values.
             if self.layout_view is TuiLayout.TIME:
                 self._rebuild_time_layout()
 
         self.push_screen(
-            self.breaks_config_screen_class(list(state.breaks), list(state.workweek_days)),
+            self.breaks_config_screen_class(
+                list(state.breaks),
+                list(state.workweek_days),
+                day_length_minutes=state.day_length_minutes,
+                week_length_minutes=state.week_length_minutes,
+                holiday_allowance_days=state.holiday_allowance_days,
+            ),
             _apply,
         )
+
+    def action_configure_leave(self) -> None:
+        """Open the leave configurator (``c l``) and record a holiday/sick period.
+
+        Pushes :attr:`leave_config_screen_class`; on save the chosen period is
+        appended to the global config's ``leave_days`` via the shared
+        :func:`doxtr_doto.cli.global_state.apply_leave_range` helper (so the
+        dedupe / weekend-skip rules match ``doto leave add``). The ``time``
+        layout is rebuilt when active so the new leave shows immediately in
+        the day list and summary panel.
+        """
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        def _apply(result: Any | None) -> None:
+            if result is None:
+                return
+            new_state = self.ctx.global_store.load()
+            added, skipped = apply_leave_range(
+                new_state.leave_days,
+                result.start,
+                result.end,
+                result.kind,
+                fraction=0.5 if result.half else 1.0,
+                note=result.note,
+                workweek_days=list(new_state.workweek_days),
+                include_weekends=result.include_weekends,
+            )
+            self.ctx.global_store.save(new_state)
+            if added:
+                noun = "half-day" if result.half else "day"
+                msg = f"Recorded {len(added)} {result.kind} {noun}(s)."
+                if skipped:
+                    msg += f" Skipped {skipped} non-work-week day(s)."
+                self.notify(msg)
+            else:
+                self.notify(
+                    "No new leave recorded (already present or all weekends).",
+                    severity="warning",
+                )
+            # Reflect the new leave in the top-bar next-leave display at once
+            # (not just on the next counter tick).
+            self.refresh_next_holiday()
+            if self.layout_view is TuiLayout.TIME:
+                self._rebuild_time_layout()
+
+        self.push_screen(self.leave_config_screen_class(), _apply)
 
     def action_configure_detail_ratio(self) -> None:
         """Open the detail-pane ratio configurator and apply + persist it.
@@ -7730,6 +7950,17 @@ class DotoApp(App[None]):
 
         self.push_screen(self.work_time_screen_class(self.ctx), _done)
 
+    def action_audit_sessions(self) -> None:
+        """Open the long-session audit modal (``t a``)."""
+
+        def _done(_result: None) -> None:
+            self.refresh_tasks()
+            self.refresh_counters()
+            if self.layout_view is TuiLayout.TIME:
+                self._rebuild_time_layout()
+
+        self.push_screen(self.session_audit_screen_class(self.ctx), _done)
+
     def _stats_anchor(self) -> date | None:
         """Return the anchor date for a stats pop-up.
 
@@ -7774,9 +8005,9 @@ class DotoApp(App[None]):
     def action_edit_sessions(self) -> None:
         """Open the per-doto session editor for the highlighted doto (``t e``).
 
-        Reachable from the task-centric layouts (table / list / kanban /
-        calendar), where :meth:`_current_selected_id` resolves to a task id;
-        it is a harmless no-op in the ``time`` layout (whose selection is a
+        Reachable from the task-centric layouts (table / kanban / calendar),
+        where :meth:`_current_selected_id` resolves to a task id; it is a
+        harmless no-op in the ``time`` layout (whose selection is a
         day, not a doto) and when nothing is selectable. The selected display
         id is routed through :meth:`_action_ref` (like every other mutating
         action) to produce an unambiguous ref: a bare ``id`` for current-repo
@@ -7807,26 +8038,29 @@ class DotoApp(App[None]):
             _done,
         )
 
-    def action_add(self) -> None:
-        """Open the add-task modal and create the task on submit.
+    def _open_add_modal(
+        self,
+        *,
+        parent_display_id: str | None = None,
+        parent_ref: str | None = None,
+        target_repo: DiscoveredRepo | None = None,
+    ) -> None:
+        """Open the add-task modal, optionally creating a child of ``parent_ref``.
 
-        The modal is field-configurable (see :class:`AddTaskScreen`): this
-        forwards the active config (so ``tui_add_fields`` / ``tui_add_defaults``
-        select which fields show and their prefills), the configured statuses /
-        priorities (for the select fields) and the cross-repo known assignee /
-        tag names (for auto-complete). The user can also choose the target
-        repository (defaulting to the current repo). On submit every collected
-        field on the :class:`AddTaskResult` is forwarded to
-        :func:`doxtr_doto.cli.tui.actions.add_task`, and the notification names
-        the repo when it differs from the current one.
+        Shared implementation behind :meth:`action_add` (top-level task, repo
+        selectable) and :meth:`action_add_subtask` (``e a``, sub-task under
+        the currently selected task in that parent's repository).
         """
         current = data.current_repo(self.ctx)
+        modal_repo = target_repo if target_repo is not None else current
+        repos = [modal_repo] if parent_ref is not None else data.list_repos(self.ctx)
 
         def _created(result: AddTaskResult | None) -> None:
             if result is None:
                 return
             from doxtr_doto.exceptions import DotoValidationError
 
+            chosen_repo = target_repo if parent_ref is not None else result.repo
             try:
                 task_id = actions.add_task(
                     self.ctx,
@@ -7841,12 +8075,13 @@ class DotoApp(App[None]):
                     body=result.body,
                     progress=result.progress,
                     raci=result.raci,
-                    repo=result.repo,
+                    parent=parent_ref,
+                    repo=chosen_repo,
                 )
             except DotoValidationError as exc:
                 self.notify(str(exc), severity="error")
                 return
-            if result.repo.path == current.path:
+            if chosen_repo is not None and chosen_repo.path == current.path:
                 # ``add_task`` writes through a store instance resolved for the
                 # target repo; for the *current* repo that is a distinct
                 # instance from ``ctx.store``, whose in-memory cache would
@@ -7857,9 +8092,20 @@ class DotoApp(App[None]):
                 # :func:`actions.start_work`), which reloads the resolved
                 # store before acting to keep its decision off a stale cache.
                 self.ctx.store.load()
-                self.notify(f"Added {task_id}.")
+                if parent_display_id:
+                    self.notify(f"Added {task_id} under {parent_display_id}.")
+                else:
+                    self.notify(f"Added {task_id}.")
             else:
-                self.notify(f"Added {task_id} in {result.repo.name}.")
+                repo_name = chosen_repo.name if chosen_repo is not None else current.name
+                if parent_display_id:
+                    self.notify(f"Added {task_id} under {parent_display_id} in {repo_name}.")
+                else:
+                    self.notify(f"Added {task_id} in {repo_name}.")
+            if parent_display_id is not None:
+                # Ensure the parent is expanded so the freshly created sub-task
+                # is immediately visible (and selectable below) in tree views.
+                self._collapsed_ids.discard(parent_display_id)
             self.refresh_tasks()
             # Auto-select the freshly created task so its row is highlighted
             # and scrolled into view (config-gated, default on). Selecting via
@@ -7870,23 +8116,79 @@ class DotoApp(App[None]):
             # cursor state *after* that refresh-driven rebuild, so the views
             # need a fresh rebuild to paint the new highlight (the TABLE path
             # repaints itself through the DataTable RowHighlighted message).
-            if self.ctx.config.tui_auto_select_new_task and self.select_task(task_id):
+            select_id = (
+                self._display_id_for_repo(chosen_repo.name, task_id)
+                if chosen_repo is not None
+                else task_id
+            )
+            if self.ctx.config.tui_auto_select_new_task and self.select_task(select_id):
                 if self._active_view() is not None:
                     self._rebuild_alt_views()
                     self.refresh_details()
                     self.refresh_task_time()
 
+        screen_kwargs: dict[str, Any] = {
+            "config": self.ctx.config,
+            "statuses": list(self.ctx.config.statuses),
+            "priorities": list(self.ctx.config.priorities),
+            "known_assignees": known_assignee_names(self.ctx),
+            "known_tags": known_tag_names(self.ctx),
+        }
+        if parent_display_id is not None:
+            screen_kwargs["parent_label"] = parent_display_id
         self.push_screen(
-            self.add_task_screen_class(
-                data.list_repos(self.ctx),
-                current,
-                config=self.ctx.config,
-                statuses=list(self.ctx.config.statuses),
-                priorities=list(self.ctx.config.priorities),
-                known_assignees=known_assignee_names(self.ctx),
-                known_tags=known_tag_names(self.ctx),
-            ),
+            self.add_task_screen_class(repos, modal_repo, **screen_kwargs),
             _created,
+        )
+
+    def action_add(self) -> None:
+        """Open the add-task modal and create the task on submit.
+
+        The modal is field-configurable (see :class:`AddTaskScreen`): this
+        forwards the active config (so ``tui_add_fields`` / ``tui_add_defaults``
+        select which fields show and their prefills), the configured statuses /
+        priorities (for the select fields) and the cross-repo known assignee /
+        tag names (for auto-complete). The user can also choose the target
+        repository (defaulting to the current repo). On submit every collected
+        field on the :class:`AddTaskResult` is forwarded to
+        :func:`doxtr_doto.cli.tui.actions.add_task`, and the notification names
+        the repo when it differs from the current one.
+        """
+        self._open_add_modal()
+
+    def action_add_subtask(self) -> None:
+        """Open the add-task modal to create a child of the selected task (``e a``).
+
+        Works across every layout view (table, list, kanban, calendar, time):
+        reads the currently highlighted task via :meth:`_current_selected_id`,
+        resolves its owning repository (so in GLOBAL scope a sub-task of a
+        foreign-repo task is created in that foreign repository), and opens
+        :attr:`add_task_screen_class` with the parent locked in. On submit the
+        new task is created with ``parent`` set to the selected task's local id.
+        """
+        selected = self._current_selected_id()
+        if not selected:
+            return
+        from doxtr_doto.cli.id_resolver import resolve_task_ref
+        from doxtr_doto.cli.repo_registry import DiscoveredRepo
+
+        ref = self._action_ref(selected)
+        resolved = resolve_task_ref(self.ctx, ref)
+        if resolved is None:
+            self.notify(f"Parent task '{selected}' not found.", severity="error")
+            return
+        resolved.store.load()
+        if resolved.store.get_task(resolved.task_id) is None:
+            self.notify(f"Parent task '{selected}' not found.", severity="error")
+            return
+        target_repo = DiscoveredRepo(
+            name=resolved.repo,
+            path=str(resolved.store.path.resolve().parent.parent),
+        )
+        self._open_add_modal(
+            parent_display_id=selected,
+            parent_ref=ref,
+            target_repo=target_repo,
         )
 
     def action_add_series(self) -> None:
@@ -8049,6 +8351,7 @@ KEYMAP: dict[str, DomainSpec] = {
         "task",
         lambda app: [
             KeyEntry("e", "edit", "Edit entry"),
+            KeyEntry("a", "add_subtask", "Add sub-task…"),
             KeyEntry("d", "delete_task", "Delete entry"),
             KeyEntry("P", "set_parent", "Set parent…"),
             *(
@@ -8077,8 +8380,10 @@ KEYMAP: dict[str, DomainSpec] = {
         "task_or_global",
         lambda app: [
             KeyEntry("t", "toggle_timer", "Toggle timer"),
+            KeyEntry("i", "clock_in", "Clock in"),
             KeyEntry("o", "clock_out", "Clock out"),
             KeyEntry("w", "manage_work_time", "Work time"),
+            KeyEntry("a", "audit_sessions", "Audit long sessions"),
             KeyEntry("e", "edit_sessions", "Edit sessions"),
         ],
     ),
@@ -8087,6 +8392,7 @@ KEYMAP: dict[str, DomainSpec] = {
         "global",
         lambda app: [
             KeyEntry("b", "configure_breaks", "Breaks + week"),
+            KeyEntry("l", "configure_leave", "Add leave…"),
             KeyEntry("d", "configure_detail_ratio", "Detail size"),
             KeyEntry("m", "configure_modal_width", "Pop-up width"),
         ],

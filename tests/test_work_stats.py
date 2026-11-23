@@ -551,3 +551,109 @@ def test_summary_rebuild_non_default_workweek_changes_total():
             assert "Work week (Mon\u2013Sat)" in custom_text
 
     _run(scenario())
+
+
+# --- WorkTimeSummary overtime / holidays blocks ---------------------------
+
+from doxtr_doto.work_report import OvertimePeriod  # noqa: E402
+
+
+def test_format_overtime_block():
+    ot = OvertimePeriod(
+        worked_seconds=4 * 8 * 3600,
+        leave_credit_seconds=8 * 3600,
+        expected_seconds=5 * 8 * 3600,
+        overtime_seconds=0,
+        working_days=5,
+    )
+    markup = WorkTimeSummary.format_overtime(ot)
+    assert "Overtime (week)" in markup
+    assert "Expected" in markup
+    assert "Worked" in markup
+    assert "Leave" in markup
+
+
+def test_format_overtime_signed_shortfall():
+    ot = OvertimePeriod(overtime_seconds=-2 * 3600)
+    markup = WorkTimeSummary.format_overtime(ot)
+    assert "-2h" in markup
+
+
+def test_format_holidays_block():
+    markup = WorkTimeSummary.format_holidays(2026, 25.0, 5.0, 1.0)
+    assert "Holidays (2026)" in markup
+    assert "Allowance 25" in markup
+    assert "Used      5" in markup
+    assert "Remaining 20" in markup
+    assert "Sick (week) 1" in markup
+
+
+def test_format_summary_appends_overtime_and_holidays():
+    data = [("This week", (3600, 0, 3600))]
+    ot_markup = WorkTimeSummary.format_overtime(OvertimePeriod(overtime_seconds=0))
+    hol_markup = WorkTimeSummary.format_holidays(2026, 25.0, 0.0, 0.0)
+    markup = WorkTimeSummary.format_summary(
+        data, overtime_markup=ot_markup, holiday_markup=hol_markup
+    )
+    assert "Overtime (week)" in markup
+    assert "Holidays (2026)" in markup
+
+
+def test_format_summary_omits_overtime_holidays_when_none():
+    data = [("This week", (3600, 0, 3600))]
+    markup = WorkTimeSummary.format_summary(data)
+    assert "Overtime (week)" not in markup
+    assert "Holidays" not in markup
+
+
+# --- WorkStatsScreen leave/overtime block ---------------------------------
+
+
+def test_format_stats_appends_overtime_and_leave():
+    body = WorkStatsScreen.format_stats(
+        "week",
+        32 * 3600,
+        0,
+        32 * 3600,
+        [("Mon", 8 * 3600)],
+        overtime_seconds=0,
+        expected_seconds=40 * 3600,
+        holiday_days=1.0,
+        sick_days=0.0,
+        leave_rows=[("2026-01-09", "holiday", 1.0, "Summer")],
+    )
+    assert "Overtime & leave" in body
+    assert "Expected 40h00m00s" in body
+    assert "Overtime 0s" in body
+    assert "Holidays 1" in body
+    assert "2026-01-09" in body
+    assert "Summer" in body
+
+
+def test_format_stats_omits_leave_block_when_nothing():
+    body = WorkStatsScreen.format_stats(
+        "day",
+        0,
+        0,
+        0,
+        [],
+        overtime_seconds=None,
+        expected_seconds=None,
+        holiday_days=0.0,
+        sick_days=0.0,
+        leave_rows=[],
+    )
+    assert "Overtime & leave" not in body
+
+
+def test_format_leave_block_signed_shortfall():
+    block = WorkStatsScreen.format_leave_block(
+        overtime_seconds=-2 * 3600,
+        expected_seconds=40 * 3600,
+        holiday_days=0.0,
+        sick_days=1.0,
+        leave_rows=[("2026-01-09", "sick", 0.5, "")],
+    )
+    assert "Overtime -2h" in block
+    assert "Sick 1" in block
+    assert "Sick (half)" in block

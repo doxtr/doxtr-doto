@@ -170,6 +170,174 @@ def format_duration_minutes(minutes: int | None) -> str:
     return f"{mins}m"
 
 
+# A *work-length* duration (a working day's or week's expected length, or a
+# leave day's credited length) accepts a slightly richer syntax than the
+# task-estimate :func:`parse_duration`: alongside ``8h24m``-style hour+minute
+# combinations it also accepts a **decimal number of hours** (``8.4h`` ->
+# 8h24m, ``40h`` -> 40h). A bare number is read as decimal hours too (``8.4``
+# -> 8h24m), which is the natural reading for "the length of a working day".
+# The value is stored canonically as a whole number of minutes.
+#
+#   * ``<x>h``        decimal hours, e.g. ``8.4h``, ``40h``, ``7.5h``
+#   * ``<n>h<n>m``    hours + minutes, e.g. ``8h24m``, ``1h30m``
+#   * ``<n>m``        minutes only, e.g. ``90m``
+#   * ``<x>``         a bare number is read as decimal hours (``8.4`` -> 8h24m)
+_WORK_LENGTH_HM_RE = re.compile(
+    r"^\s*(?:(?P<hours>\d+)\s*h)?\s*(?:(?P<minutes>\d+)\s*m)?\s*$",
+    re.IGNORECASE,
+)
+_WORK_LENGTH_DECIMAL_H_RE = re.compile(
+    r"^\s*(?P<value>\d+(?:\.\d+)?)\s*h?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_work_length(value: str | int | float | None) -> int | None:
+    """Parse a work day/week length into a whole number of minutes.
+
+    Unlike the task-estimate :func:`parse_duration` (which reads a bare number
+    as *minutes*), this reads a bare or ``h``-suffixed decimal as a number of
+    *hours* so the natural "40h" (a work week) and "8.4h" (a working day)
+    inputs mean what a user expects. It also accepts the compact ``8h24m``
+    hour+minute form and a minutes-only ``90m`` form.
+
+    Accepted forms (case-insensitive, whitespace tolerated):
+
+    * ``"8.4h"`` / ``"40h"`` / ``"7.5h"`` - decimal hours.
+    * ``"8h24m"`` / ``"1h30m"`` - hours + minutes.
+    * ``"90m"`` - minutes only.
+    * ``"8.4"`` - a bare number is read as decimal hours.
+    * a numeric ``int``/``float`` - read as a number of *hours* (``8.4`` ->
+      8h24m), matching the bare-string reading.
+
+    Args:
+        value: The work-length string, a numeric number of hours, or
+            ``None``/empty.
+
+    Returns:
+        The length in whole minutes, or ``None`` for ``None``/empty input.
+
+    Raises:
+        ValueError: If a non-empty value is unrecognized, carries a fractional
+            minute, or is not strictly positive.
+        TypeError: If ``value`` is an unsupported type.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError(f"Work length must be a number or string, not bool: {value!r}")
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"Work length must be a finite number, got {value!r}.")
+        minutes_f = float(value) * 60.0
+        minutes = _work_length_round(minutes_f)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        minutes = _parse_work_length_text(text)
+    else:
+        raise TypeError(f"Work length must be a number or string, not {type(value).__name__}")
+    if minutes <= 0:
+        raise ValueError(f"Work length must be a positive duration, got {minutes} minutes.")
+    return minutes
+
+
+def _work_length_round(minutes_f: float) -> int:
+    """Round a float minute count to a whole minute, rejecting fractions.
+
+    A decimal-hours input such as ``8.4h`` yields exactly ``504`` minutes; a
+    value that does not land on a whole minute (e.g. ``8.41h`` -> 504.6) is
+    rejected so the stored canonical minute count is always exact.
+
+    Args:
+        minutes_f: The computed minute count (may carry float error).
+
+    Returns:
+        The whole-minute count.
+
+    Raises:
+        ValueError: If ``minutes_f`` is not (within tolerance) a whole minute.
+    """
+    rounded = round(minutes_f)
+    if abs(minutes_f - rounded) > 1e-6:
+        raise ValueError(
+            f"Work length must resolve to a whole number of minutes, got {minutes_f:g}."
+        )
+    return int(rounded)
+
+
+def _parse_work_length_text(text: str) -> int:
+    """Parse a non-empty work-length string into whole minutes.
+
+    Tries the ``8h24m`` / ``90m`` hour+minute form first (so an explicit
+    ``m`` component is honoured), then falls back to the decimal-hours form
+    (``8.4h`` / ``40h`` / bare ``8.4``).
+
+    Args:
+        text: The stripped work-length string.
+
+    Returns:
+        The length in whole minutes.
+
+    Raises:
+        ValueError: If ``text`` matches no recognized form.
+    """
+    hm = _WORK_LENGTH_HM_RE.match(text)
+    if hm is not None and (hm.group("hours") is not None or hm.group("minutes") is not None):
+        hours = int(hm.group("hours") or 0)
+        mins = int(hm.group("minutes") or 0)
+        return hours * 60 + mins
+    dec = _WORK_LENGTH_DECIMAL_H_RE.match(text)
+    if dec is not None:
+        return _work_length_round(float(dec.group("value")) * 60.0)
+    raise ValueError(
+        f"Invalid work length {text!r}. Expected e.g. '40h', '8.4h', '8h24m', or '90m'."
+    )
+
+
+def parse_work_length_safe(value: str | int | float | None) -> int | None:
+    """Parse a work length, returning ``None`` for invalid/missing input.
+
+    The forgiving counterpart to :func:`parse_work_length` (never raises), for
+    render/load seams that must tolerate malformed stored data.
+
+    Args:
+        value: Work-length string, numeric hours, or ``None``/other.
+
+    Returns:
+        The length in whole minutes, or ``None`` when missing/invalid.
+    """
+    try:
+        return parse_work_length(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def format_work_length(minutes: int | None) -> str:
+    """Render a work-length minute count as a compact ``HhMm`` string.
+
+    Produces a form that round-trips back through :func:`parse_work_length`
+    (``504`` -> ``"8h24m"``, ``2400`` -> ``"40h"``, ``480`` -> ``"8h"``). A
+    ``None`` or non-positive/non-integer input yields ``""`` so render seams
+    never crash on malformed data.
+
+    Args:
+        minutes: Work length in whole minutes, or ``None``.
+
+    Returns:
+        The compact string (e.g. ``"8h24m"``), or ``""`` for invalid input.
+    """
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        return ""
+    hours, mins = divmod(int(minutes), 60)
+    if hours and mins:
+        return f"{hours}h{mins}m"
+    if hours:
+        return f"{hours}h"
+    return f"{mins}m"
+
+
 def parse_time_token(token: str) -> time:
     """Parse a single time token into a naive :class:`datetime.time`.
 

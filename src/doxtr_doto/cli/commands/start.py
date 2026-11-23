@@ -8,6 +8,7 @@ previously running focus session first.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import click
@@ -21,6 +22,7 @@ from doxtr_doto.cli.session import (
 from doxtr_doto.time_tracking import (
     close_session,
     has_open_session,
+    recover_stale_open_session,
     start_session,
 )
 
@@ -28,19 +30,29 @@ if TYPE_CHECKING:
     from doxtr_doto.cli.main import DotoContext
 
 
-def clock_in_work(ctx: DotoContext) -> bool:
-    """Open the global work clock if it is not already running.
+def clock_in_work(ctx: DotoContext, now: datetime | None = None) -> bool:
+    """Open the global work clock, recovering a stale older session.
+
+    An interval open since before yesterday means the work clock was not
+    stopped. Treating it as today's running clock lets later focus actions
+    accumulate every intervening hour and creates huge false overtime. Close
+    that stale portion at the boundary following its start day, then start a
+    fresh interval at ``now``. A legitimate one-night session remains valid.
 
     Args:
         ctx: The CLI context.
+        now: Optional clock-in timestamp (primarily for deterministic tests).
 
     Returns:
-        True if the work clock was newly started, False if already running.
+        True if the work clock was newly started, False if a trustworthy
+        same-day session is already running.
     """
+    reference = now if now is not None else datetime.now().astimezone()
     state = ctx.global_store.load()
-    if has_open_session(state.work_clock.worklogs):
+    recovered = recover_stale_open_session(state.work_clock.worklogs, now=reference)
+    if has_open_session(recovered):
         return False
-    state.work_clock.worklogs = start_session(state.work_clock.worklogs)
+    state.work_clock.worklogs = start_session(recovered, now=reference)
     ctx.global_store.save(state)
     return True
 

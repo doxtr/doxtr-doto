@@ -94,12 +94,6 @@ if TEXTUAL_AVAILABLE:
     from doxtr_doto.cli.tui.widgets import (
         KanbanView as _KanbanView,
     )
-    from doxtr_doto.cli.tui.widgets import (
-        ListView as _ListView,
-    )
-
-    class _ThemedListView(_ListView):
-        """Stand-in for a child theme's custom list view."""
 
     class _ThemedKanbanView(_KanbanView):
         """Stand-in for a child theme's custom kanban view."""
@@ -112,14 +106,14 @@ if TEXTUAL_AVAILABLE:
     #: markup actually reaches the screen, not just that the subclass mounted.
     _RENDER_SENTINEL = "ZZ-THEME-SENTINEL"
 
-    class _SentinelListView(_ListView):
-        """A themed list view whose per-line markup emits a sentinel string."""
+    class _SentinelKanbanView(_KanbanView):
+        """A themed kanban view whose card markup emits a sentinel string."""
 
         @classmethod
-        def format_line(cls, task, highlighted):
-            """Return the base line prefixed with the render sentinel."""
-            base = super().format_line(task, highlighted)
-            return f"{_RENDER_SENTINEL} {base}"
+        def format_card(cls, task, highlighted, width=None, **kwargs):
+            """Return the base card with a sentinel line appended."""
+            lines = super().format_card(task, highlighted, width=width, **kwargs)
+            return [*lines[:-1], _RENDER_SENTINEL, lines[-1]]
 
     #: Sentinel a themed calendar injects into *highlighted* task entries so
     #: ``test_calendar_highlight_flows_through_seam`` can prove the active-
@@ -140,14 +134,13 @@ if TEXTUAL_AVAILABLE:
     class _ThemedLayoutApp(_DotoApp):
         """App whose layout views use the themed view subclasses."""
 
-        list_view_class = _ThemedListView
         kanban_view_class = _ThemedKanbanView
         calendar_view_class = _ThemedCalendarView
 
     class _SentinelLayoutApp(_DotoApp):
-        """App whose list view overrides ``format_line`` to emit a sentinel."""
+        """App whose kanban view overrides ``format_card`` to emit a sentinel."""
 
-        list_view_class = _SentinelListView
+        kanban_view_class = _SentinelKanbanView
 
     class _SentinelCalendarApp(_DotoApp):
         """App whose calendar view marks highlighted entries with a sentinel."""
@@ -1280,6 +1273,14 @@ class TestActions:
         # Second clock-out: work clock already stopped.
         assert actions.clock_out(ctx) is False
 
+    def test_clock_in(self, ctx, env):
+        # First clock-in opens the work clock; a second is a no-op.
+        assert actions.clock_in_work(ctx) is True
+        assert actions.clock_in_work(ctx) is False
+        # Clocking out then in again reopens it.
+        assert actions.clock_out(ctx) is True
+        assert actions.clock_in_work(ctx) is True
+
     def test_add_task(self, ctx, store_file):
         task_id = actions.add_task(ctx, "A new task")
         tasks = _load(store_file)["tasks"]
@@ -1589,6 +1590,73 @@ class TestTaskTimeLine:
         stopped = TaskTimeLine.format_times(100, 10, False, "T-001", 0)
         # Running vs stopped use different styling markup.
         assert running != stopped
+
+
+class TestNextHolidayLine:
+    """Unit tests for the top-bar (left) next-leave display (pure classmethod)."""
+
+    def test_none_shows_placeholder(self):
+        from datetime import date
+
+        from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+        rendered = NextHolidayLine.format_next_holiday(None, date(2026, 1, 1))
+        assert "none" in rendered
+
+    def test_upcoming_holiday_range_and_hint(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeavePeriod
+        from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+        period = LeavePeriod(
+            start=date(2026, 7, 6), end=date(2026, 7, 10), kind="holiday", note="Summer", days=5
+        )
+        rendered = NextHolidayLine.format_next_holiday(period, date(2026, 6, 30))
+        assert "Holiday" in rendered
+        assert "2026-07-06\u20132026-07-10" in rendered
+        assert "in 6 days" in rendered
+        assert "Summer" in rendered
+
+    def test_single_day_sick_tomorrow(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeavePeriod
+        from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+        period = LeavePeriod(start=date(2026, 9, 1), end=date(2026, 9, 1), kind="sick", days=1)
+        rendered = NextHolidayLine.format_next_holiday(period, date(2026, 8, 31))
+        assert "Sick" in rendered
+        assert "2026-09-01" in rendered
+        assert "tomorrow" in rendered
+        # A single day shows no date range dash.
+        assert "\u2013" not in rendered
+
+    def test_in_progress_shows_ends_hint(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeavePeriod
+        from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+        period = LeavePeriod(start=date(2026, 7, 6), end=date(2026, 7, 10), kind="holiday", days=5)
+        rendered = NextHolidayLine.format_next_holiday(period, date(2026, 7, 8))
+        assert "ends in 2 days" in rendered
+
+    def test_holiday_and_sick_styled_differently(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeavePeriod
+        from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+        hol = NextHolidayLine.format_next_holiday(
+            LeavePeriod(start=date(2026, 7, 6), end=date(2026, 7, 6), kind="holiday"),
+            date(2026, 7, 1),
+        )
+        sick = NextHolidayLine.format_next_holiday(
+            LeavePeriod(start=date(2026, 7, 6), end=date(2026, 7, 6), kind="sick"),
+            date(2026, 7, 1),
+        )
+        assert hol != sick
 
 
 class TestEditDueParsing:
@@ -5360,18 +5428,6 @@ def _plain_task(tid, **kw):
 class TestActivePinInViews:
     """Feature A: the active (running) task is first in each view's rows."""
 
-    def test_list_view_pins_running_task_first(self):
-        from doxtr_doto.cli.tui.filtersort import pin_active_first
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [_plain_task("A"), _running_task("B"), _plain_task("C")]
-        view = ListView()
-        # The view consumes an already-active-pinned list (the app's
-        # _visible_tasks pins via pin_active_first before passing it in); the
-        # view does not re-pin, so it preserves the running-first order.
-        view.rebuild(pin_active_first(tasks))
-        assert view.row_ids == ["B", "A", "C"]
-
     def test_kanban_pins_running_task_top_of_its_column(self):
         from doxtr_doto.cli.tui.widgets import KanbanView
 
@@ -5572,219 +5628,6 @@ class TestVisibleTasksComposition:
         # The persisted selection is left intact for when the user switches
         # back to GLOBAL (the gate returns a scoped copy, not a mutation).
         assert app.view_prefs.repo_filter == ("some-other-repo",)
-
-
-class TestListView:
-    """Pure-logic tests for the single-column list view classmethods."""
-
-    def test_empty_renders_placeholder(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        assert "No tasks" in ListView.format_lines([], 0)
-
-    def test_populated_marks_cursor_row(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [
-            {"id": "T-001", "title": "First", "status": "open", "priority": "high"},
-            {"id": "T-002", "title": "Second", "status": "done", "priority": "low"},
-        ]
-        rendered = ListView.format_lines(tasks, 1)
-        assert "T-001" in rendered
-        assert "T-002" in rendered
-        # The cursor row (index 1) is reverse-highlighted.
-        lines = rendered.split("\n")
-        assert lines[1].startswith("[reverse]")
-        assert not lines[0].startswith("[reverse]")
-
-    def test_done_task_shows_checkbox(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        line = ListView.format_line({"id": "T-1", "title": "x", "status": "done"}, False)
-        assert "\u2713" in line  # done checkmark
-
-    def test_cursor_line_is_index_when_rows_do_not_wrap(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        # Short titles never wrap, so each row is exactly one display line and
-        # the cursor's display line equals its index.
-        tasks = [
-            {"id": f"T-{i}", "title": "short", "status": "open", "priority": "low"}
-            for i in range(5)
-        ]
-        view = ListView()
-        view.rebuild(tasks)
-        view.cursor = 3
-        assert view.cursor_line() == 3
-
-    def test_cursor_line_sums_wrapped_heights_of_rows_above(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        # Regression: a row whose title is long enough to wrap occupies several
-        # display lines, so the cursor's true display line is the sum of the
-        # wrapped heights of the rows above it - not its index. Returning the
-        # index let the highlighted row scroll out of the view pane. Build a
-        # list of wrapping rows and check the multi-line math is exercised.
-        long_title = "x" * 400  # unbroken token forces wrapping at any width
-        tasks = [
-            {"id": f"T-{i}", "title": long_title, "status": "open", "priority": "low"}
-            for i in range(5)
-        ]
-        view = ListView()
-        view.rebuild(tasks)
-        width = view._content_width()
-        view.cursor = 4  # the fifth row is under the cursor
-        expected = sum(view.row_height(view._row_markup[i], width) for i in range(4))
-        assert view.cursor_line() == expected
-        # The rows wrap, so the cursor line is well past a 1-line-per-row count
-        # (proving the wrap-aware math is exercised, not the old index path).
-        assert view.cursor_line() > 4
-
-    def test_row_height_counts_wrapped_display_lines(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        single = view.row_height("short line", width=80)
-        wrapped = view.row_height("x" * 400, width=80)
-        assert single == 1
-        assert wrapped > 1
-
-    def test_move_cursor_to_edge_jumps_to_last_and_first(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [
-            {"id": f"T-{i}", "title": "short", "status": "open", "priority": "low"}
-            for i in range(5)
-        ]
-        view = ListView()
-        view.rebuild(tasks)
-        assert view.cursor == 0
-        # Shift+Down jumps straight to the last row.
-        view.move_cursor_to_edge(True)
-        assert view.cursor == len(tasks) - 1
-        assert view.selected_id() == "T-4"
-        # Shift+Up jumps straight to the first row.
-        view.move_cursor_to_edge(False)
-        assert view.cursor == 0
-        assert view.selected_id() == "T-0"
-
-    def test_move_cursor_to_edge_empty_is_no_op(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        view.rebuild([])
-        view.move_cursor_to_edge(True)
-        assert view.cursor == 0
-        view.move_cursor_to_edge(False)
-        assert view.cursor == 0
-        assert view.selected_id() is None
-
-    def test_list_view_select_id_moves_cursor(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [
-            {"id": f"T-{i}", "title": "short", "status": "open", "priority": "low"}
-            for i in range(5)
-        ]
-        view = ListView()
-        view.rebuild(tasks)
-        assert view.cursor == 0
-        # Selecting a present id moves the cursor to that row and reports True.
-        assert view.select_id("T-3") is True
-        assert view.cursor == 3
-        assert view.selected_id() == "T-3"
-        # A missing id is a no-op that leaves the cursor and returns False.
-        assert view.select_id("T-99") is False
-        assert view.cursor == 3
-
-    def test_jump_to_top_scrolls_back_after_jump_to_bottom(self):
-        """Regression: Shift+Up after Shift+Down must scroll the list up.
-
-        The list view shares the same jump-to-edge scroll path as kanban, so
-        it had the same bug: a jump to the top after a jump to the bottom left
-        the frame stuck at the bottom. Asserts the real ``scroll_y`` offset
-        returns to 0 on a jump to the top.
-        """
-        from textual.app import App, ComposeResult
-
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [{"id": f"T{i:02d}", "title": f"row {i}"} for i in range(40)]
-
-        class _Harness(App):
-            def compose(self) -> ComposeResult:
-                yield ListView(id="list")
-
-        app = _Harness()
-
-        async def body():
-            async with app.run_test(size=(80, 12)) as pilot:
-                await pilot.pause()
-                view = app.query_one("#list", ListView)
-                view.rebuild(tasks)
-                view.focus()
-                await pilot.pause()
-                assert view.max_scroll_y > 0
-
-                view.move_cursor_to_edge(True)
-                await pilot.pause()
-                assert view.cursor == len(tasks) - 1
-                assert view.scroll_y > 0
-
-                view.move_cursor_to_edge(False)
-                await pilot.pause()
-                assert view.cursor == 0
-                assert view.scroll_y == 0
-
-        _run(body())
-
-    def test_select_id_repositions_offscreen_row_into_view(self):
-        """select_id must reposition a row that is off screen back into view.
-
-        The list view shares the discontinuous-jump seam
-        (:meth:`~AltLayoutView.ensure_cursor_visible`): selecting a row by id
-        from the bottom of a long list (frame scrolled down) to a row near the
-        top must scroll the frame up so the selected row is visible, rather
-        than relying on the direction-inferring smart scroll.
-        """
-        from textual.app import App, ComposeResult
-
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = [{"id": f"T-{i:03d}", "status": "open", "title": f"task {i}"} for i in range(60)]
-
-        class _Harness(App):
-            def compose(self) -> ComposeResult:
-                yield ListView(id="list")
-
-        app = _Harness()
-
-        async def body():
-            async with app.run_test(size=(80, 12)) as pilot:
-                await pilot.pause()
-                view = app.query_one("#list", ListView)
-                view.rebuild(tasks)
-                view.focus()
-                await pilot.pause()
-                assert view.max_scroll_y > 0
-
-                # Scroll to the bottom first.
-                view.move_cursor_to_edge(True)
-                await pilot.pause()
-                assert view.scroll_y > 0
-
-                # Select the first row by id: it is off screen at the top.
-                assert view.select_id("T-000") is True
-                await pilot.pause()
-                assert view.selected_id() == "T-000"
-                top = view.cursor_line()
-                bottom = top + view.cursor_span() - 1
-                height = view.size.height
-                assert view.scroll_y <= top  # row top visible
-                assert bottom < view.scroll_y + height  # row bottom visible
-                assert view.scroll_y <= view.cursor_line()
-
-        _run(body())
 
 
 class TestKanbanView:
@@ -8158,9 +8001,6 @@ class TestLayoutViews:
                 assert app.layout_view == TuiLayout.TABLE
                 await pilot.press("v")
                 await pilot.pause()
-                assert app.layout_view == TuiLayout.LIST
-                await pilot.press("v")
-                await pilot.pause()
                 assert app.layout_view == TuiLayout.KANBAN
                 await pilot.press("v")
                 await pilot.pause()
@@ -8194,9 +8034,6 @@ class TestLayoutViews:
                 assert app.layout_view == TuiLayout.KANBAN
                 await pilot.press("V")
                 await pilot.pause()
-                assert app.layout_view == TuiLayout.LIST
-                await pilot.press("V")
-                await pilot.pause()
                 assert app.layout_view == TuiLayout.TABLE
 
         _run(body())
@@ -8213,7 +8050,7 @@ class TestLayoutViews:
                 # Forward then prev returns to the original layout.
                 app.action_cycle_layout()
                 await pilot.pause()
-                assert app.layout_view == TuiLayout.LIST
+                assert app.layout_view == TuiLayout.KANBAN
                 app.action_cycle_layout_prev()
                 await pilot.pause()
                 assert app.layout_view == TuiLayout.TABLE
@@ -8225,17 +8062,13 @@ class TestLayoutViews:
         _run(body())
 
     def test_each_view_renders_populated(self, ctx):
-        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView, ListView
+        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView
 
         app = self._app(ctx)
 
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                assert app.query_one(ListView).display is True
-                assert app.query_one(ListView).row_ids == ["T-001", "T-002"]
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 assert app.query_one(KanbanView).display is True
@@ -8246,66 +8079,14 @@ class TestLayoutViews:
 
         _run(body())
 
-    def test_list_view_renders_multiline_authored_title_on_single_line(self, ctx):
-        """The list view renders a (multi-line-authored) title on one line.
-
-        A doto directive title written across continuation lines keeps its
-        embedded newlines and continuation indentation until the directive
-        normalizes it (:func:`doxtr_doto.utils.normalize_whitespace`). This
-        test pins the view contract from both sides: the raw multi-line title
-        would render with an embedded newline (the bug), while the normalized
-        title the directive stores renders as one contiguous compact line.
-        """
-        from doxtr_doto.cli.tui.widgets import ListView
-        from doxtr_doto.utils import normalize_whitespace
-
-        # The raw argument as docutils hands it to the directive: embedded
-        # newlines plus continuation indentation.
-        raw_title = (
-            "Assess whether GitLab's SCIM 2.0 implementation is still\n"
-            "   incomplete (see GitLab work items 597897 and 452118) as a "
-            "contributing\n   root cause"
-        )
-        expected = (
-            "Assess whether GitLab's SCIM 2.0 implementation is still "
-            "incomplete (see GitLab work items 597897 and 452118) as a "
-            "contributing root cause"
-        )
-
-        def _task(title: str) -> dict[str, object]:
-            return {
-                "id": "MULTI-001",
-                "title": title,
-                "status": "open",
-                "priority": "high",
-                "tags": [],
-            }
-
-        # Guard: the un-normalized raw title breaks the single-line layout,
-        # which is exactly the bug the directive normalization prevents.
-        raw_line = ListView.format_line(_task(raw_title), highlighted=False)
-        assert "\n" in raw_line
-
-        # The directive stores the normalized title; the view then renders it
-        # verbatim on one line with the words left contiguous.
-        line = ListView.format_line(_task(normalize_whitespace(raw_title)), highlighted=False)
-        assert "\n" not in line
-        assert expected in line
-
     def test_each_view_renders_empty_store(self, empty_ctx):
-        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView, ListView
+        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView
 
         app = self._app(empty_ctx)
 
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                assert list_view.row_ids == []
-                assert list_view.selected_id() is None
-                assert "No tasks." in list_view.rendered_text()
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -8334,7 +8115,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8370,7 +8151,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -8393,25 +8173,13 @@ class TestLayoutViews:
         assert _load(store_file)["tasks"]["T-001"]["status"] == "open"
 
     def test_alt_view_cursor_moves_selection(self, ctx):
-        from doxtr_doto.cli.tui.widgets import KanbanView, ListView
+        from doxtr_doto.cli.tui.widgets import KanbanView
 
         app = self._app(ctx)
 
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                first = list_view.selected_id()
-                assert first == "T-001"
-                await pilot.press("j")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-002"
-                assert list_view.selected_id() != first
-                await pilot.press("k")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-001"
                 await pilot.press("v")  # kanban (both open tasks share a column)
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -8421,12 +8189,15 @@ class TestLayoutViews:
                 await pilot.pause()
                 assert board.selected_id() == "T-002"
                 assert board.selected_id() != top
+                await pilot.press("k")
+                await pilot.pause()
+                assert board.selected_id() == "T-001"
 
         _run(body())
 
-    def test_shift_arrows_jump_to_edges_in_list_and_kanban(self, ctx):
+    def test_shift_arrows_jump_to_edges_in_table_and_kanban(self, ctx):
         """Shift+Down / Shift+Up jump to the last / first entry (Pilot)."""
-        from doxtr_doto.cli.tui.widgets import KanbanView, ListView, TaskList
+        from doxtr_doto.cli.tui.widgets import KanbanView, TaskList
 
         app = self._app(ctx)
 
@@ -8442,17 +8213,6 @@ class TestLayoutViews:
                 await pilot.press("shift+up")
                 await pilot.pause()
                 assert table.selected_id() == "T-001"
-                # List layout.
-                await pilot.press("v")  # list
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                assert list_view.selected_id() == "T-001"
-                await pilot.press("shift+down")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-002"
-                await pilot.press("shift+up")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-001"
                 # Kanban layout (both open tasks share one lane).
                 await pilot.press("v")  # kanban
                 await pilot.pause()
@@ -8513,7 +8273,7 @@ class TestLayoutViews:
                 await pilot.pause()
                 # Calendar layout: in the grid region Shift+Down / Shift+Up
                 # snap the selected day to the last / first day of the month.
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8561,7 +8321,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -8600,7 +8359,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 # Cursor starts on T-001 (open). Tab moves it -> in-progress.
@@ -8621,7 +8379,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8650,7 +8408,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8685,7 +8443,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8724,7 +8482,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8760,7 +8518,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8792,7 +8550,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8824,7 +8582,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
 
@@ -8868,10 +8625,9 @@ class TestLayoutViews:
     def test_view_classes_are_overridable(self, ctx, store_file):
         """A child theme can swap each layout view via the *_class seams."""
         from doxtr_doto.cli.tui.app import DotoApp
-        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView, ListView
+        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView
 
         # The seams exist and default to the built-in view widgets.
-        assert DotoApp.list_view_class is ListView
         assert DotoApp.kanban_view_class is KanbanView
         assert DotoApp.calendar_view_class is CalendarView
 
@@ -8885,7 +8641,6 @@ class TestLayoutViews:
             async with app.run_test() as pilot:
                 await pilot.pause()
                 # The themed app rendered the child-theme view subclasses.
-                assert isinstance(app.query_one("#list-view"), _ThemedListView)
                 assert isinstance(app.query_one("#kanban-view"), _ThemedKanbanView)
                 assert isinstance(app.query_one("#calendar-view"), _ThemedCalendarView)
 
@@ -8895,11 +8650,11 @@ class TestLayoutViews:
         """An overridden ``format_*`` classmethod reaches the rendered output.
 
         Proves the overridability seam is wired through to the screen (not just
-        that the subclass instance mounted): the themed list view prefixes each
-        line with a sentinel, which must appear in the view's rendered content.
+        that the subclass instance mounted): the themed kanban view injects a
+        sentinel line into each card, which must appear in the rendered content.
         """
         from doxtr_doto.cli.tui import nudge
-        from doxtr_doto.cli.tui.widgets import ListView
+        from doxtr_doto.cli.tui.widgets import KanbanView
 
         nudge.mark_prompted(ctx, nudge.today_iso())
         app = _SentinelLayoutApp(ctx)
@@ -8908,11 +8663,11 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list layout (sentinel-emitting view)
+                await pilot.press("v")  # kanban layout (sentinel-emitting view)
                 await pilot.pause()
-                view = app.query_one(ListView)
-                assert isinstance(view, _SentinelListView)
-                # The overridden format_line's sentinel reached the render.
+                view = app.query_one(KanbanView)
+                assert isinstance(view, _SentinelKanbanView)
+                # The overridden format_card's sentinel reached the render.
                 assert _RENDER_SENTINEL in view.rendered_text()
 
         _run(body())
@@ -8939,7 +8694,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -8953,41 +8708,6 @@ class TestLayoutViews:
                 await pilot.pause()
                 assert calendar.focus_region == CalendarView.REGION_DUE
                 assert _CAL_HIGHLIGHT_SENTINEL in calendar.rendered_text()
-
-        _run(body())
-
-    def test_enter_opens_card_viewer_in_list_layout(self, ctx):
-        """``Enter`` opens the card viewer popup in the list layout (Feature 3).
-
-        The list layout has no dedicated details pane, so activating the
-        highlighted row opens the shared card viewer popup, mirroring the
-        kanban layout.
-        """
-        from doxtr_doto.cli.tui.app import CardViewerScreen
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list layout
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                selected = list_view.selected_id()
-                assert selected == "T-001"
-                await pilot.press("enter")
-                await pilot.pause()
-                # Enter opens the card viewer popup (not the details pane).
-                assert isinstance(app.screen, CardViewerScreen)
-                task = actions.find_task(ctx, selected)
-                assert task is not None
-                detail = str(app.screen.query_one("#viewer-detail").render())
-                assert task["title"] in detail
-                # Enter again closes the popup.
-                await pilot.press("enter")
-                await pilot.pause()
-                assert not isinstance(app.screen, CardViewerScreen)
 
         _run(body())
 
@@ -9040,28 +8760,6 @@ class TestLayoutViews:
 
         _run(body())
 
-    def test_arrow_keys_navigate_list_layout(self, ctx):
-        """Down/Up arrows move the cursor in the list layout (Bug 1)."""
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list layout
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                assert list_view.selected_id() == "T-001"
-                await pilot.press("down")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-002"
-                await pilot.press("up")
-                await pilot.pause()
-                assert list_view.selected_id() == "T-001"
-
-        _run(body())
-
     def test_arrow_keys_navigate_kanban_layout(self, ctx):
         """Down/Up arrows move the cursor within a kanban column (Bug 1)."""
         from doxtr_doto.cli.tui.widgets import KanbanView
@@ -9071,7 +8769,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban (both open tasks share a column)
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -9098,7 +8795,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -9125,7 +8821,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -9198,7 +8894,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 selected = app._current_selected_id()
@@ -9900,7 +9595,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 assert app._current_selected_id() == "T-001"
@@ -9929,7 +9623,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 await pilot.press("enter")  # viewer
@@ -9968,7 +9661,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 await pilot.press("enter")
@@ -9997,7 +9689,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -10037,111 +9729,6 @@ class TestLayoutViews:
 
         _run(body())
 
-    def test_list_view_scrolls_to_keep_cursor_visible(self, ctx):
-        """The list view scrolls so a cursor moved past the viewport stays visible.
-
-        Bug 3: alt views must scroll to follow the cursor. With many tasks and
-        a short terminal, moving the cursor well below the fold must advance
-        the view's scroll offset so the highlighted row remains in view.
-        """
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        # Add enough tasks to exceed a short viewport.
-        for i in range(40):
-            actions.add_task(ctx, f"Task {i}")
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test(size=(80, 12)) as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list layout
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                assert list_view.max_scroll_y > 0  # content exceeds the box
-                assert list_view.scroll_y == 0
-                # Drive the cursor far below the fold.
-                for _ in range(30):
-                    await pilot.press("down")
-                await pilot.pause()
-                # The cursor advanced and the view scrolled to follow it.
-                assert list_view.cursor == 30
-                # The view scrolled at all (this still fails pre-fix, when the
-                # view was a non-scrolling Static).
-                assert list_view.scroll_y > 0
-                # ...and the cursor line is within the scrolled viewport: at
-                # or below the top edge, and above the bottom edge. This is
-                # the robust invariant the fix guarantees, without pinning
-                # scroll_y to the exact clamp boundary (fragile across
-                # textual/platform viewport-geometry drift).
-                cursor_line = list_view.cursor_line()
-                visible_rows = list_view.size.height
-                assert 0 < list_view.scroll_y <= cursor_line
-                assert cursor_line - list_view.scroll_y < visible_rows
-
-        _run(body())
-
-    def test_list_navigation_block_jumps_near_margin_and_holds_mid_frame(self, ctx):
-        """Fix 7: smart-scroll is wired into live list navigation.
-
-        Proves end-to-end that ``scroll_to_cursor`` calls ``target_scroll_y``
-        and that ``_last_cursor_line`` direction inference works in a real
-        view: a single ``down`` that only moves the cursor *within* the frame
-        (away from either margin) must not scroll at all, and the ``down``
-        that crosses the bottom margin must jump a *block* (roughly
-        ``SCROLL_JUMP`` rows), not a single line. Assertions are ranges/
-        invariants so they stay robust to Textual geometry drift.
-        """
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        for i in range(60):
-            actions.add_task(ctx, f"Task {i}")
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test(size=(80, 16)) as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list layout
-                await pilot.pause()
-                list_view = app.query_one(ListView)
-                assert list_view.max_scroll_y > 0
-                assert list_view.scroll_y == 0
-                height = list_view.size.height
-                jump = ListView.SCROLL_JUMP
-
-                # 1) A move that stays mid-frame (above the bottom margin) must
-                #    not scroll: the view holds while the cursor is well inside
-                #    the frame.
-                await pilot.press("down")
-                await pilot.pause()
-                assert list_view.cursor == 1
-                assert list_view.scroll_y == 0  # no mid-frame creep
-
-                # 2) Drive the cursor until it crosses the bottom margin; the
-                #    crossing move must block-jump (advance several rows at
-                #    once), not creep one line.
-                prev_scroll = list_view.scroll_y
-                jumped = 0
-                for _ in range(height):
-                    before = list_view.scroll_y
-                    await pilot.press("down")
-                    await pilot.pause()
-                    delta = list_view.scroll_y - before
-                    if delta > 0:
-                        jumped = delta
-                        break
-                # The first scroll was a block jump, not a single line, and it
-                # advanced roughly SCROLL_JUMP rows (bounded generously so the
-                # exact clamp/geometry does not make the test brittle).
-                assert jumped >= 2
-                assert jumped <= height + jump
-                assert list_view.scroll_y > prev_scroll
-                # The cursor stays within the scrolled viewport.
-                cursor_line = list_view.cursor_line()
-                assert list_view.scroll_y <= cursor_line
-                assert cursor_line - list_view.scroll_y < height
-
-        _run(body())
-
     def test_kanban_view_scrolls_to_keep_cursor_visible(self, ctx):
         """The kanban view scrolls so a card moved past the viewport stays visible."""
         from doxtr_doto.cli.tui.widgets import KanbanView
@@ -10154,7 +9741,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 12)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10203,7 +9789,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 28)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10239,7 +9824,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 28)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10285,7 +9869,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10340,7 +9923,6 @@ class TestLayoutViews:
             # scrollable 76; 4 * 18 + 3 * 2 = 78 > 76).
             async with app.run_test(size=(82, 30)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 await pilot.pause()
@@ -10385,7 +9967,6 @@ class TestLayoutViews:
             # overflows, so no vertical scrollbar.
             async with app.run_test(size=(90, 40)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 view = app.query_one(KanbanView)
@@ -10429,7 +10010,6 @@ class TestLayoutViews:
             # A wide, tall viewport so the board starts fitting its full width.
             async with app.run_test(size=(90, 40)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 view = app.query_one(KanbanView)
@@ -10499,7 +10079,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 12)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.press("v")  # calendar
                 await pilot.pause()
@@ -10541,7 +10120,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10586,7 +10164,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10632,7 +10209,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -10657,25 +10234,6 @@ class TestLayoutViews:
                 await pilot.pause()
                 assert isinstance(app.focused, CalendarView)
                 assert calendar.focus_region == CalendarView.REGION_GRID
-
-        _run(body())
-
-    def test_tab_keeps_focus_on_list_view(self, ctx):
-        """The single-pane list layout keeps Tab focus on its one view."""
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                assert isinstance(app.focused, ListView)
-                await pilot.press("tab")
-                await pilot.pause()
-                # No second pane to cycle into; focus stays on the list view.
-                assert isinstance(app.focused, ListView)
 
         _run(body())
 
@@ -10769,7 +10327,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -10809,7 +10367,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10854,7 +10411,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10894,7 +10450,6 @@ class TestLayoutViews:
         async def body():
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -10938,7 +10493,7 @@ class TestLayoutViews:
         async def body():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                for _ in range(3):
+                for _ in range(2):
                     await pilot.press("v")  # table -> ... -> calendar
                 await pilot.pause()
                 calendar = app.query_one(CalendarView)
@@ -10953,25 +10508,6 @@ class TestLayoutViews:
                 await pilot.pause()
                 assert isinstance(app.focused, CalendarView)
                 assert calendar.focus_region == CalendarView.REGION_NO_DUE
-
-        _run(body())
-
-    def test_shift_tab_keeps_focus_on_list_view(self, ctx):
-        """The single-pane list layout keeps Shift+Tab focus on its one view."""
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                assert isinstance(app.focused, ListView)
-                await pilot.press("shift+tab")
-                await pilot.pause()
-                # No second pane to cycle into; focus stays on the list view.
-                assert isinstance(app.focused, ListView)
 
         _run(body())
 
@@ -11004,7 +10540,6 @@ class TestLayoutViews:
                 # real lane this is a no-op move (no wrap); focus stays on the
                 # board. First advance it one lane with Tab so there is room to
                 # move back.
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView)
@@ -11067,31 +10602,6 @@ class TestLongValuesPureLayout:
         tag_cell = _plain(row[7])
         for tag in LONG_TAGS:
             assert tag in tag_cell
-
-    def test_list_line_carries_full_id_and_title(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        line = ListView.format_line(_long_task(), highlighted=True)
-        plain = _plain(line)
-        # The list is one compact line per task; it does not pre-truncate, so
-        # the full id and the full title are present (the pane scrolls/wraps).
-        assert LONG_ID in plain
-        assert LONG_TITLE in plain
-        # Highlighted rows wrap the whole line in a reverse span.
-        assert line.startswith("[reverse]")
-
-    def test_list_row_height_grows_when_the_line_wraps(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        line = ListView.format_line(_long_task(), highlighted=False)
-        # At a wide width the long single line still wraps to several display
-        # lines; at a very wide width it is one line. Either way row_height
-        # reflects the real wrapped height (never a bogus 0).
-        narrow = view.row_height(line, width=40)
-        wide = view.row_height(line, width=1000)
-        assert narrow > 1
-        assert wide == 1
 
     def test_kanban_card_body_wraps_to_inner_width(self):
         from doxtr_doto.cli.tui.widgets import KanbanView
@@ -11233,13 +10743,6 @@ class TestBracketTitlesRenderLiterally:
             assert _plain(row[6]) == prefix + title
             assert "[tag]" in _plain(row[7])
 
-    def test_list_line_renders_bracket_title_literally(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        for title in BRACKET_TITLES:
-            line = ListView.format_line(_bracket_task(title=title), highlighted=False)
-            assert title in _plain(line), (title, line)
-
     def test_calendar_entry_renders_bracket_title_literally(self):
         from doxtr_doto.cli.tui.widgets import CalendarView
 
@@ -11367,10 +10870,10 @@ class TestBracketTitlesAccentHighlight:
         assert all(self.ACCENT in str(s.style) for s in content.spans)
 
     def test_classmethod_escape_title_uses_the_class_attribute(self):
-        from doxtr_doto.cli.tui.widgets import ListView, TitleHighlight
+        from doxtr_doto.cli.tui.widgets import TaskList, TitleHighlight
 
         # The overridable classmethod seam reads the (set) class attribute ...
-        assert self.ACCENT in ListView.escape_title("[WIP] fix")
+        assert self.ACCENT in TaskList.escape_title("[WIP] fix")
 
         # ... and a subclass can disable/retint the highlight per widget by
         # overriding just the attribute (the frame_style idiom).
@@ -11396,24 +10899,22 @@ class TestBracketTitlesAccentHighlight:
     def test_all_title_surfaces_carry_accent(self):
         from doxtr_doto.cli.tui.widgets import (
             CalendarView,
-            ListView,
             TaskDetails,
             TaskList,
         )
 
         task = _bracket_task(title="[WIP] fix")
-        # List / table / calendar / details all route titles through the
+        # Table / calendar / details all route titles through the
         # shared ``escape_title`` seam, so every surface carries the accent.
-        assert self.ACCENT in ListView.format_line(task, highlighted=False)
         assert self.ACCENT in TaskList.format_row(task)[6]
         assert self.ACCENT in CalendarView.format_entry(task, highlighted=False)
         assert self.ACCENT in TaskDetails.format_details(task, [])
 
     def test_no_style_leaves_titles_colour_free(self):
-        from doxtr_doto.cli.tui.widgets import ListView, TitleHighlight
+        from doxtr_doto.cli.tui.widgets import CalendarView, TitleHighlight
 
         TitleHighlight.BRACKET_HIGHLIGHT_STYLE = ""
-        line = ListView.format_line(_bracket_task(title="[WIP] fix"), highlighted=False)
+        line = CalendarView.format_entry(_bracket_task(title="[WIP] fix"), highlighted=False)
         # With no accent set the title is escaped but uncoloured, and the
         # brackets still render literally.
         assert self.ACCENT not in line
@@ -11423,7 +10924,7 @@ class TestBracketTitlesAccentHighlight:
 class TestLongValuesLiveLayout:
     """Pilot-driven tests that long values render cleanly in a live TUI.
 
-    Drives the real app across every layout (table / list / kanban / calendar)
+    Drives the real app across every layout (table / kanban / calendar)
     and the details pane at both a normal and a cramped terminal size, so the
     overflow handling is exercised against Textual's actual layout engine - not
     just the pure classmethods.
@@ -11442,17 +10943,13 @@ class TestLongValuesLiveLayout:
         return app
 
     def test_every_layout_renders_long_task_without_error(self, long_ctx):
-        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView, ListView
+        from doxtr_doto.cli.tui.widgets import CalendarView, KanbanView
 
         app = self._app(long_ctx)
 
         async def body():
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                assert app.query_one(ListView).row_ids == [LONG_ID]
-                assert LONG_ID in app.query_one(ListView).rendered_text()
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 board = app.query_one(KanbanView).rendered_text()
@@ -11477,59 +10974,6 @@ class TestLongValuesLiveLayout:
 
         _run(body())
 
-    def test_list_cursor_stays_in_view_with_wrapping_rows(self, tmp_path, env):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        # A store of many long-title tasks: every row wraps to several display
-        # lines, so the smart-scroll follow (cursor_line) must account for the
-        # wrapped heights or the highlighted row scrolls out of the pane.
-        store_path = tmp_path / "many" / ".doto" / "tasks.json"
-        store_path.parent.mkdir(parents=True)
-        tasks = {}
-        for i in range(30):
-            t = _long_task()
-            t.pop("id")
-            tasks[f"{LONG_ID}-{i:02d}"] = t
-        store_path.write_text(
-            json.dumps(
-                {
-                    "version": 5,
-                    "updated": "2024-01-01T00:00:00",
-                    "tasks": tasks,
-                    "series": {},
-                }
-            )
-        )
-        config = load_config(json_path=store_path)
-        ctx = DotoContext(
-            config=config,
-            store=JsonTaskStore(config.get_json_path()),
-            formatter=get_formatter(config),
-            global_store=GlobalStateStore(),
-        )
-        app = self._app(ctx)
-
-        async def body():
-            async with app.run_test(size=(60, 18)) as pilot:
-                await pilot.pause()
-                await pilot.press("v")  # list
-                await pilot.pause()
-                view = app.query_one(ListView)
-                # The content really does overflow (rows wrap), otherwise the
-                # test would not exercise the follow-scroll path.
-                assert view.max_scroll_y > 0
-                for _ in range(29):
-                    await pilot.press("j")
-                    await pilot.pause()
-                    top = int(view.scroll_y)
-                    height = view.scrollable_content_region.height
-                    cursor = view.cursor_line()
-                    # The highlighted row's starting display line is always
-                    # inside the visible window - it never scrolls out of view.
-                    assert top <= cursor <= top + height - 1
-
-        _run(body())
-
     def test_kanban_board_fits_the_grid_in_a_narrow_terminal(self, long_ctx):
         from rich.text import Text
 
@@ -11540,7 +10984,6 @@ class TestLongValuesLiveLayout:
         async def body():
             async with app.run_test(size=(48, 20)) as pilot:
                 await pilot.pause()
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 view = app.query_one(KanbanView)
@@ -11665,7 +11108,6 @@ class TestSelectedTaskAlwaysVisible:
             async with app.run_test(size=(80, 12)) as pilot:
                 await pilot.pause()
                 # Switch to the kanban layout.
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 assert app.layout_view == TuiLayout.KANBAN
@@ -11701,7 +11143,6 @@ class TestSelectedTaskAlwaysVisible:
                 await pilot.pause()
                 # Enter the kanban layout and scroll its long 'open' lane to
                 # the bottom so the view carries a deep, stale scroll offset.
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.pause()
                 assert app.layout_view == TuiLayout.KANBAN
@@ -11732,7 +11173,6 @@ class TestSelectedTaskAlwaysVisible:
                 await pilot.press("v")  # calendar
                 await pilot.press("v")  # time
                 await pilot.press("v")  # table
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban (active again)
                 await pilot.pause()
                 assert app.layout_view == TuiLayout.KANBAN
@@ -11767,7 +11207,6 @@ class TestSelectedTaskAlwaysVisible:
             async with app.run_test(size=(80, 12)) as pilot:
                 await pilot.pause()
                 # Cycle TABLE -> LIST -> KANBAN -> CALENDAR.
-                await pilot.press("v")  # list
                 await pilot.press("v")  # kanban
                 await pilot.press("v")  # calendar (CalendarView override runs)
                 await pilot.pause()
@@ -12091,20 +11530,6 @@ class TestTaskTreePrefix:
         assert ">" in parent_row[6]
         assert row[6].endswith("T")
 
-    def test_list_view_format_line_applies_tree_prefix(self):
-        from doxtr_doto.cli.tui.filtersort import TreeRow
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        row = TreeRow(
-            task={"id": "C", "title": "Child", "status": "open"},
-            depth=2,
-            has_children=False,
-            expanded=False,
-        )
-        line = ListView.format_line(row, highlighted=False)
-        assert ListView.format_tree_prefix(2, False, False) in line
-        assert "Child" in line
-
 
 class TestTaskTreeInteraction:
     """Pilot-driven tests of the expandable task tree + Space semantics."""
@@ -12205,66 +11630,3 @@ class TestTaskTreeInteraction:
                 assert table.selected_ids == set()
 
         _run(body())
-
-
-class TestListViewTreeInteraction:
-    """Render-only tests of the expandable task tree in the LIST layout.
-
-    Space is a TABLE-only affordance, so the LIST layout exercises the tree by
-    passing a ``collapsed_ids`` set straight to :meth:`ListView.rebuild` and
-    asserting the rendered rows - mirroring :class:`TestTaskTreeInteraction`
-    for the table, but render-only.
-    """
-
-    @staticmethod
-    def _tree_tasks():
-        return [
-            {"id": "P", "title": "Parent", "status": "open", "parent": None},
-            {"id": "C", "title": "Child", "status": "open", "parent": "P"},
-            {"id": "G", "title": "Grandchild", "status": "open", "parent": "C"},
-            {"id": "S", "title": "Sibling leaf", "status": "open", "parent": None},
-        ]
-
-    def test_list_view_rebuilds_nested_rows_expanded_by_default(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        view.rebuild(self._tree_tasks())
-        # Parents default EXPANDED: the whole branch is visible, in order.
-        assert view.row_ids == ["P", "C", "G", "S"]
-
-    def test_list_view_renders_indented_triangle_rows(self):
-        from doxtr_doto.cli.tui.filtersort import flatten_tree
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        tasks = self._tree_tasks()
-        rows = flatten_tree(tasks)
-        by_id = {r.task["id"]: ListView.format_line(r, highlighted=False) for r in rows}
-        # Parent P (expanded, depth 0): expanded triangle, no indent.
-        assert ListView.TREE_GLYPH_EXPANDED in by_id["P"]
-        assert ListView.format_tree_prefix(0, True, True) in by_id["P"]
-        # Child C (expanded parent, depth 1): one indent level + triangle.
-        assert ListView.format_tree_prefix(1, True, True) in by_id["C"]
-        # Grandchild G (leaf, depth 2): two indent levels, leaf blank glyph.
-        assert ListView.format_tree_prefix(2, False, False) in by_id["G"]
-        assert ListView.TREE_GLYPH_EXPANDED not in by_id["G"]
-        assert ListView.TREE_GLYPH_COLLAPSED not in by_id["G"]
-        # Sibling leaf S (depth 0 leaf).
-        assert ListView.format_tree_prefix(0, False, False) in by_id["S"]
-
-    def test_list_view_collapsed_parent_hides_descendants(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        # Collapse P directly via the rebuild collapsed_ids arg (render-only,
-        # since Space is TABLE-only): its descendants C and G vanish.
-        view.rebuild(self._tree_tasks(), {"P"})
-        assert view.row_ids == ["P", "S"]
-
-    def test_list_view_mid_level_collapse_hides_only_that_subtree(self):
-        from doxtr_doto.cli.tui.widgets import ListView
-
-        view = ListView()
-        # Collapse only C: its child G is hidden, but P, C, and S remain.
-        view.rebuild(self._tree_tasks(), {"C"})
-        assert view.row_ids == ["P", "C", "S"]

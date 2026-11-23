@@ -91,6 +91,10 @@ class TestGlobalState:
             "work_clock",
             "breaks",
             "workweek_days",
+            "day_length_minutes",
+            "week_length_minutes",
+            "holiday_allowance_days",
+            "leave_days",
             "last_prompt_date",
             "tui_layout",
             "tui_hide_completed",
@@ -109,6 +113,10 @@ class TestGlobalState:
         assert data["work_clock"] == {"worklogs": []}
         assert data["breaks"] == []
         assert data["workweek_days"] == [0, 1, 2, 3, 4]
+        assert data["day_length_minutes"] == 8 * 60
+        assert data["week_length_minutes"] is None
+        assert data["holiday_allowance_days"] == 25.0
+        assert data["leave_days"] == []
 
     def test_from_dict_full(self):
         data = {
@@ -142,6 +150,64 @@ class TestGlobalState:
         assert data["workweek_days"] == [0, 2, 4]
         rebuilt = GlobalState.from_dict(data)
         assert rebuilt.workweek_days == [0, 2, 4]
+
+    def test_work_length_and_holiday_fields_round_trip(self):
+        state = GlobalState(
+            day_length_minutes=504,
+            week_length_minutes=2400,
+            holiday_allowance_days=27.5,
+        )
+        data = state.to_dict()
+        assert data["day_length_minutes"] == 504
+        assert data["week_length_minutes"] == 2400
+        assert data["holiday_allowance_days"] == 27.5
+        rebuilt = GlobalState.from_dict(data)
+        assert rebuilt.day_length_minutes == 504
+        assert rebuilt.week_length_minutes == 2400
+        assert rebuilt.holiday_allowance_days == 27.5
+
+    def test_work_length_sanitizers_reject_bad_values(self):
+        state = GlobalState.from_dict(
+            {
+                "day_length_minutes": -5,
+                "week_length_minutes": 0,
+                "holiday_allowance_days": -1,
+            }
+        )
+        # Invalid day length falls back to the 8h default; a non-positive
+        # week length means "derive from day length" (None); a negative
+        # allowance falls back to the default.
+        assert state.day_length_minutes == 8 * 60
+        assert state.week_length_minutes is None
+        assert state.holiday_allowance_days == 25.0
+
+    def test_leave_days_round_trip_and_sanitize(self):
+        from doxtr_doto.cli.global_state import LeaveEntry
+
+        state = GlobalState(
+            leave_days=[
+                LeaveEntry(date="2026-07-06", kind="holiday"),
+                LeaveEntry(date="2026-07-13", kind="sick", fraction=0.5, note="half"),
+            ]
+        )
+        data = state.to_dict()
+        rebuilt = GlobalState.from_dict(data)
+        assert [e.date for e in rebuilt.leave_days] == ["2026-07-06", "2026-07-13"]
+        assert rebuilt.leave_days[1].kind == "sick"
+        assert rebuilt.leave_days[1].fraction == 0.5
+        assert rebuilt.leave_days[1].note == "half"
+
+    def test_leave_days_skips_entries_without_date(self):
+        state = GlobalState.from_dict({"leave_days": [{"kind": "holiday"}, {"date": "2026-07-06"}]})
+        assert len(state.leave_days) == 1
+        assert state.leave_days[0].date == "2026-07-06"
+
+    def test_leave_kind_alias_normalized(self):
+        from doxtr_doto.cli.global_state import sanitize_leave_kind
+
+        assert sanitize_leave_kind("vacation") == "holiday"
+        assert sanitize_leave_kind("illness") == "sick"
+        assert sanitize_leave_kind("") == "holiday"
 
     def test_view_pref_fields_round_trip(self):
         # Feature C sort memory: the filter/sort preference fields survive a
@@ -350,3 +416,201 @@ class TestGlobalStateStore:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         store = GlobalStateStore()
         assert store.path == tmp_path / "doto" / "config.json"
+
+
+class TestLeaveHelpers:
+    """Tests for apply_leave_range / leave_days_in_range."""
+
+    def test_apply_leave_range_skips_weekends(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        leave = []
+        added, skipped = apply_leave_range(
+            leave,
+            date(2026, 7, 6),  # Monday
+            date(2026, 7, 12),  # Sunday
+            "holiday",
+            workweek_days=[0, 1, 2, 3, 4],
+        )
+        assert added == [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-08",
+            "2026-07-09",
+            "2026-07-10",
+        ]
+        assert skipped == 2
+        assert all(e.kind == "holiday" for e in leave)
+
+    def test_apply_leave_range_include_weekends(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        leave = []
+        added, skipped = apply_leave_range(
+            leave,
+            date(2026, 7, 6),
+            date(2026, 7, 12),
+            "holiday",
+            workweek_days=[0, 1, 2, 3, 4],
+            include_weekends=True,
+        )
+        assert len(added) == 7
+        assert skipped == 0
+
+    def test_apply_leave_range_dedup(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        leave = []
+        apply_leave_range(leave, date(2026, 7, 6), date(2026, 7, 6), "holiday")
+        added, _ = apply_leave_range(leave, date(2026, 7, 6), date(2026, 7, 6), "holiday")
+        assert added == []
+        assert len(leave) == 1
+
+    def test_apply_leave_range_swaps_reversed(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        leave = []
+        added, _ = apply_leave_range(
+            leave,
+            date(2026, 7, 8),
+            date(2026, 7, 6),
+            "holiday",
+            include_weekends=True,
+        )
+        assert added == ["2026-07-06", "2026-07-07", "2026-07-08"]
+
+    def test_apply_leave_range_half_day(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import apply_leave_range
+
+        leave = []
+        apply_leave_range(
+            leave, date(2026, 7, 6), date(2026, 7, 6), "holiday", fraction=0.5, note="pm"
+        )
+        assert leave[0].fraction == 0.5
+        assert leave[0].note == "pm"
+
+    def test_leave_days_in_range_filters_and_sorts(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, leave_days_in_range
+
+        leave = [
+            LeaveEntry(date="2026-07-10", kind="holiday"),
+            LeaveEntry(date="2026-07-06", kind="sick"),
+            LeaveEntry(date="2026-08-01", kind="holiday"),
+            LeaveEntry(date="bad-date", kind="holiday"),
+        ]
+        rows = leave_days_in_range(leave, date(2026, 7, 1), date(2026, 7, 31))
+        assert [e.date for e in rows] == ["2026-07-06", "2026-07-10"]
+
+
+class TestLeavePeriods:
+    """Tests for group_leave_periods / next_leave_period."""
+
+    def test_group_merges_consecutive_same_kind(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, group_leave_periods
+
+        leave = [
+            LeaveEntry(date="2026-07-06", kind="holiday", note="Summer"),
+            LeaveEntry(date="2026-07-07", kind="holiday"),
+            LeaveEntry(date="2026-07-08", kind="holiday"),
+        ]
+        periods = group_leave_periods(leave)
+        assert len(periods) == 1
+        p = periods[0]
+        assert p.start == date(2026, 7, 6)
+        assert p.end == date(2026, 7, 8)
+        assert p.kind == "holiday"
+        assert p.days == 3
+        assert p.note == "Summer"
+
+    def test_group_splits_on_gap_and_kind_change(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, group_leave_periods
+
+        leave = [
+            LeaveEntry(date="2026-07-06", kind="holiday"),
+            LeaveEntry(date="2026-07-07", kind="sick"),  # kind change
+            LeaveEntry(date="2026-07-10", kind="holiday"),  # gap
+        ]
+        periods = group_leave_periods(leave)
+        assert [(p.start, p.kind, p.days) for p in periods] == [
+            (date(2026, 7, 6), "holiday", 1),
+            (date(2026, 7, 7), "sick", 1),
+            (date(2026, 7, 10), "holiday", 1),
+        ]
+
+    def test_group_skips_bad_dates_and_dedups(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, group_leave_periods
+
+        leave = [
+            LeaveEntry(date="bad", kind="holiday"),
+            LeaveEntry(date="2026-07-06", kind="holiday"),
+            LeaveEntry(date="2026-07-06", kind="holiday"),  # duplicate
+            LeaveEntry(date="2026-07-07", kind="holiday"),
+        ]
+        periods = group_leave_periods(leave)
+        assert len(periods) == 1
+        assert periods[0].start == date(2026, 7, 6)
+        assert periods[0].end == date(2026, 7, 7)
+        assert periods[0].days == 2
+
+    def test_next_leave_period_upcoming(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, next_leave_period
+
+        leave = [
+            LeaveEntry(date="2026-01-02", kind="holiday"),  # past
+            LeaveEntry(date="2026-07-06", kind="holiday"),
+            LeaveEntry(date="2026-07-07", kind="holiday"),
+        ]
+        period = next_leave_period(leave, date(2026, 6, 1))
+        assert period is not None
+        assert period.start == date(2026, 7, 6)
+        assert period.end == date(2026, 7, 7)
+
+    def test_next_leave_period_in_progress(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, next_leave_period
+
+        leave = [
+            LeaveEntry(date="2026-07-06", kind="holiday"),
+            LeaveEntry(date="2026-07-07", kind="holiday"),
+            LeaveEntry(date="2026-07-08", kind="holiday"),
+        ]
+        # A period in progress today is still returned.
+        period = next_leave_period(leave, date(2026, 7, 7))
+        assert period is not None
+        assert period.start == date(2026, 7, 6)
+
+    def test_next_leave_period_all_past_returns_none(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import LeaveEntry, next_leave_period
+
+        leave = [LeaveEntry(date="2026-07-06", kind="holiday")]
+        assert next_leave_period(leave, date(2026, 10, 1)) is None
+
+    def test_next_leave_period_empty(self):
+        from datetime import date
+
+        from doxtr_doto.cli.global_state import next_leave_period
+
+        assert next_leave_period([], date(2026, 1, 1)) is None

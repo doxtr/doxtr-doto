@@ -230,6 +230,39 @@ def live_counters(ctx: DotoContext, now: datetime | None = None) -> tuple[int, b
     return work_today, work_running, work_session_seconds, focus_seconds
 
 
+def work_clock_status(
+    ctx: DotoContext,
+    now: datetime | None = None,
+) -> tuple[str | None, int]:
+    """Return the open work-clock start timestamp and long-session finding count.
+
+    Args:
+        ctx: The CLI context.
+        now: Reference "current" time (defaults to current local time).
+
+    Returns:
+        A tuple ``(work_started_at, long_session_count)`` where
+        ``work_started_at`` is the ISO start timestamp of the currently open
+        global work-clock session (or ``None`` when clocked out), and
+        ``long_session_count`` is the number of overly long / forgotten work
+        clock sessions detected by
+        :func:`doxtr_doto.time_tracking.find_long_sessions`.
+    """
+    from doxtr_doto.time_tracking import find_long_sessions
+
+    moment = now if now is not None else datetime.now().astimezone()
+    state = ctx.global_store.load()
+    worklogs = state.work_clock.worklogs
+    open_log = open_session(worklogs)
+    started_at = str(open_log["started_at"]) if open_log and open_log.get("started_at") else None
+    findings = find_long_sessions(
+        worklogs,
+        now=moment,
+        day_length_minutes=state.day_length_minutes,
+    )
+    return started_at, len(findings)
+
+
 def current_work_session_seconds(ctx: DotoContext, now: datetime | None = None) -> int:
     """Return the elapsed seconds of the currently open work-clock session.
 

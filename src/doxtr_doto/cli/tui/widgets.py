@@ -5,13 +5,13 @@ without rewriting the app. Row formatting is delegated to classmethods
 (``format_*``) that return Textual markup strings, keeping presentation logic
 isolated from mutation and layout.
 
-Scrolling the alt-views (list / kanban / calendar) distinguishes two kinds of
+Scrolling the alt-views (kanban / calendar) distinguishes two kinds of
 cursor move. Continuous ``j``/``k`` navigation uses the *smart-scroll*
 algorithm (:meth:`AltLayoutView.scroll_to_cursor` /
 :meth:`AltLayoutView.target_scroll_y`), which only scrolls when the cursor
 comes within a margin of an edge and infers the move direction from the
 previous cursor line. *Discontinuous* jumps - switching kanban swim lanes,
-selecting a task by id in the list / kanban views, or a layout cycle that
+selecting a task by id in the kanban view, or a layout cycle that
 re-selects a task - cannot rely on direction inference (the cursor can land
 arbitrarily far from where it was), so they go through
 :meth:`AltLayoutView.ensure_cursor_visible`, which repositions the viewport so
@@ -30,13 +30,12 @@ This module imports ``textual`` directly; it is only imported from
 from __future__ import annotations
 
 import calendar as _calendar
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from rich.console import Console as _Console
 from rich.text import Text as _Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
@@ -59,12 +58,6 @@ from doxtr_doto.work_report import month_range, week_range, year_range
 
 if TYPE_CHECKING:
     from doxtr_doto.cli.tui.app import DotoApp
-
-#: A width-agnostic Rich console reused only to measure how many display lines
-#: a row's markup wraps to (:meth:`ListView.row_height`). The width is passed
-#: to each ``Text.wrap`` call, so the console itself holds no per-view state;
-#: a module-level singleton avoids rebuilding one on every keypress.
-_MEASURE_CONSOLE = _Console()
 
 
 class TitleHighlight:
@@ -224,15 +217,11 @@ class RepoTree(Tree[None]):
 
 
 class TreePrefixMixin:
-    """Shared tree triangle + depth-indent prefix for the list widgets.
+    """Shared tree triangle + depth-indent prefix for the task table.
 
-    Holds the overridable tree glyph/indent class attributes and the
-    :meth:`format_tree_prefix` seam that :class:`TaskList` (table layout) and
-    :class:`ListView` (list layout) both draw their expand/collapse affordance
-    from, so the prefix logic lives in one place. Both widgets inherit this
-    mixin, and each can still override any ``TREE_*`` attribute or
-    :meth:`format_tree_prefix` *independently* via normal subclass attribute
-    resolution (a child theme reskins the table and list trees separately).
+    Holds the overridable tree glyph/indent attributes and the
+    :meth:`format_tree_prefix` seam that :class:`TaskList` uses for its
+    expand/collapse affordance, so prefix logic stays separate from row data.
     """
 
     #: Number of leading spaces per nesting depth level drawn by
@@ -257,8 +246,8 @@ class TreePrefixMixin:
         so the list reads as an expandable tree. A child theme restyles the
         tree by subclassing and resetting :attr:`TREE_INDENT` /
         :attr:`TREE_GLYPH_EXPANDED` / :attr:`TREE_GLYPH_COLLAPSED` /
-        :attr:`TREE_GLYPH_LEAF`, or overriding this method wholesale - on
-        :class:`TaskList` or :class:`ListView` independently.
+        :attr:`TREE_GLYPH_LEAF`, or overriding this method wholesale on
+        :class:`TaskList`.
 
         The prefix is width-stable: every row is indented ``depth`` levels and
         then carries exactly one glyph cell (a triangle for a parent, a blank
@@ -689,11 +678,48 @@ class TaskDetails(TitleHighlight, Static):
 class StatusLine(Static):
     """Persistent status line with the two always-visible live counters."""
 
+    @staticmethod
+    def _format_started_label(
+        work_started_at: str | None,
+        now: _datetime | None = None,
+    ) -> tuple[str, bool]:
+        """Format when the global work clock was started, plus a stale flag.
+
+        Same-day starts render compactly as ``since HH:MM``; starts from an
+        earlier date include the ISO date (``since YYYY-MM-DD HH:MM``) and
+        flag ``is_prior_day=True`` so the user immediately sees a forgotten
+        clock-in.
+
+        Args:
+            work_started_at: ISO 8601 start timestamp of the open work clock,
+                or ``None`` when stopped.
+            now: Reference current time (defaults to local now).
+
+        Returns:
+            A ``(label, is_prior_day)`` tuple (empty label when stopped or
+            unparseable).
+        """
+        if not work_started_at:
+            return "", False
+        from doxtr_doto.time_tracking import parse_timestamp
+
+        try:
+            started = parse_timestamp(work_started_at)
+        except (ValueError, TypeError):
+            return "", False
+        moment = now if now is not None else _datetime.now().astimezone()
+        local_now = moment.astimezone(started.tzinfo)
+        if started.date() < local_now.date():
+            return f"since {started.strftime('%Y-%m-%d %H:%M')}", True
+        return f"since {started.strftime('%H:%M')}", False
+
     def update_counters(
         self,
         work_today: int,
         work_running: bool,
         focus_seconds: int,
+        work_started_at: str | None = None,
+        long_session_count: int = 0,
     ) -> None:
         """Update the status line with the current counters.
 
@@ -701,8 +727,20 @@ class StatusLine(Static):
             work_today: Elapsed work-clock seconds for today (Layer 1).
             work_running: Whether the work clock is currently running.
             focus_seconds: Elapsed seconds of the open focus session (Layer 2).
+            work_started_at: ISO 8601 start timestamp of the currently open
+                global work clock, or ``None`` when clocked out.
+            long_session_count: Number of flagged overly long / forgotten
+                work-clock sessions (shown as a warning badge when > 0).
         """
-        self.update(self.format_counters(work_today, work_running, focus_seconds))
+        self.update(
+            self.format_counters(
+                work_today,
+                work_running,
+                focus_seconds,
+                work_started_at=work_started_at,
+                long_session_count=long_session_count,
+            )
+        )
 
     @classmethod
     def format_counters(
@@ -710,6 +748,9 @@ class StatusLine(Static):
         work_today: int,
         work_running: bool,
         focus_seconds: int,
+        work_started_at: str | None = None,
+        long_session_count: int = 0,
+        now: _datetime | None = None,
     ) -> str:
         """Return the status-line markup for the live counters.
 
@@ -717,15 +758,42 @@ class StatusLine(Static):
             work_today: Elapsed work-clock seconds for today (Layer 1).
             work_running: Whether the work clock is currently running.
             focus_seconds: Elapsed seconds of the open focus session (Layer 2).
+            work_started_at: ISO 8601 start timestamp of the currently open
+                global work clock, or ``None`` when clocked out.
+            long_session_count: Number of flagged overly long / forgotten
+                work-clock sessions (shown as a warning badge when > 0).
+            now: Reference current time (for deterministic date comparison in
+                tests; defaults to local now).
 
         Returns:
             Textual markup for the status line.
         """
-        clock_style = "green" if work_running else "dim"
-        clock = styled(f"⏱ Work: {format_duration(work_today)}", clock_style)
+        started_label, is_prior_day = cls._format_started_label(
+            work_started_at if work_running else None,
+            now=now,
+        )
+        if work_running and is_prior_day:
+            clock_style = "bold yellow"
+        elif work_running:
+            clock_style = "green"
+        else:
+            clock_style = "dim"
+        work_text = f"⏱ Work: {format_duration(work_today)}"
+        if started_label:
+            work_text += f" ({started_label})"
+        clock = styled(work_text, clock_style)
         focus_style = "cyan" if focus_seconds else "dim"
         focus = styled(f"▶ Focus: {format_duration(focus_seconds)}", focus_style)
-        return f"{clock}    {focus}"
+        parts = [clock, focus]
+        if long_session_count > 0:
+            noun = "session" if long_session_count == 1 else "sessions"
+            parts.append(
+                styled(
+                    f"⚠ {long_session_count} long {noun} (t a)",
+                    "bold yellow",
+                )
+            )
+        return "    ".join(parts)
 
 
 class KeyHintBar(Static):
@@ -921,11 +989,96 @@ class TaskTimeLine(Static):
         return f"{work}    {task}"
 
 
+class NextHolidayLine(Static):
+    """Top-bar (left side) display of the next upcoming leave period.
+
+    Companion to :class:`TaskTimeLine` on the same top row: while the time line
+    sits on the right, this shows - on the left - the next recorded holiday /
+    sick period (a :class:`doxtr_doto.cli.global_state.LeavePeriod`): its kind,
+    date (or date range for a multi-day block), a relative ``in N days`` /
+    ``today`` / ``ends in N days`` hint, and the note when present. When no
+    upcoming leave is recorded a dim placeholder is shown.
+
+    Like :class:`TaskTimeLine` the rendering lives in a pure, overridable
+    :meth:`format_next_holiday` classmethod so a child theme can restyle it
+    without reaching into the refresh wiring.
+    """
+
+    def update_next_holiday(self, period: Any, today: _date | None = None) -> None:
+        """Update the display with the next leave period.
+
+        Args:
+            period: The next :class:`~doxtr_doto.cli.global_state.LeavePeriod`,
+                or None when no upcoming leave is recorded.
+            today: Reference date for the relative hint (defaults to the local
+                today).
+        """
+        moment = today if today is not None else _datetime.now().astimezone().date()
+        self.update(self.format_next_holiday(period, moment))
+
+    @classmethod
+    def format_next_holiday(cls, period: Any, today: _date) -> str:
+        """Return the top-bar markup for the next leave period.
+
+        Args:
+            period: The next ``LeavePeriod`` (with ``start`` / ``end`` /
+                ``kind`` / ``note`` / ``days`` attributes), or None.
+            today: Reference date for the relative hint.
+
+        Returns:
+            Textual markup, left-aligned. A dim placeholder when ``period`` is
+            None.
+        """
+        if period is None:
+            return styled("⚑ Next leave: none", "dim")
+        kind = getattr(period, "kind", "holiday")
+        label = "Sick" if kind == "sick" else "Holiday"
+        style = "yellow" if kind == "sick" else "green"
+        start = period.start
+        end = period.end
+        if start == end:
+            when = start.isoformat()
+        else:
+            when = f"{start.isoformat()}–{end.isoformat()}"
+        hint = cls._relative_hint(start, end, today)
+        text = f"⚑ Next {label}: {when}"
+        if hint:
+            text += f" ({hint})"
+        note = str(getattr(period, "note", "") or "")
+        if note:
+            text += f" — {note}"
+        return styled(text, style)
+
+    @staticmethod
+    def _relative_hint(start: _date, end: _date, today: _date) -> str:
+        """Return a relative ``in N days`` / ``today`` / ``ends in N days`` hint.
+
+        Args:
+            start: The period's first day.
+            end: The period's last day.
+            today: The reference date.
+
+        Returns:
+            A short relative phrase, or an empty string when none applies.
+        """
+        if start > today:
+            delta = (start - today).days
+            if delta == 1:
+                return "tomorrow"
+            return f"in {delta} days"
+        if start <= today <= end:
+            if start == end or today == end:
+                return "today"
+            remaining = (end - today).days
+            return "ends tomorrow" if remaining == 1 else f"ends in {remaining} days"
+        return ""
+
+
 class AltLayoutView(TitleHighlight, VerticalScroll):
     """Shared base for the alternative task-list layout views.
 
     The default 3-pane :class:`TaskList` table is the structural layout;
-    everything else (list / kanban / calendar) is an *alternative* layout that
+    everything else (kanban / calendar / time) is an *alternative* layout that
     renders into the shared ``#alt-view`` container and is cycled with the
     ``v`` keybinding. This base declares the small contract the app relies on
     so :mod:`doxtr_doto.cli.tui.app` can drive every alt-view through one
@@ -1133,9 +1286,9 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
     def cursor_line(self) -> int:
         """Return the 0-based content line the cursor currently occupies.
 
-        Overridable per view (list/kanban/calendar track the cursor
-        differently) so :meth:`scroll_to_cursor` can keep the highlighted row
-        visible. The base implementation keeps the view scrolled to the top.
+        Overridable per view (kanban/calendar track the cursor differently),
+        so :meth:`scroll_to_cursor` can keep the highlighted row visible. The
+        base implementation keeps the view scrolled to the top.
 
         Returns:
             The content line index to keep in view (0 by default).
@@ -1148,9 +1301,8 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         The per-view *height* of the cursor item, so the shared smart-scroll
         algorithm (:meth:`target_scroll_y`) can keep the **whole** selected
         item on screen rather than only its top line (:meth:`cursor_line`).
-        For the plain list every task is a single content line, so the base
-        implementation returns ``1``. :class:`KanbanView` overrides this to
-        return the full card height because each card is a fixed, multi-line
+        The base implementation returns ``1``. :class:`KanbanView` overrides
+        this to return the full card height because each card is a fixed, multi-line
         block. (:class:`CalendarView` does not use the shared scroll path at
         all - it overrides :meth:`scroll_to_cursor` - so its behavior is
         preserved regardless of this value.) Overridable per view / by a child
@@ -1210,7 +1362,7 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         """Scroll so a *discontinuous* jump to the first / last entry lands.
 
         The scroll counterpart of :meth:`move_cursor_to_edge` for the views
-        that follow the shared smart-scroll path (list / kanban). Unlike
+        that follow the shared smart-scroll path (the kanban view). Unlike
         :meth:`scroll_to_cursor`, it does **not** infer the move direction
         from :attr:`_last_cursor_line` - a jump to an edge is discontinuous
         and its direction is already known from ``to_bottom`` - so it scrolls
@@ -1247,7 +1399,7 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
 
         The discontinuous-jump counterpart of :meth:`scroll_to_cursor` /
         :meth:`scroll_cursor_to_edge` for the views that follow the shared
-        smart-scroll path (list / kanban). Where :meth:`scroll_to_cursor`
+        smart-scroll path (the kanban view). Where :meth:`scroll_to_cursor`
         *infers* the move direction from :attr:`_last_cursor_line` (correct for
         continuous ``j``/``k`` navigation, where the cursor steps one row at a
         time), this method makes **no** direction assumption: it guarantees the
@@ -1423,11 +1575,11 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
           heading down) does not snap the frame against the move direction -
           it falls through to None;
         * the cursor item is treated as occupying the full line span returned
-          by :meth:`cursor_span` (one line for the plain list, a whole card
+          by :meth:`cursor_span` (one line for the base view, a whole card
           height for kanban), so the test and the computed target keep the
           **entire** highlighted item on screen rather than only its top line.
-          For the common one-line list this is identical to the previous
-          single-line behavior;
+          For a one-line view this is identical to the previous single-line
+          behavior;
         * the result is clamped to the scrollable range so it never scrolls
           past the content, and the final clamp guarantees the whole span
           fits when it can. When a single item is *taller* than the viewport
@@ -1487,7 +1639,7 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         # look-ahead is preserved where it still fits. The one-line branch is
         # kept separate: lo == hi there would defeat the look-ahead.
         if span == 1:
-            # One-line list / calendar: the item is a single line so lo == hi
+            # One-line item: a single line makes lo == hi
             # (both equal ``cursor_line``) would defeat the SCROLL_JUMP
             # look-ahead. Preserve the original single-line nudge instead - the
             # target may legitimately scroll the lone cursor line toward the
@@ -1561,8 +1713,8 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
         does not select by task id): :class:`TimeView`, whose selection keys on
         a *day* rather than a task, deliberately inherits this no-op so an
         auto-select request there is simply ignored. The task-centric views
-        (:class:`TaskList`, :class:`ListView`, :class:`KanbanView`,
-        :class:`CalendarView`) override it. An overridable seam so a child
+        (:class:`TaskList`, :class:`KanbanView`, :class:`CalendarView`)
+        override it. An overridable seam so a child
         theme can retune or replace the per-view selection by subclassing and
         swapping the matching ``*_view_class`` / ``task_list_class`` app
         attribute; keep the id-preservation behavior in :meth:`rebuild` intact.
@@ -1575,265 +1727,6 @@ class AltLayoutView(TitleHighlight, VerticalScroll):
             False otherwise.
         """
         return False
-
-
-class ListView(TreePrefixMixin, AltLayoutView):
-    """Single-column list view: one task per line, Enter reveals details.
-
-    This is the ``list`` TUI layout (:attr:`doxtr_doto.enums.TuiLayout.LIST`):
-    an alternative to the default table that shows every task on one compact
-    line. The currently highlighted row is tracked by index in
-    :attr:`cursor` so ``j``/``k`` can move through the list, and
-    :meth:`selected_id` resolves the cursor to a task id. Activating a row
-    with ``Enter`` reveals that task's details - the requirement's
-    "Enter-to-detail" behavior - by refreshing and focusing the same
-    :class:`TaskDetails` pane used by the table layout; that activation is an
-    app action (``action_activate``) rather than widget business logic.
-
-    Rendering is delegated to the pure, overridable :meth:`format_line` /
-    :meth:`format_lines` classmethods so a child theme can replace the
-    per-line markup by subclassing and swapping
-    :attr:`doxtr_doto.cli.tui.app.DotoApp.list_view_class`.
-    """
-
-    #: Fallback content width used when the view's own
-    #: ``scrollable_content_region`` is not yet known (pre-mount). Mirrors
-    #: :class:`KanbanView`'s ``DEFAULT_COLUMN_WIDTH`` convention so the
-    #: wrap-aware :meth:`cursor_line` has a sane width to measure against
-    #: before the first layout pass.
-    DEFAULT_CONTENT_WIDTH: int = 80
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the list view with empty rows and a zeroed cursor."""
-        super().__init__(*args, **kwargs)
-        self.row_ids: list[str] = []
-        self.cursor: int = 0
-        #: The per-row rendered markup, cached by the most recent
-        #: :meth:`rebuild` so :meth:`cursor_line` can measure each row's
-        #: *wrapped* display height (a long title wraps to several display
-        #: lines) without re-rendering the whole list on every keypress. One
-        #: entry per ``row_ids`` entry, in the same order.
-        self._row_markup: list[str] = []
-
-    def rebuild(self, tasks: list[dict[str, Any]], collapsed_ids: set[str] | None = None) -> None:
-        """Rebuild the list from task dicts, nesting sub-tasks as a tree.
-
-        Mirrors :meth:`TaskList.rebuild`: the visible list is flattened into a
-        depth-first pre-order parent/child tree via
-        :func:`doxtr_doto.cli.tui.filtersort.flatten_tree`, so each sub-task is
-        drawn indented under its ``parent`` with an expand/collapse triangle,
-        and the cursor is preserved by id across rebuilds. ``tasks`` is
-        consumed in the order the caller's view pipeline produced it (already
-        active-pinned via :func:`pin_active_first`, Feature A); this method
-        does not re-pin.
-
-        Args:
-            tasks: Task dicts (as produced by
-                :func:`doxtr_doto.cli.tui.data.gather_tasks`).
-            collapsed_ids: The set of parent ids whose children are hidden
-                (default-expanded otherwise). None is treated as empty.
-        """
-        previous = self.selected_id()
-        # ``tasks`` is already active-pinned by the caller's view pipeline
-        # (pin_active_first, Feature A); consume that order as-is rather than
-        # re-pinning here. Flatten into the parent/child tree so sub-tasks
-        # nest under their parent.
-        rows = flatten_tree(tasks, collapsed_ids)
-        self.row_ids = [str(row.task.get("id", "")) for row in rows]
-        if previous is not None and previous in self.row_ids:
-            self.cursor = self.row_ids.index(previous)
-        else:
-            self.cursor = min(self.cursor, max(len(self.row_ids) - 1, 0))
-        # Cache each row's markup so cursor_line can measure wrapped heights.
-        # format_line is called without the cursor highlight because the
-        # highlight wrapper does not change the line's rendered width/height.
-        self._row_markup = [self.format_line(row, False) for row in rows]
-        self.update_content(self.format_lines(rows, self.cursor))
-        self._sync_scroll_anchor()
-        self.scroll_to_cursor()
-
-    def selected_id(self) -> str | None:
-        """Return the id of the currently highlighted row.
-
-        Returns:
-            The highlighted row's id, or None when the list is empty.
-        """
-        if not self.row_ids:
-            return None
-        if self.cursor < 0 or self.cursor >= len(self.row_ids):
-            return None
-        return self.row_ids[self.cursor]
-
-    def move_cursor(self, delta: int) -> None:
-        """Move the highlighted row by ``delta`` (clamped to the list bounds).
-
-        Args:
-            delta: Number of rows to move (negative moves up).
-        """
-        if not self.row_ids:
-            return
-        self.cursor = max(0, min(len(self.row_ids) - 1, self.cursor + delta))
-        self.scroll_to_cursor()
-
-    def move_cursor_to_edge(self, to_bottom: bool) -> None:
-        """Jump the highlighted row to the first / last entry (``Shift+Up``/down).
-
-        Snaps :attr:`cursor` to ``0`` (top) or the last row (bottom) rather
-        than stepping, then scrolls straight to the matching content edge
-        (:meth:`~AltLayoutView.scroll_cursor_to_edge`) so the discontinuous
-        jump lands correctly in both directions instead of inferring a bogus
-        direction from the pre-jump line. A no-op on an empty list.
-
-        Args:
-            to_bottom: Jump to the last row when True, the first when False.
-        """
-        if not self.row_ids:
-            return
-        self.cursor = len(self.row_ids) - 1 if to_bottom else 0
-        self.scroll_cursor_to_edge(to_bottom)
-
-    def select_id(self, task_id: str) -> bool:
-        """Place the cursor on the row whose id equals ``task_id``.
-
-        Sets :attr:`cursor` to the matching row index and repositions it into
-        view via the discontinuous :meth:`~AltLayoutView.ensure_cursor_visible`
-        path (selecting by id is a jump, not a step, so the direction-inferring
-        :meth:`~AltLayoutView.scroll_to_cursor` could leave it off screen).
-        See :meth:`AltLayoutView.select_id` for the overall contract.
-
-        Args:
-            task_id: The display id (bare or namespaced) to select.
-
-        Returns:
-            True when ``task_id`` is a current row and the cursor moved to it,
-            False when it is not present.
-        """
-        if task_id not in self.row_ids:
-            return False
-        self.cursor = self.row_ids.index(task_id)
-        self.ensure_cursor_visible()
-        return True
-
-    def _content_width(self) -> int:
-        """Return the width (screen columns) rows wrap to, or a safe fallback.
-
-        The inner Static renders into the scroll container's content region,
-        so a row longer than this width wraps to several display lines. The
-        width is only known once the view is mounted and laid out; before that
-        (e.g. the pure-logic unit tests that construct a view directly) this
-        falls back to :attr:`DEFAULT_CONTENT_WIDTH`.
-
-        Returns:
-            The content width in screen columns (always >= 1).
-        """
-        if self.is_mounted:
-            width = self.scrollable_content_region.width
-            if width > 0:
-                return width
-        return self.DEFAULT_CONTENT_WIDTH
-
-    def row_height(self, markup: str, width: int) -> int:
-        """Return how many display lines one row's ``markup`` wraps to.
-
-        A row is nominally one compact line, but a long title wraps to several
-        display lines when it exceeds the content width - and the smart-scroll
-        algorithm (:meth:`~AltLayoutView.scroll_to_cursor`) tracks *display*
-        lines, not task indices. Measuring the wrapped height here (mirroring
-        :meth:`KanbanView.card_height`) is what keeps :meth:`cursor_line`
-        honest so the highlighted row never scrolls out of the view pane.
-
-        Args:
-            markup: The row's Textual markup (as :meth:`format_line` produces).
-            width: The content width (screen columns) the row wraps to.
-
-        Returns:
-            The number of display lines the row occupies (always >= 1).
-        """
-        if width <= 0:
-            return 1
-        text = _Text.from_markup(markup)
-        return max(1, len(text.wrap(_MEASURE_CONSOLE, width)))
-
-    def cursor_line(self) -> int:
-        """Return the display line the highlighted row starts on.
-
-        A row is nominally one compact line, so historically this returned the
-        cursor index directly. But when a row's title is long enough to wrap,
-        each row above the cursor occupies *more than one* display line, so the
-        cursor's true display line is the sum of the wrapped heights
-        (:meth:`row_height`) of every row above it - not its index. Returning
-        the index in that case made :meth:`~AltLayoutView.scroll_to_cursor`
-        keep the wrong (too-shallow) line in view, so the highlighted row
-        scrolled out of the visible pane. Summing the real heights keeps
-        scroll-follow landing on the highlighted row even when earlier rows
-        wrapped.
-
-        Returns:
-            The highlighted row's 0-based starting display line.
-        """
-        width = self._content_width()
-        line = 0
-        for index in range(min(self.cursor, len(self._row_markup))):
-            line += self.row_height(self._row_markup[index], width)
-        return line
-
-    @classmethod
-    def format_lines(cls, rows: Sequence[TreeRow | dict[str, Any]], cursor: int) -> str:
-        """Return the full list markup, highlighting the cursor row.
-
-        Args:
-            rows: The rows to render - either
-                :class:`~doxtr_doto.cli.tui.filtersort.TreeRow` objects (the
-                tree-aware path :meth:`rebuild` uses) or bare task dicts (for
-                pure-logic callers/tests).
-            cursor: The index of the highlighted row.
-
-        Returns:
-            Textual markup for the whole list (an empty-state line when there
-            are no tasks).
-        """
-        if not rows:
-            return "[dim]No tasks.[/dim]"
-        lines = [cls.format_line(row, index == cursor) for index, row in enumerate(rows)]
-        return "\n".join(lines)
-
-    @classmethod
-    def format_line(cls, row: TreeRow | dict[str, Any], highlighted: bool) -> str:
-        """Return one task's single-line markup.
-
-        Accepts either a :class:`~doxtr_doto.cli.tui.filtersort.TreeRow`
-        (carrying depth / expansion for the tree prefix) or a bare task dict
-        (treated as a depth-0 leaf). The line is prefixed with the
-        expand/collapse triangle + depth indent from :meth:`format_tree_prefix`
-        so sub-tasks read as an indented tree, mirroring :meth:`TaskList`.
-
-        Args:
-            row: A :class:`TreeRow` or a bare task dict.
-            highlighted: Whether this row is under the cursor.
-
-        Returns:
-            Textual markup for the task's line.
-        """
-        if isinstance(row, TreeRow):
-            task = row.task
-            depth, has_children, expanded = row.depth, row.has_children, row.expanded
-        else:
-            task = row
-            depth, has_children, expanded = 0, False, False
-        running = "[green]\u25b6[/green]" if task.get("_running") else " "
-        done = task.get("status") == DONE_STATUS
-        checkbox = "[dim]\\[\u2713][/dim]" if done else "\\[ ]"
-        priority = task.get("priority") or ""
-        pri_cell = styled((priority[:4] or "-").ljust(4), priority_style(priority))
-        status = task.get("status") or ""
-        status_cell = styled((status or "-"), status_style(status))
-        task_id = escape_markup(task.get("id", ""))
-        prefix = cls.format_tree_prefix(depth, has_children, expanded)
-        title = prefix + cls.escape_title(task.get("title", ""))
-        line = f"{running} {checkbox} {pri_cell} {status_cell} [bold]{task_id}[/bold]  {title}"
-        if highlighted:
-            return f"[reverse]{line}[/reverse]"
-        return line
 
 
 class KanbanView(AltLayoutView):
@@ -3862,7 +3755,7 @@ class CalendarView(AltLayoutView):
         :class:`~textual.widgets.Static`, the only offset that keeps the grid's
         top line (content line 0) on screen is 0, exactly as
         :meth:`scroll_to_cursor` documents - so this delegates to it rather
-        than running the span-clamp target computation the list/kanban views
+        than running the span-clamp target computation the kanban view
         use. A no-op until the view is mounted.
         """
         self.scroll_to_cursor()
@@ -4065,7 +3958,7 @@ class TimeView(AltLayoutView):
 
     This is the ``time`` TUI layout
     (:attr:`doxtr_doto.enums.TuiLayout.TIME`): unlike the task-centric
-    list/kanban/calendar views, it renders the *global work clock* - every day
+    kanban/calendar views, it renders the *global work clock* - every day
     that has one or more work-clock intervals, newest first, each with its
     start/stop intervals and that day's gross / auto-deducted break / net
     totals - plus a grand total across all shown days at the top. It is the
@@ -4092,6 +3985,15 @@ class TimeView(AltLayoutView):
         self._day_work: dict[str, Any] = {}
         #: Per-day interval display rows (start, stop) keyed by ISO date.
         self._day_rows: dict[str, list[tuple[str, str]]] = {}
+        #: Per-day leave entries (holiday / sick), keyed by ISO date. Each
+        #: value is a list of ``(kind, fraction, note)`` tuples.
+        self._day_leave: dict[str, list[tuple[str, float, str]]] = {}
+        #: ISO start timestamp of the currently open work-clock session, if any.
+        self._open_started_at: str | None = None
+        #: Number of flagged overly long / forgotten work-clock sessions.
+        self._long_session_count: int = 0
+        #: Start timestamps of intervals flagged as overly long / stale.
+        self._flagged_starts: set[str] = set()
         #: The highlighted day index into :attr:`days`.
         self.cursor: int = 0
         #: Grand total gross/break/net seconds across the shown days.
@@ -4107,6 +4009,8 @@ class TimeView(AltLayoutView):
         worklogs: list[WorkLog],
         breaks: list[Any] | None = None,
         now: _datetime | None = None,
+        leave: list[Any] | None = None,
+        day_length_minutes: int = 8 * 60,
     ) -> None:
         """Rebuild the view from the global work clock's intervals.
 
@@ -4116,16 +4020,39 @@ class TimeView(AltLayoutView):
         CLI ``doto report``. The day cursor is preserved by date across
         rebuilds when the day still has intervals.
 
+        Recorded leave days (holidays / sick days) are merged into the day
+        list even when they carry no work intervals, so a day off is visible
+        in the time view; each day's block shows a leave marker.
+
         Args:
             worklogs: The global work clock's worklog intervals.
             breaks: Configured breaks (``BreakConfig``-like) to auto-deduct;
                 an unparseable break time is skipped so the view never crashes.
             now: Reference "now" for open intervals (defaults to local now).
+            leave: Recorded leave entries (``LeaveEntry``-like) to visualize.
+                Entries with an unparseable date are skipped.
+            day_length_minutes: Expected working-day length in minutes, used
+                to flag overly long sessions inline.
         """
-        from doxtr_doto.time_tracking import parse_timestamp
+        from doxtr_doto.time_tracking import (
+            find_long_sessions,
+            open_session,
+            parse_timestamp,
+        )
         from doxtr_doto.work_report import BreakSpec, compute_day
 
         moment = now if now is not None else _datetime.now().astimezone()
+        open_log = open_session(worklogs)
+        self._open_started_at = (
+            str(open_log["started_at"]) if open_log and open_log.get("started_at") else None
+        )
+        findings = find_long_sessions(
+            worklogs,
+            now=moment,
+            day_length_minutes=day_length_minutes,
+        )
+        self._long_session_count = len(findings)
+        self._flagged_starts = {f.started_at for f in findings}
         specs: list[Any] = []
         for cfg in breaks or []:
             try:
@@ -4145,11 +4072,34 @@ class TimeView(AltLayoutView):
                 continue
             stop = log.get("stopped_at")
             stop_display = str(stop) if stop else "(running)"
+            if str(started_raw) in self._flagged_starts:
+                stop_display += "  [yellow]⚠ long[/yellow]"
             by_day.setdefault(day, []).append((str(started_raw), stop_display))
+
+        # Merge recorded leave days (even those with no work intervals) so a
+        # holiday / sick day shows in the view, and collect per-day markers.
+        leave_by_day: dict[str, list[tuple[str, float, str]]] = {}
+        for entry in leave or []:
+            raw = str(getattr(entry, "date", "")).strip()
+            if not raw:
+                continue
+            try:
+                leave_day = _date.fromisoformat(raw)
+            except ValueError:
+                continue
+            try:
+                fraction = float(getattr(entry, "fraction", 1.0))
+            except (TypeError, ValueError):
+                fraction = 1.0
+            kind = str(getattr(entry, "kind", "holiday")).strip().lower() or "holiday"
+            note = str(getattr(entry, "note", ""))
+            leave_by_day.setdefault(raw, []).append((kind, fraction, note))
+            by_day.setdefault(leave_day, by_day.get(leave_day, []))
 
         previous = self.selected_day()
         self.days = sorted(by_day.keys(), reverse=True)
         self._day_rows = {d.isoformat(): rows for d, rows in by_day.items()}
+        self._day_leave = leave_by_day
         self._day_work = {}
         gross_total = brk_total = net_total = 0
         for day in self.days:
@@ -4175,6 +4125,9 @@ class TimeView(AltLayoutView):
                 self._day_work,
                 self._totals,
                 self.cursor,
+                self._day_leave,
+                open_started_at=self._open_started_at,
+                long_session_count=self._long_session_count,
             )
         )
         self._sync_scroll_anchor()
@@ -4222,6 +4175,9 @@ class TimeView(AltLayoutView):
                 self._day_work,
                 self._totals,
                 self.cursor,
+                self._day_leave,
+                open_started_at=self._open_started_at,
+                long_session_count=self._long_session_count,
             )
         )
         self.scroll_to_cursor()
@@ -4249,6 +4205,9 @@ class TimeView(AltLayoutView):
                 self._day_work,
                 self._totals,
                 self.cursor,
+                self._day_leave,
+                open_started_at=self._open_started_at,
+                long_session_count=self._long_session_count,
             )
         )
         self._sync_scroll_anchor()
@@ -4268,8 +4227,9 @@ class TimeView(AltLayoutView):
         line = self.HEADER_LINES
         for index in range(min(self.cursor, len(self.days))):
             day = self.days[index]
-            rows = self._day_rows.get(day.isoformat(), [])
-            line += self.day_height(len(rows))
+            iso = day.isoformat()
+            rows = self._day_rows.get(iso, [])
+            line += self.day_height(len(rows), len(self._day_leave.get(iso, [])))
         return line
 
     def cursor_span(self) -> int:
@@ -4281,8 +4241,9 @@ class TimeView(AltLayoutView):
         day = self.selected_day()
         if day is None:
             return 1
-        rows = self._day_rows.get(day.isoformat(), [])
-        return self.day_height(len(rows))
+        iso = day.isoformat()
+        rows = self._day_rows.get(iso, [])
+        return self.day_height(len(rows), len(self._day_leave.get(iso, [])))
 
     #: Content lines the grand-total header (:meth:`format_header`) emits
     #: before the first day block: the ``Work time`` title, the total line and
@@ -4291,40 +4252,59 @@ class TimeView(AltLayoutView):
     HEADER_LINES: int = 3
 
     @classmethod
-    def day_height(cls, interval_count: int) -> int:
+    def day_height(cls, interval_count: int, leave_count: int = 0) -> int:
         """Return how many content lines a day's block occupies.
 
         A day block is: the day header line, one line per interval (at least
-        one placeholder line when a day somehow has none), the totals line and
-        a trailing blank separator.
+        one placeholder line when a day somehow has none), one line per leave
+        marker, the totals line and a trailing blank separator.
 
         Args:
             interval_count: The number of intervals shown for the day.
+            leave_count: The number of leave markers shown for the day.
 
         Returns:
             The day block's height in content lines.
         """
-        return 1 + max(1, interval_count) + 1 + 1
+        return 1 + max(1, interval_count) + leave_count + 1 + 1
 
     @classmethod
-    def format_header(cls, totals: tuple[int, int, int]) -> str:
+    def format_header(
+        cls,
+        totals: tuple[int, int, int],
+        open_started_at: str | None = None,
+        long_session_count: int = 0,
+    ) -> str:
         """Return the grand-total header markup.
 
         Args:
             totals: ``(gross, break, net)`` seconds across the shown days,
                 where ``break`` is the real recorded break (clock-out gap)
                 time, not a nominal auto-deduction.
+            open_started_at: ISO start timestamp of the currently open work
+                clock session, if any.
+            long_session_count: Number of flagged overly long / forgotten
+                work-clock sessions.
 
         Returns:
             Textual markup for the header (title + total line + blank).
         """
         gross, brk, net = totals
+        title = styled("Work time", "bold")
+        if open_started_at:
+            title += "   " + styled(f"(running since {open_started_at})", "green")
+        if long_session_count > 0:
+            noun = "session" if long_session_count == 1 else "sessions"
+            title += "   " + styled(
+                f"⚠ {long_session_count} overly long {noun} — press t a",
+                "bold yellow",
+            )
         total = (
             f"Gross {format_duration(gross)}   "
             f"Breaks {format_duration(brk)}   "
             f"[b]Net {format_duration(net)}[/b]"
         )
-        return styled("Work time", "bold") + "\n" + total + "\n"
+        return title + "\n" + total + "\n"
 
     @classmethod
     def format_days(
@@ -4334,6 +4314,9 @@ class TimeView(AltLayoutView):
         day_work: dict[str, Any],
         totals: tuple[int, int, int],
         cursor: int,
+        day_leave: dict[str, list[tuple[str, float, str]]] | None = None,
+        open_started_at: str | None = None,
+        long_session_count: int = 0,
     ) -> str:
         """Return the whole time-view markup (header + per-day blocks).
 
@@ -4343,13 +4326,25 @@ class TimeView(AltLayoutView):
             day_work: Per-day computed figures keyed by ISO date.
             totals: Grand ``(gross, break, net)`` seconds.
             cursor: Index of the highlighted day.
+            day_leave: Per-day leave markers keyed by ISO date; each value a
+                list of ``(kind, fraction, note)`` tuples. Defaults to no
+                leave so existing callers keep the historical layout.
+            open_started_at: ISO start timestamp of the currently open work
+                clock session, if any.
+            long_session_count: Number of flagged overly long sessions.
 
         Returns:
             Textual markup for the view (an empty-state line when no days).
         """
+        leave_map = day_leave or {}
+        header = cls.format_header(
+            totals,
+            open_started_at=open_started_at,
+            long_session_count=long_session_count,
+        )
         if not days:
-            return cls.format_header(totals) + "\n[dim]No work-clock time recorded.[/dim]"
-        blocks = [cls.format_header(totals)]
+            return header + "\n[dim]No work-clock time recorded.[/dim]"
+        blocks = [header]
         for index, day in enumerate(days):
             iso = day.isoformat()
             blocks.append(
@@ -4358,9 +4353,39 @@ class TimeView(AltLayoutView):
                     day_rows.get(iso, []),
                     day_work.get(iso),
                     index == cursor,
+                    leave_map.get(iso, []),
                 )
             )
         return "\n".join(blocks)
+
+    @classmethod
+    def format_leave_marker(cls, kind: str, fraction: float, note: str) -> str:
+        """Return the markup for one leave marker line within a day block.
+
+        A holiday renders green and a sick day yellow (with a leading icon),
+        a half day is annotated, and a non-empty note is appended. Its own
+        overridable seam so a child theme can restyle the marker without
+        touching :meth:`format_day`.
+
+        Args:
+            kind: ``"holiday"`` / ``"sick"`` (any other value renders plain).
+            fraction: Portion of the day the leave covers (``0.5`` = half).
+            note: Optional free-text note.
+
+        Returns:
+            Textual markup for the leave line.
+        """
+        if kind == "sick":
+            label, style = "Sick day", "yellow"
+        elif kind == "holiday":
+            label, style = "Holiday", "green"
+        else:
+            label, style = kind.capitalize() or "Leave", ""
+        if fraction and fraction != 1.0:
+            label += " (half day)"
+        if note:
+            label += f" — {note}"
+        return "  " + styled(f"⚑ {label}", style) if style else f"  ⚑ {label}"
 
     @classmethod
     def format_day(
@@ -4369,6 +4394,7 @@ class TimeView(AltLayoutView):
         rows: list[tuple[str, str]],
         work: Any,
         highlighted: bool,
+        leave: list[tuple[str, float, str]] | None = None,
     ) -> str:
         """Return one worked day's block markup.
 
@@ -4377,9 +4403,12 @@ class TimeView(AltLayoutView):
             rows: The day's interval ``(start, stop)`` display rows.
             work: The day's :class:`doxtr_doto.work_report.DayWork`, or None.
             highlighted: Whether this day is under the cursor.
+            leave: The day's leave markers (``(kind, fraction, note)`` tuples);
+                defaults to none.
 
         Returns:
-            Textual markup for the day block (header, intervals, totals, blank).
+            Textual markup for the day block (header, intervals, leave markers,
+            totals, blank).
         """
         heading = day.strftime("%a %Y-%m-%d")
         header = styled(heading, "bold reverse" if highlighted else "bold")
@@ -4389,6 +4418,8 @@ class TimeView(AltLayoutView):
                 lines.append(f"  {start}  \u2192  {stop}")
         else:
             lines.append("  [dim](no intervals)[/dim]")
+        for kind, fraction, note in leave or []:
+            lines.append(cls.format_leave_marker(kind, fraction, note))
         if work is not None:
             # "Breaks" shows recorded clock-out gaps, which are already
             # excluded from gross and are NOT subtracted to reach net (net is
@@ -4534,6 +4565,11 @@ class WorkTimeSummary(Static):
         breaks: list[Any] | None = None,
         now: _datetime | None = None,
         workweek_days: list[int] | None = None,
+        *,
+        day_length_minutes: int | None = None,
+        week_length_minutes: int | None = None,
+        holiday_allowance_days: float | None = None,
+        leave: list[Any] | None = None,
     ) -> None:
         """Recompute the week/month/year summaries and re-render the panel.
 
@@ -4548,8 +4584,26 @@ class WorkTimeSummary(Static):
                 :data:`doxtr_doto.cli.global_state.DEFAULT_WORKWEEK_DAYS`
                 (Monday-Friday) so existing callers that pass only
                 ``(worklogs, breaks)`` keep the historical behavior.
+            day_length_minutes: Expected working-day length in minutes. When
+                given (with the other work-length args) the panel appends an
+                **overtime** block for the current week and a **holidays**
+                block (allowance drawdown + sick days). When None these blocks
+                are omitted, preserving the historical layout.
+            week_length_minutes: Optional weekly target in minutes (overrides
+                the day length for the per-day expectation when set).
+            holiday_allowance_days: Yearly holiday allowance in days (for the
+                holidays block). When None the holidays block is omitted.
+            leave: Recorded leave entries (``LeaveEntry``-like) for the
+                overtime/holiday computation. Unparseable entries are skipped.
         """
-        from doxtr_doto.work_report import BreakSpec
+        from doxtr_doto.work_report import (
+            BreakSpec,
+            LeaveSpec,
+            compute_overtime,
+            compute_period,
+            holiday_days_used,
+            week_range,
+        )
 
         moment = now if now is not None else _datetime.now().astimezone()
         days = list(workweek_days) if workweek_days is not None else list(DEFAULT_WORKWEEK_DAYS)
@@ -4561,7 +4615,45 @@ class WorkTimeSummary(Static):
                 continue
         data = self.summary_data(worklogs, specs, moment)
         workweek_net = workweek_net_seconds(worklogs, specs, moment, days)
-        self.update(self.format_summary(data, workweek_net, days))
+
+        overtime_markup: str | None = None
+        holiday_markup: str | None = None
+        if day_length_minutes is not None:
+            leave_specs: list[Any] = []
+            for entry in leave or []:
+                spec = LeaveSpec.from_entry(entry)
+                if spec is not None:
+                    leave_specs.append(spec)
+            start, end = week_range(moment.date())
+            week_period = compute_period(worklogs, start, end, specs, moment)
+            overtime = compute_overtime(
+                week_period,
+                start,
+                end,
+                day_length_minutes=day_length_minutes,
+                week_length_minutes=week_length_minutes,
+                workweek_days=days,
+                leave=leave_specs,
+            )
+            overtime_markup = self.format_overtime(overtime)
+            if holiday_allowance_days is not None:
+                used = holiday_days_used(leave_specs, moment.year)
+                holiday_markup = self.format_holidays(
+                    moment.year,
+                    float(holiday_allowance_days),
+                    used,
+                    overtime.sick_days_taken,
+                )
+
+        self.update(
+            self.format_summary(
+                data,
+                workweek_net,
+                days,
+                overtime_markup=overtime_markup,
+                holiday_markup=holiday_markup,
+            )
+        )
 
     @classmethod
     def summary_data(
@@ -4613,6 +4705,9 @@ class WorkTimeSummary(Static):
         data: list[tuple[str, tuple[int, int, int]]],
         workweek_net_seconds: int | None = None,
         workweek_days: list[int] | None = None,
+        *,
+        overtime_markup: str | None = None,
+        holiday_markup: str | None = None,
     ) -> str:
         """Return the whole summary-panel markup (title + per-group blocks).
 
@@ -4625,6 +4720,10 @@ class WorkTimeSummary(Static):
             workweek_days: Weekday numbers (Monday=0 .. Sunday=6) backing the
                 work-week total, used to render its range label. Defaults to
                 :data:`doxtr_doto.cli.global_state.DEFAULT_WORKWEEK_DAYS`.
+            overtime_markup: Pre-rendered overtime block (from
+                :meth:`format_overtime`), or None to omit it.
+            holiday_markup: Pre-rendered holidays block (from
+                :meth:`format_holidays`), or None to omit it.
 
         Returns:
             Textual markup for the panel.
@@ -4635,7 +4734,97 @@ class WorkTimeSummary(Static):
         if workweek_net_seconds is not None:
             days = list(workweek_days) if workweek_days is not None else list(DEFAULT_WORKWEEK_DAYS)
             blocks.append(cls.format_workweek(workweek_net_seconds, days))
+        if overtime_markup is not None:
+            blocks.append(overtime_markup)
+        if holiday_markup is not None:
+            blocks.append(holiday_markup)
         return "\n".join(blocks)
+
+    @staticmethod
+    def _format_signed_duration(seconds: int) -> str:
+        """Format a signed duration with an explicit ``+``/``-`` sign."""
+        if seconds == 0:
+            return format_duration(0)
+        sign = "+" if seconds > 0 else "-"
+        return sign + format_duration(abs(seconds))
+
+    @staticmethod
+    def _format_days(days: float) -> str:
+        """Format a day count, dropping a trailing ``.0`` on whole numbers."""
+        if days == int(days):
+            return str(int(days))
+        return f"{days:.1f}"
+
+    @classmethod
+    def format_overtime(cls, overtime: Any) -> str:
+        """Return the current-week overtime block markup.
+
+        Shows the week's expected working time, the net worked time plus any
+        leave credit, and the resulting overtime/shortfall (signed). This is
+        its own overridable seam (a child theme can replace it without
+        touching the gross/net group rendering).
+
+        Args:
+            overtime: A :class:`doxtr_doto.work_report.OvertimePeriod`.
+
+        Returns:
+            Textual markup for the overtime block.
+        """
+        sign_style = "bold" if overtime.overtime_seconds >= 0 else "bold"
+        return (
+            "\n"
+            + styled("Overtime (week)", "bold")
+            + "\n"
+            + f"  Expected {format_duration(overtime.expected_seconds)}\n"
+            + f"  Worked   {format_duration(overtime.worked_seconds)}\n"
+            + (
+                f"  Leave    {format_duration(overtime.leave_credit_seconds)}\n"
+                if overtime.leave_credit_seconds
+                else ""
+            )
+            + "  "
+            + styled(
+                f"Overtime {cls._format_signed_duration(overtime.overtime_seconds)}",
+                sign_style,
+            )
+        )
+
+    @classmethod
+    def format_holidays(
+        cls,
+        year: int,
+        allowance_days: float,
+        used_days: float,
+        sick_days: float,
+    ) -> str:
+        """Return the holidays/sick-days block markup.
+
+        Shows the yearly holiday allowance drawdown (allowance, used,
+        remaining) and any sick days recorded in the current week. Its own
+        overridable seam, separate from the overtime block.
+
+        Args:
+            year: The calendar year the allowance drawdown is anchored on.
+            allowance_days: The configured yearly holiday allowance (days).
+            used_days: Holiday days taken in ``year``.
+            sick_days: Sick days recorded in the current week.
+
+        Returns:
+            Textual markup for the holidays block.
+        """
+        remaining = allowance_days - used_days
+        block = (
+            "\n"
+            + styled(f"Holidays ({year})", "bold")
+            + "\n"
+            + f"  Allowance {cls._format_days(allowance_days)}\n"
+            + f"  Used      {cls._format_days(used_days)}\n"
+            + "  "
+            + styled(f"Remaining {cls._format_days(remaining)}", "bold")
+        )
+        if sick_days:
+            block += "\n  " + styled(f"Sick (week) {cls._format_days(sick_days)}", "bold")
+        return block
 
     @classmethod
     def format_workweek(cls, net_seconds: int, workweek_days: list[int]) -> str:

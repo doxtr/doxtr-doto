@@ -167,3 +167,281 @@ def test_app_cycles_to_time_layout_and_enter_opens_manager(tmp_path):
             assert app.screen.day == date(2026, 6, 1)
 
     _run(scenario())
+
+
+def test_breaks_config_screen_saves_work_length_settings(tmp_path):
+    """The breaks/work-length config screen persists the new settings."""
+    from doxtr_doto.cli.tui.time_mgmt import BreaksConfigScreen
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_configure_breaks()
+            await pilot.pause()
+            assert isinstance(app.screen, BreaksConfigScreen)
+            screen = app.screen
+            # Edit the three work-length fields.
+            screen.query_one("#breaks-day-length").value = "8h24m"
+            screen.query_one("#breaks-week-length").value = "40h"
+            screen.query_one("#breaks-holiday").value = "27.5"
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+        state = ctx.global_store.load()
+        assert state.day_length_minutes == 504
+        assert state.week_length_minutes == 2400
+        assert state.holiday_allowance_days == 27.5
+
+    _run(scenario())
+
+
+def test_breaks_config_screen_prefills_current_settings(tmp_path):
+    from doxtr_doto.cli.tui.time_mgmt import BreaksConfigScreen
+
+    ctx = _make_ctx(tmp_path, [])
+    state = ctx.global_store.load()
+    state.day_length_minutes = 450  # 7h30m
+    state.week_length_minutes = 2250  # 37h30m
+    state.holiday_allowance_days = 30.0
+    ctx.global_store.save(state)
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_configure_breaks()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, BreaksConfigScreen)
+            assert screen.query_one("#breaks-day-length").value == "7h30m"
+            assert screen.query_one("#breaks-week-length").value == "37h30m"
+            assert screen.query_one("#breaks-holiday").value == "30"
+
+    _run(scenario())
+
+
+# --- Leave visualization in the time view ---------------------------------
+
+
+class _Leave:
+    """Minimal LeaveEntry-like object for TimeView.rebuild tests."""
+
+    def __init__(self, date, kind="holiday", fraction=1.0, note=""):
+        self.date = date
+        self.kind = kind
+        self.fraction = fraction
+        self.note = note
+
+
+def test_time_view_shows_leave_only_day():
+    # A holiday with no work interval still appears as a day block.
+    view = TimeView()
+    view.rebuild(
+        [],
+        [],
+        now=datetime(2026, 6, 3, tzinfo=TZ),
+        leave=[_Leave("2026-06-02", "holiday", note="Summer")],
+    )
+    assert [d.isoformat() for d in view.days] == ["2026-06-02"]
+    text = view.rendered_text()
+    assert "Holiday" in text
+    assert "Summer" in text
+
+
+def test_time_view_sick_day_marker_on_worked_day():
+    worklogs = [{"started_at": _ts(9, 0, 2), "stopped_at": _ts(11, 0, 2)}]
+    view = TimeView()
+    view.rebuild(
+        worklogs,
+        [],
+        now=datetime(2026, 6, 3, tzinfo=TZ),
+        leave=[_Leave("2026-06-02", "sick", fraction=0.5)],
+    )
+    text = view.rendered_text()
+    assert "Sick day (half day)" in text
+
+
+def test_time_view_day_height_accounts_for_leave_lines():
+    # One interval + two leave markers: header + 1 interval + 2 leave + total + blank.
+    assert TimeView.day_height(1, 2) == 1 + 1 + 2 + 1 + 1
+
+
+def test_time_view_leave_day_navigable():
+    view = TimeView()
+    view.rebuild(
+        [{"started_at": _ts(9, 0, 1), "stopped_at": _ts(10, 0, 1)}],
+        [],
+        now=datetime(2026, 6, 3, tzinfo=TZ),
+        leave=[_Leave("2026-06-02", "holiday")],
+    )
+    # Both the worked day and the leave-only day are present, newest first.
+    assert [d.isoformat() for d in view.days] == ["2026-06-02", "2026-06-01"]
+    view.move_cursor(1)
+    assert view.selected_id() == "2026-06-01"
+
+
+def test_leave_config_screen_records_period(tmp_path):
+    """The leave configurator records a holiday period into global state."""
+    from doxtr_doto.cli.tui.time_mgmt import LeaveConfigScreen
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_configure_leave()
+            await pilot.pause()
+            assert isinstance(app.screen, LeaveConfigScreen)
+            screen = app.screen
+            screen.query_one("#leave-start").value = "2026-07-06"  # Monday
+            screen.query_one("#leave-end").value = "2026-07-10"  # Friday
+            screen.query_one("#leave-kind").value = "holiday"
+            screen.query_one("#leave-note").value = "Summer"
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+        state = ctx.global_store.load()
+        dates = sorted(e.date for e in state.leave_days)
+        assert dates == [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-08",
+            "2026-07-09",
+            "2026-07-10",
+        ]
+        assert all(e.kind == "holiday" for e in state.leave_days)
+        assert all(e.note == "Summer" for e in state.leave_days)
+
+    _run(scenario())
+
+
+def test_leave_config_screen_sick_half_day(tmp_path):
+    from doxtr_doto.cli.tui.time_mgmt import LeaveConfigScreen
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_configure_leave()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, LeaveConfigScreen)
+            screen.query_one("#leave-start").value = "2026-07-06"
+            screen.query_one("#leave-kind").value = "sick"
+            screen.query_one("#leave-half").value = "yes"
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+        state = ctx.global_store.load()
+        assert len(state.leave_days) == 1
+        entry = state.leave_days[0]
+        assert entry.date == "2026-07-06"
+        assert entry.kind == "sick"
+        assert entry.fraction == 0.5
+
+    _run(scenario())
+
+
+def test_leave_config_screen_invalid_date_keeps_open(tmp_path):
+    from doxtr_doto.cli.tui.time_mgmt import LeaveConfigScreen
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_configure_leave()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, LeaveConfigScreen)
+            screen.query_one("#leave-start").value = "not-a-date"
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            # Parse error keeps the modal open and records nothing.
+            assert isinstance(app.screen, LeaveConfigScreen)
+
+        state = ctx.global_store.load()
+        assert state.leave_days == []
+
+    _run(scenario())
+
+
+def test_top_bar_shows_next_holiday_after_recording(tmp_path):
+    """Recording a leave period updates the top-bar next-leave display."""
+    from doxtr_doto.cli.global_state import LeaveEntry
+    from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+    ctx = _make_ctx(tmp_path, [])
+    # Seed a far-future holiday so it is always "upcoming" regardless of today.
+    state = ctx.global_store.load()
+    state.leave_days = [
+        LeaveEntry(date=f"2099-07-0{d}", kind="holiday", note="Summer") for d in (6, 7, 8)
+    ]
+    ctx.global_store.save(state)
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            line = app.query_one(NextHolidayLine)
+            rendered = str(line.render())
+            assert "Holiday" in rendered
+            assert "2099-07-06" in rendered
+            assert "Summer" in rendered
+
+    _run(scenario())
+
+
+def test_top_bar_next_holiday_none_when_no_leave(tmp_path):
+    from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            line = app.query_one(NextHolidayLine)
+            assert "none" in str(line.render())
+
+    _run(scenario())
+
+
+def test_top_bar_updates_after_leave_configurator(tmp_path):
+    from doxtr_doto.cli.tui.time_mgmt import LeaveConfigScreen
+    from doxtr_doto.cli.tui.widgets import NextHolidayLine
+
+    ctx = _make_ctx(tmp_path, [])
+
+    async def scenario() -> None:
+        app = DotoApp(ctx)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert "none" in str(app.query_one(NextHolidayLine).render())
+            app.action_configure_leave()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, LeaveConfigScreen)
+            screen.query_one("#leave-start").value = "2099-12-24"
+            screen.query_one("#leave-end").value = "2099-12-26"
+            screen.query_one("#leave-note").value = "Winter"
+            screen.query_one("#leave-weekends").value = "yes"
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            rendered = str(app.query_one(NextHolidayLine).render())
+            assert "2099-12-24" in rendered
+            assert "Winter" in rendered
+
+    _run(scenario())

@@ -114,6 +114,7 @@ from doxtr_doto.cli.commands.done import done
 from doxtr_doto.cli.commands.export import export
 from doxtr_doto.cli.commands.git import git_cmd
 from doxtr_doto.cli.commands.init import init
+from doxtr_doto.cli.commands.leave import leave
 from doxtr_doto.cli.commands.list import list_tasks
 from doxtr_doto.cli.commands.log import log
 from doxtr_doto.cli.commands.next import next_task
@@ -143,6 +144,7 @@ cli.add_command(deps)
 cli.add_command(done)
 cli.add_command(export)
 cli.add_command(init)
+cli.add_command(leave)
 cli.add_command(list_tasks, name="list")
 cli.add_command(next_task, name="next")
 cli.add_command(reopen)
